@@ -1,0 +1,29 @@
+{
+  "machine": {"nproc": 16, "gpu_mem_gb": 80},
+  "runs": {
+    "0.8B__16": {
+      "model": "0.8B",
+      "effective_batch": 16,
+      "phase": "done",
+      "tried_extensions": {"padding_free": "active", "gradient_checkpointing": "active"},
+      "phase1_best": {"bs": 16, "ga": 1, "throughput": 0.1691},
+      "phase2_best": {"bs": 16, "ga": 1, "num_workers": 1, "prefetch_factor": 4, "dataset_num_proc": 4, "throughput": 0.1691}
+    },
+    "0.8B__32": {
+      "model": "0.8B",
+      "effective_batch": 32,
+      "phase": "done",
+      "tried_extensions": {"padding_free": "active", "gradient_checkpointing": "active"},
+      "phase1_best": {"bs": 16, "ga": 2, "throughput": 0.0834},
+      "phase2_best": {"bs": 16, "ga": 2, "num_workers": 8, "prefetch_factor": 2, "dataset_num_proc": 4, "throughput": 0.0836}
+    },
+    "0.8B__64": {
+      "model": "0.8B",
+      "effective_batch": 64,
+      "phase": "done",
+      "tried_extensions": {"padding_free": "active", "gradient_checkpointing": "active"},
+      "phase1_best": {"bs": 16, "ga": 4, "throughput": 0.0454},
+      "phase2_best": {"bs": 16, "ga": 4, "num_workers": 2, "prefetch_factor": 2, "dataset_num_proc": 4, "throughput": 0.0455}
+    }
+  }
+}
