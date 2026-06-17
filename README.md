@@ -24,15 +24,21 @@ The result is a `swift sft` config you can drop directly into production.
 
 ---
 
-## Results — Qwen3.5-0.8B on H100 80GB
+## Results — Qwen3.5-0.8B on 80GB GPU
 
-| Effective batch | bs | ga | workers | prefetch | dataset_proc | Throughput |
-|---|---|---|---|---|---|---|
-| 16 | 16 | 1 | 1 | 4 | 4 | 0.169 samp/s |
-| 32 | 16 | 2 | 8 | 2 | 4 | 0.084 samp/s |
-| 64 | 16 | 4 | 2 | 2 | 4 | 0.046 samp/s |
+Throughput is `effective_batch / mean_s_it` (= `bs × ga / s_it`). An earlier version divided
+by `bs` alone, which crowned `bs=16 + gradient_checkpointing` — in fact the **slowest** config
+measured. Corrected ranking (`reported × ga`, see `optimal_configs.md` / `notes.md`):
 
-Both `padding_free` and `gradient_checkpointing` were required to reach bs=16 — without them the run OOMs at bs=4. Dataloader tuning added <2%, confirming the GPU is the bottleneck on this model/hardware combination.
+| Effective batch | bs | ga | gc  | Throughput |
+|---|---|---|---|---|
+| 16 | 2 | 8  | off | ~0.59 samp/s |
+| 32 | 2 | 16 | off | ~0.54 samp/s |
+| 64 | 2 | 32 | off | ~0.58 samp/s |
+
+The GPU saturates by `bs=2`; pushing `bs` higher buys nothing, and the `gradient_checkpointing`
+it forced on only added ~30% recompute. `padding_free` alone fits bs=2 — no gc needed. True
+throughput is flat across effective batches (it's GPU-bound); dataloader tuning added <2%.
 
 Pick the effective batch row that matches your training quality requirements (larger effective batch = less gradient noise).
 
@@ -46,12 +52,9 @@ Drop these overrides on top of your `sft_base.yaml`:
 <summary>eff_batch=16</summary>
 
 ```yaml
-per_device_train_batch_size: 16
-gradient_accumulation_steps: 1
-dataloader_num_workers: 1
-dataloader_prefetch_factor: 4
-dataset_num_proc: 4
-gradient_checkpointing: true
+per_device_train_batch_size: 2
+gradient_accumulation_steps: 8
+gradient_checkpointing: false
 padding_free: true
 dataloader_persistent_workers: true
 ```
@@ -61,12 +64,9 @@ dataloader_persistent_workers: true
 <summary>eff_batch=32</summary>
 
 ```yaml
-per_device_train_batch_size: 16
-gradient_accumulation_steps: 2
-dataloader_num_workers: 8
-dataloader_prefetch_factor: 2
-dataset_num_proc: 4
-gradient_checkpointing: true
+per_device_train_batch_size: 2
+gradient_accumulation_steps: 16
+gradient_checkpointing: false
 padding_free: true
 dataloader_persistent_workers: true
 ```
@@ -76,12 +76,9 @@ dataloader_persistent_workers: true
 <summary>eff_batch=64</summary>
 
 ```yaml
-per_device_train_batch_size: 16
-gradient_accumulation_steps: 4
-dataloader_num_workers: 2
-dataloader_prefetch_factor: 2
-dataset_num_proc: 4
-gradient_checkpointing: true
+per_device_train_batch_size: 2
+gradient_accumulation_steps: 32
+gradient_checkpointing: false
 padding_free: true
 dataloader_persistent_workers: true
 ```

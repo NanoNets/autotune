@@ -1,29 +1,31 @@
 {
   "machine": {"nproc": 16, "gpu_mem_gb": 80},
+  "metric": "samples_per_s = effective_batch / mean_s_it (numerator = bs*ga; corrected from buggy bs/mean_s_it)",
+  "note": "phase1_best/phase2_best below are CORRECTED true samples/s (= reported x ga from results.tsv). Old reported bests crowned bs=16+gc, which is ~3.4x slower. See notes.md Findings A/B.",
   "runs": {
     "0.8B__16": {
       "model": "0.8B",
       "effective_batch": 16,
       "phase": "done",
-      "tried_extensions": {"padding_free": "active", "gradient_checkpointing": "active"},
-      "phase1_best": {"bs": 16, "ga": 1, "throughput": 0.1691},
-      "phase2_best": {"bs": 16, "ga": 1, "num_workers": 1, "prefetch_factor": 4, "dataset_num_proc": 4, "throughput": 0.1691}
+      "tried_extensions": {"padding_free": "active", "gradient_checkpointing": "harmful_not_needed"},
+      "phase1_best": {"bs": 2, "ga": 8, "throughput": 0.588},
+      "phase2_best": {"bs": 2, "ga": 8, "throughput": 0.588, "note": "dataloader unmeasured at bs=2 (Phase 2 swept at bs=16); GPU-bound so expected irrelevant"}
     },
     "0.8B__32": {
       "model": "0.8B",
       "effective_batch": 32,
       "phase": "done",
-      "tried_extensions": {"padding_free": "active", "gradient_checkpointing": "active"},
-      "phase1_best": {"bs": 16, "ga": 2, "throughput": 0.0834},
-      "phase2_best": {"bs": 16, "ga": 2, "num_workers": 8, "prefetch_factor": 2, "dataset_num_proc": 4, "throughput": 0.0836}
+      "tried_extensions": {"padding_free": "active", "gradient_checkpointing": "harmful_not_needed"},
+      "phase1_best": {"bs": 2, "ga": 16, "throughput": 0.544},
+      "phase2_best": {"bs": 2, "ga": 16, "throughput": 0.544, "note": "dataloader unmeasured at bs=2"}
     },
     "0.8B__64": {
       "model": "0.8B",
       "effective_batch": 64,
       "phase": "done",
-      "tried_extensions": {"padding_free": "active", "gradient_checkpointing": "active"},
-      "phase1_best": {"bs": 16, "ga": 4, "throughput": 0.0454},
-      "phase2_best": {"bs": 16, "ga": 4, "num_workers": 2, "prefetch_factor": 2, "dataset_num_proc": 4, "throughput": 0.0455}
+      "tried_extensions": {"padding_free": "active", "gradient_checkpointing": "harmful_not_needed"},
+      "phase1_best": {"bs": 2, "ga": 32, "throughput": 0.579},
+      "phase2_best": {"bs": 2, "ga": 32, "throughput": 0.579, "note": "dataloader unmeasured at bs=2"}
     }
   }
 }

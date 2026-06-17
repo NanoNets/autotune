@@ -120,7 +120,16 @@ scp paperspace@184.105.190.154:/tmp/probe.log /tmp/probe.log
 
 ## Metric
 
-**Throughput = `per_device_train_batch_size / mean_s_it`** (samples per second)
+**Throughput = `(per_device_train_batch_size × gradient_accumulation_steps) / mean_s_it`**
+= `effective_batch / mean_s_it` (samples per second)
+
+ms-swift logs one entry per **optimizer step**, and each optimizer step processes `bs × ga`
+micro-batch samples. So the per-step time delta covers `ga` micro-batches — the numerator must
+be `bs × ga`, not `bs`. Using `bs` alone divides true throughput by `ga`, making throughput
+*look* like it falls as `ga` rises. That is a measurement artifact, not physics.
+
+**Invariant (sanity check):** at fixed `bs`, true samples/s must be ~constant across effective
+batches — `ga` cannot change steady-state per-micro-batch work. If it isn't, suspect the metric.
 
 - Probe runs `max_steps=7`
 - Skip steps 1–2 (CUDA kernel warmup, data pipeline spin-up)
