@@ -15,6 +15,8 @@ SIM = {
     "k": 0.5,                    # compute time per sample
     "overhead": 2.0,             # fixed per-step overhead (amortized as bs grows)
     "tokens_per_sample": 512,
+    "pf_mem": 0.6, "pf_compute": 0.7,    # padding_free: 0.6x memory, 0.7x compute (a win)
+    "gc_mem": 0.4, "gc_compute": 1.5,    # gradient_checkpointing: 0.4x memory, 1.5x compute (mem cure, speed tax)
 }
 
 
@@ -25,8 +27,8 @@ def probe(config, sim=SIM):
     gc = config.get("gradient_checkpointing", False)
     pf = config.get("padding_free", False)
 
-    mem_factor = (0.4 if gc else 1.0) * (0.6 if pf else 1.0)
-    compute_factor = (1.5 if gc else 1.0) * (0.7 if pf else 1.0)
+    mem_factor = (sim["gc_mem"] if gc else 1.0) * (sim["pf_mem"] if pf else 1.0)
+    compute_factor = (sim["gc_compute"] if gc else 1.0) * (sim["pf_compute"] if pf else 1.0)
 
     peak = sim["base_mem_gb"] + bs * sim["mem_per_sample_gb"] * mem_factor
     cfg = {"bs": bs, "ga": ga, "effective_batch": eff,

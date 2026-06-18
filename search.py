@@ -104,9 +104,12 @@ class PredictivePolicy:
         return max(1, min(ceil, self.eff))                      # cap at eff (bs can't exceed it)
 
     def _finish_flagset(self, max_safe):
-        if max_safe >= self.eff or self.fi == len(self.FLAGS) - 1:
-            return None                                # reached the eff cap, or out of extensions
-        self.fi += 1                                   # escalate: pf, then pf+gc
+        # pf (fi 0->1): ALWAYS try — padding_free can be a throughput win even with no memory pressure.
+        # gc (fi 1->2): only when memory-limited — it taxes compute, so only worth it to fit a bigger bs.
+        escalate = self.fi == 0 or (self.fi == 1 and max_safe < self.eff)
+        if not escalate:
+            return None
+        self.fi += 1
         self.lo = self.hi = self.slope_f = None
         self.stage = "enter_flag"
         return self._cfg(max_safe)                     # re-probe max_safe with new flags -> learn its slope
@@ -132,6 +135,8 @@ class PredictivePolicy:
         if self.stage == "enter_flag":
             self.slope_f = (last["peak_mem_gb"] - self.base) / last_bs   # this flag set's slope
             self.lo = last_bs
+            if last_bs >= self.eff:                  # already at the eff cap with the new flags
+                return self._finish_flagset(self.eff)
             self.stage = "predict"
             return self.propose(history)
 
@@ -173,8 +178,12 @@ class PredictivePolicy:
         return None
 
 
-def search(probe_fn, policy, base_config=None):
-    """Run policy<->probe until the policy stops; return the best ok config + full trace."""
+def search(probe_fn, policy, base_config=None, metric="tokens_per_s"):
+    """Run policy<->probe until the policy stops; return the best ok config + full trace.
+
+    Ranks by `metric` (tokens/s by default — the stable throughput measure for variable-length
+    data; samples/s as the alternative). For the current search knobs the two rank identically.
+    """
     base_config = base_config or {}
     history = []
     while True:
@@ -184,5 +193,5 @@ def search(probe_fn, policy, base_config=None):
         result = probe_fn({**base_config, **proposal})
         history.append({"config": proposal, "result": result})
     oks = [h for h in history if h["result"]["status"] == "ok"]
-    best = max(oks, key=lambda h: h["result"]["samples_per_s"], default=None)
+    best = max(oks, key=lambda h: h["result"][metric], default=None)
     return {"best": best, "n_probes": len(history), "history": history}
