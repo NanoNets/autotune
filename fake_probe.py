@@ -34,8 +34,8 @@ def probe(config, sim=SIM):
 
     if peak > sim["gpu_mem_gb"]:
         return {"status": "oom", "config": cfg, "effective_batch": eff,
-                "peak_mem_gb": round(peak, 2), "samples_per_s": None,
-                "tokens_per_s": None, "gpu_util_max": None}
+                "gpu_mem_gb": sim["gpu_mem_gb"], "peak_mem_gb": round(peak, 2),
+                "samples_per_s": None, "tokens_per_s": None, "gpu_util_max": None}
 
     micro = sim["k"] * bs * compute_factor + sim["overhead"]
     sps = bs / micro  # ga-independent: the corrected-metric invariant
@@ -43,6 +43,7 @@ def probe(config, sim=SIM):
         "status": "ok",
         "config": cfg,
         "effective_batch": eff,
+        "gpu_mem_gb": sim["gpu_mem_gb"],          # total GPU memory (real telemetry the policy needs)
         "samples_per_s": round(sps, 4),
         "tokens_per_s": round(sps * sim["tokens_per_sample"], 1),
         "peak_mem_gb": round(peak, 2),
