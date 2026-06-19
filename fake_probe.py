@@ -17,6 +17,18 @@ SIM = {
     "tokens_per_sample": 512,
     "pf_mem": 0.6, "pf_compute": 0.7,    # padding_free: 0.6x memory, 0.7x compute (a win)
     "gc_mem": 0.4, "gc_compute": 1.5,    # gradient_checkpointing: 0.4x memory, 1.5x compute (mem cure, speed tax)
+    "data_rate": 1000.0,                 # dataloader samples/s per worker (high default => compute-bound)
+}
+
+# Benchmark scenarios — distinct GPU landscapes with known (brute-forced) optima, each
+# exercising a different policy path. Ground truth + regret live in test_search.py.
+#   oom_pf          — OOM forces padding_free; optimum bs=8 +pf (gc fits deeper but is slower)
+#   gc_wins         — memory so tight the optimum needs pf+gc at the ceiling (bigger bs beats gc tax)
+#   saturates_early — compute-bound, saturates below OOM; no extension ever triggers
+SIMS = {
+    "oom_pf": SIM,
+    "gc_wins": {**SIM, "k": 0.1},
+    "saturates_early": {**SIM, "gpu_mem_gb": 1000.0, "mem_per_sample_gb": 1.0, "k": 2.0, "overhead": 0.5},
 }
 
 
@@ -40,7 +52,11 @@ def probe(config, sim=SIM):
                 "samples_per_s": None, "tokens_per_s": None, "gpu_util_max": None}
 
     micro = sim["k"] * bs * compute_factor + sim["overhead"]
-    sps = bs / micro  # ga-independent: the corrected-metric invariant
+    compute_sps = bs / micro                          # GPU-side throughput (ga-independent)
+    workers = config.get("dataloader_num_workers", 1)
+    data_sps = sim["data_rate"] * workers             # dataloader delivery rate
+    sps = min(compute_sps, data_sps)                  # GPU starves if data can't keep up
+    util = round(100 * sps / compute_sps, 1)          # <100 => data-bound (more workers can help)
     return {
         "status": "ok",
         "config": cfg,
@@ -49,5 +65,5 @@ def probe(config, sim=SIM):
         "samples_per_s": round(sps, 4),
         "tokens_per_s": round(sps * sim["tokens_per_sample"], 1),
         "peak_mem_gb": round(peak, 2),
-        "gpu_util_max": round(100 * (sim["k"] * bs * compute_factor) / micro, 1),
+        "gpu_util_max": util,
     }

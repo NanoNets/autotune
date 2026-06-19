@@ -9,6 +9,8 @@ SweepPolicy is the baseline (port of program.md): double bs until OOM or saturat
 OOM with padding_free then gradient_checkpointing. It's the measuring stick a smart policy
 must beat (fewer probes to the same optimum).
 """
+import json
+import os
 
 
 class SweepPolicy:
@@ -58,11 +60,12 @@ class SweepPolicy:
         return self._after_ok(last)
 
     def _after_ok(self, last):
-        sps = last["samples_per_s"]
-        if self.prev_sps is not None:
-            improved = (sps - self.prev_sps) / self.prev_sps
-            self.sat_count = self.sat_count + 1 if improved < self.sat_threshold else 0
-        self.prev_sps = sps
+        sps = last.get("samples_per_s")
+        if sps is not None:                              # skip saturation check if unmeasurable
+            if self.prev_sps is not None:
+                improved = (sps - self.prev_sps) / self.prev_sps
+                self.sat_count = self.sat_count + 1 if improved < self.sat_threshold else 0
+            self.prev_sps = sps
         if self.sat_count >= 2 or self.bs >= self.eff:   # saturated, or bs==eff (ga=1 ceiling)
             return None
         self.bs *= 2
@@ -178,20 +181,74 @@ class PredictivePolicy:
         return None
 
 
-def search(probe_fn, policy, base_config=None, metric="tokens_per_s"):
+def _key(config):
+    return json.dumps(config, sort_keys=True)
+
+
+def search(probe_fn, policy, base_config=None, metric="tokens_per_s", state_path=None):
     """Run policy<->probe until the policy stops; return the best ok config + full trace.
 
     Ranks by `metric` (tokens/s by default — the stable throughput measure for variable-length
     data; samples/s as the alternative). For the current search knobs the two rank identically.
+
+    If `state_path` is set, every probe is journaled there (the append-only results log) and
+    re-used on a later run: a deterministic policy re-proposes the same configs, already-probed
+    ones return instantly from the journal, so an interrupted search resumes for free.
     """
     base_config = base_config or {}
+    cache = {}
+    if state_path and os.path.exists(state_path):
+        for rec in json.loads(open(state_path).read()):
+            cache[_key(rec["config"])] = rec["result"]
     history = []
     while True:
         proposal = policy.propose(history)
         if proposal is None:
             break
-        result = probe_fn({**base_config, **proposal})
-        history.append({"config": proposal, "result": result})
-    oks = [h for h in history if h["result"]["status"] == "ok"]
+        full = {**base_config, **proposal}              # key by the FULL config (model/dataset included)
+        k = _key(full)
+        result = cache.get(k) or probe_fn(full)
+        cache[k] = result
+        history.append({"config": full, "result": result})
+        if state_path:
+            with open(state_path, "w") as f:
+                json.dump(history, f, indent=2)
+    oks = [h for h in history
+           if h["result"]["status"] == "ok" and h["result"].get(metric) is not None]
     best = max(oks, key=lambda h: h["result"][metric], default=None)
     return {"best": best, "n_probes": len(history), "history": history}
+
+
+def tune_dataloader(probe_fn, best, base_config=None, workers=(2, 4, 8), util_threshold=99.0):
+    """Phase 2: sweep dataloader workers on the best config — but ONLY if it's data-bound.
+
+    If the best config's gpu_util is ~100% the GPU is compute-bound and the dataloader can't help,
+    so skip the sweep entirely (one cheap check instead of a blind grid). Otherwise try more workers
+    and keep the fastest. Returns {"skipped": reason|False, "best": record}.
+    """
+    base_config = base_config or {}
+    if best["result"].get("gpu_util_max", 100) >= util_threshold:
+        return {"skipped": "compute-bound", "best": best}
+    trials = [best]
+    for w in workers:
+        cfg = {**best["config"], "dataloader_num_workers": w}
+        trials.append({"config": cfg, "result": probe_fn({**base_config, **cfg})})
+    oks = [t for t in trials if t["result"]["status"] == "ok"]
+    winner = max(oks, key=lambda t: t["result"]["tokens_per_s"])
+    return {"skipped": False, "best": winner}
+
+
+def derive_for_effective_batches(probe_fn, best_config, eff_values, base_config=None):
+    """Given the searched optimum (bs, flags), derive + CONFIRM one config per effective_batch.
+
+    Memory is identical (same bs; ga adds no memory), so these can't OOM — the confirmation probe
+    only verifies throughput. Cost: 1 probe per eff, vs re-running the whole search per eff.
+    """
+    base_config = base_config or {}
+    bs = best_config["per_device_train_batch_size"]
+    out = []
+    for eff in eff_values:
+        cfg = {**best_config, "gradient_accumulation_steps": max(1, eff // bs)}
+        result = probe_fn({**base_config, **cfg})
+        out.append({"effective_batch": eff, "config": cfg, "result": result})
+    return out

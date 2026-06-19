@@ -15,20 +15,28 @@ app = modal.App("autotune-probe")
 # real run; the rest of the machinery is identical. attn_impl='flash_attn' needs flash-attn
 # in the image (the next build step).
 CONFIG = {
-    "model": "Qwen/Qwen2.5-0.5B-Instruct",
-    "dataset": "synthetic",              # dev track: tiny local JSONL (no hub dependency); real runs pass a hub id
+    "model": "Qwen/Qwen3.5-0.8B",        # the production-target model
+    "dataset": "synthetic",              # dev track: local JSONL (no hub dependency); real runs pass a hub id
     "per_device_train_batch_size": 2,
     "gradient_accumulation_steps": 4,   # ga>1: each global_step is one optimizer step (bs*ga samples)
     "max_steps": 7,
     "attn_impl": "sdpa",                 # real probe: "flash_attn"
 }
 
-# No flash-attn yet — it's the slow/fragile part of the image and isn't needed to validate
-# the Layer-1 machinery. Adding it (CUDA-devel base + `pip install flash-attn
-# --no-build-isolation`) is the next isolated step toward the real probe.
+# Default image: sdpa attention, no flash-attn (fast to build; fine for the dev model + the loop).
 image = (
     modal.Image.debian_slim(python_version="3.11")
-    .pip_install("torch", "ms-swift", "modelscope")
+    # Qwen3.5-0.8B is a vision model -> needs the VL stack (qwen_vl_utils, torchvision, decord)
+    .pip_install("torch", "torchvision", "ms-swift", "modelscope", "qwen_vl_utils", "decord")
+)
+
+# Flash-attn image — UNVERIFIED (needs a deploy to validate the build; ~10-20min first compile).
+# Only needed for the real model and padding_free runs. To use: set image=flash_image in the
+# @app.function decorator below and CONFIG["attn_impl"]="flash_attn".
+flash_image = (
+    modal.Image.from_registry("nvidia/cuda:12.4.1-devel-ubuntu22.04", add_python="3.11")
+    .pip_install("torch", "torchvision", "ms-swift", "modelscope", "qwen_vl_utils", "decord")
+    .pip_install("flash-attn", extra_options="--no-build-isolation")
 )
 
 hf_cache = modal.Volume.from_name("autotune-hf-cache", create_if_missing=True)
@@ -46,6 +54,7 @@ _ELAPSED_RE = re.compile(r"'elapsed_time':\s*'([^']+)'")
 _TOK_RE = re.compile(r"'num_input_tokens_seen':\s*(\d+)")
 _MEM_RE = re.compile(r"'memory\(GiB\)':\s*'([\d.]+)'")
 _SUMMARY_SPS_RE = re.compile(r"'train_samples_per_second':\s*'?([\d.]+)")
+_RUNTIME_RE = re.compile(r"'train_runtime':\s*'?([\d.]+)")
 
 
 def _to_seconds(t):
@@ -63,7 +72,8 @@ def _to_seconds(t):
 
 def parse_metrics(text, effective_batch, warmup=2):
     """Steady-state tokens/s & samples/s (effective_batch numerator) over post-warmup steps,
-    plus peak memory. summary_samples_per_s is swift's own figure (incl. warmup) as a check."""
+    plus peak memory. ALWAYS returns samples_per_s/tokens_per_s keys — falling back to swift's
+    end-of-run figures when per-step timing is too coarse (very fast steps log 0s deltas)."""
     per_step = {}  # global_step -> (elapsed_s, tokens_seen)
     for line in text.splitlines():
         ms, me, mt = _STEP_RE.search(line), _ELAPSED_RE.search(line), _TOK_RE.search(line)
@@ -71,19 +81,27 @@ def parse_metrics(text, effective_batch, warmup=2):
             per_step[int(ms.group(1))] = (_to_seconds(me.group(1)), int(mt.group(1)))
 
     summary = _SUMMARY_SPS_RE.search(text)
+    runtime = _RUNTIME_RE.search(text)
     mems = [float(m) for m in _MEM_RE.findall(text)]
+    toks = [int(t) for t in _TOK_RE.findall(text)]
     out = {
         "effective_batch": effective_batch,
         "peak_mem_gb": max(mems) if mems else None,
         "summary_samples_per_s": float(summary.group(1)) if summary else None,
+        "samples_per_s": None,
+        "tokens_per_s": None,
+        "steps_measured": 0,
     }
     post = sorted((gs, el, tok) for gs, (el, tok) in per_step.items() if gs > warmup)
-    if len(post) >= 2:
+    if len(post) >= 2 and post[-1][1] - post[0][1] > 0:           # steady-state (preferred)
         dt = post[-1][1] - post[0][1]
-        if dt > 0:
-            out["tokens_per_s"] = round((post[-1][2] - post[0][2]) / dt, 1)
-            out["samples_per_s"] = round(effective_batch * (post[-1][0] - post[0][0]) / dt, 4)
-            out["steps_measured"] = post[-1][0] - post[0][0]
+        out["tokens_per_s"] = round((post[-1][2] - post[0][2]) / dt, 1)
+        out["samples_per_s"] = round(effective_batch * (post[-1][0] - post[0][0]) / dt, 4)
+        out["steps_measured"] = post[-1][0] - post[0][0]
+    elif runtime and float(runtime.group(1)) > 0:                # fallback: swift's own figures
+        out["samples_per_s"] = out["summary_samples_per_s"]
+        if toks:
+            out["tokens_per_s"] = round(max(toks) / float(runtime.group(1)), 1)
     return out
 # ------------------------------------------------------------------------------
 
@@ -93,7 +111,7 @@ def parse_metrics(text, effective_batch, warmup=2):
     gpu="A10G",                       # plenty for a 0.5B model; cheap
     volumes={"/root/.cache/huggingface": hf_cache},
     secrets=[modal.Secret.from_name("hf-token")],
-    timeout=600,
+    timeout=1800,                     # probe RUN ceiling (not the image build, which has its own budget)
 )
 def probe(config: dict):
     import os, subprocess, threading, time, json
@@ -105,13 +123,21 @@ def probe(config: dict):
     # dev track: a tiny synthetic dataset avoids all hub/dataset-id flakiness. Real runs pass a hub id.
     ds = config["dataset"]
     if ds == "synthetic":
+        # Synthetic IMAGE data — production is OCR, so vision tokens (image resolution) drive
+        # memory + throughput. Vary resolution per sample to exercise that (and padding_free).
+        from PIL import Image
         ds = "/tmp/probe_data.jsonl"
+        os.makedirs("/tmp/imgs", exist_ok=True)
         with open(ds, "w") as f:
-            for i in range(64):  # > max_steps * effective_batch samples
-                f.write(json.dumps({"messages": [
-                    {"role": "user", "content": f"What is {i} plus {i}?"},
-                    {"role": "assistant", "content": f"{i} plus {i} is {2 * i}."},
-                ]}) + "\n")
+            for i in range(128):
+                side = 224 + (i % 6) * 48        # 224-464 px, varied (small enough to fit max_length)
+                path = f"/tmp/imgs/{i}.png"
+                Image.new("RGB", (side, side), (i % 255, 90, 160)).save(path)
+                f.write(json.dumps({
+                    "messages": [{"role": "user", "content": "<image>What text is in this image?"},
+                                 {"role": "assistant", "content": "Sample OCR transcription."}],
+                    "images": [path],
+                }) + "\n")
 
     cmd = [
         "swift", "sft",
@@ -120,6 +146,11 @@ def probe(config: dict):
         "--lazy_tokenize", "true",                   # tokenize on the fly — don't pre-tokenize the whole set
         "--per_device_train_batch_size", str(bs),
         "--gradient_accumulation_steps", str(ga),
+        "--padding_free", str(config.get("padding_free", False)).lower(),
+        "--gradient_checkpointing", str(config.get("gradient_checkpointing", False)).lower(),
+        "--dataloader_num_workers", str(config.get("dataloader_num_workers", 1)),
+        "--max_length", str(config.get("max_length", 8192)),   # room for vision tokens (OCR images)
+        "--truncation_strategy", "delete",                      # drop any over-length sample, don't crash
         "--max_steps", str(config["max_steps"]),
         "--logging_steps", "1",                      # required for per-step parsing
         "--attn_impl", config["attn_impl"],
@@ -165,12 +196,21 @@ def probe(config: dict):
     rc = proc.returncode
     status = "ok" if rc == 0 else ("oom" if "out of memory" in log.lower() else "crash")
 
+    gpu_mem_gb = None                                 # total GPU memory — PredictivePolicy needs it
+    try:
+        r = subprocess.run(["nvidia-smi", "--query-gpu=memory.total", "--format=csv,noheader,nounits"],
+                           capture_output=True, text=True, timeout=5)
+        gpu_mem_gb = round(int(r.stdout.strip().splitlines()[0]) / 1024, 1)
+    except Exception:
+        pass
+
     return {
         "status": status,
         "returncode": rc,
         "config": {"model": config["model"], "bs": bs, "ga": ga,
                    "effective_batch": eff, "attn_impl": config["attn_impl"]},
         **parse_metrics(log, eff),
+        "gpu_mem_gb": gpu_mem_gb,
         "gpu_util_max": max(gpu) if gpu else None,
         "gpu_util_mean": round(sum(gpu) / len(gpu), 1) if gpu else None,
         "step_lines": [ln for ln in log.splitlines() if "global_step/max_steps" in ln],

@@ -28,6 +28,7 @@ ENV/
 output/
 completed_runs/
 *.log
+loop_state.json
 
 # Editor / IDE
 .idea/
