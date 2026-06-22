@@ -15,28 +15,37 @@ app = modal.App("autotune-probe")
 # real run; the rest of the machinery is identical. attn_impl='flash_attn' needs flash-attn
 # in the image (the next build step).
 CONFIG = {
-    "model": "Qwen/Qwen3.5-0.8B",        # the production-target model
+    "model": "Qwen/Qwen2.5-VL-3B-Instruct",   # mature vision dev model (flash-attn works, no fla).
+                                              # Real Qwen3.5-0.8B needs the prod env's fla/triton pins.
     "dataset": "synthetic",              # dev track: local JSONL (no hub dependency); real runs pass a hub id
     "per_device_train_batch_size": 2,
     "gradient_accumulation_steps": 4,   # ga>1: each global_step is one optimizer step (bs*ga samples)
     "max_steps": 7,
-    "attn_impl": "sdpa",                 # real probe: "flash_attn"
+    "attn_impl": "flash_attn",           # required for padding_free on this model
 }
 
 # Default image: sdpa attention, no flash-attn (fast to build; fine for the dev model + the loop).
 image = (
     modal.Image.debian_slim(python_version="3.11")
-    # Qwen3.5-0.8B is a vision model -> needs the VL stack (qwen_vl_utils, torchvision, decord)
-    .pip_install("torch", "torchvision", "ms-swift", "modelscope", "qwen_vl_utils", "decord")
+    # Qwen3.5-0.8B is a vision + linear-attention model -> VL stack + flash-linear-attention
+    # (its padding_free / single-sequence path needs fla).
+    .pip_install("torch", "torchvision", "ms-swift", "modelscope", "qwen_vl_utils", "decord",
+                 "flash-linear-attention", "psutil")
 )
 
 # Flash-attn image — UNVERIFIED (needs a deploy to validate the build; ~10-20min first compile).
 # Only needed for the real model and padding_free runs. To use: set image=flash_image in the
 # @app.function decorator below and CONFIG["attn_impl"]="flash_attn".
 flash_image = (
-    modal.Image.from_registry("nvidia/cuda:12.4.1-devel-ubuntu22.04", add_python="3.11")
-    .pip_install("torch", "torchvision", "ms-swift", "modelscope", "qwen_vl_utils", "decord")
-    .pip_install("flash-attn", extra_options="--no-build-isolation")
+    modal.Image.debian_slim(python_version="3.11")
+    # Pinned torch (cu124) + a PREBUILT flash-attn wheel matched to it (cu12, torch2.5, cp311,
+    # cxx11abiFALSE = the ABI torch pip wheels use). No compilation -> no ABI/compiler mismatch.
+    # torch 2.6 (ms-swift needs FSDP2 from it) + the matching prebuilt flash-attn wheel.
+    .pip_install("torch==2.6.0", "torchvision==0.21.0",
+                 index_url="https://download.pytorch.org/whl/cu124")
+    .pip_install("ms-swift", "modelscope", "qwen_vl_utils", "decord", "flash-linear-attention", "psutil")
+    .pip_install("https://github.com/Dao-AILab/flash-attention/releases/download/v2.7.4.post1/"
+                 "flash_attn-2.7.4.post1+cu12torch2.6cxx11abiFALSE-cp311-cp311-linux_x86_64.whl")
 )
 
 hf_cache = modal.Volume.from_name("autotune-hf-cache", create_if_missing=True)
@@ -107,8 +116,8 @@ def parse_metrics(text, effective_batch, warmup=2):
 
 
 @app.function(
-    image=image,
-    gpu="A10G",                       # plenty for a 0.5B model; cheap
+    image=flash_image,                # padding_free on Qwen3.5 requires flash-attn
+    gpu="A10G",
     volumes={"/root/.cache/huggingface": hf_cache},
     secrets=[modal.Secret.from_name("hf-token")],
     timeout=1800,                     # probe RUN ceiling (not the image build, which has its own budget)
@@ -158,12 +167,23 @@ def probe(config: dict):
         "--output_dir", "/tmp/out",
         "--report_to", "none",
     ]
+    # v1 throughput knobs — only passed when set (avoid handing swift unrecognized flags on
+    # non-VLM models / older versions). packing = sample concatenation; vit_gc = ViT checkpointing.
+    for flag in ("packing", "vit_gradient_checkpointing"):
+        if config.get(flag):
+            cmd += [f"--{flag}", "true"]
     # Model from HuggingFace (fast, and caches to the mounted volume); dataset is local JSONL.
     # USE_HF=1 resolves the model on HF — ModelScope's 250kB/s model download was the timeout.
     env = {**os.environ, "CUDA_VISIBLE_DEVICES": "0", "USE_HF": "1"}
 
-    # background GPU-utilization sampler — feeds regime detection (~100% => compute-bound)
-    gpu, stop = [], threading.Event()
+    # background GPU + CPU utilization sampler — feeds regime detection: gpu ~100% => compute-bound;
+    # gpu low + cpu pinned ~100% => preprocessing wall (workers won't help) vs cpu headroom (they will).
+    gpu, cpu, stop = [], [], threading.Event()
+    try:
+        import psutil
+        psutil.cpu_percent()                         # prime the first (throwaway) reading
+    except Exception:
+        psutil = None
 
     def _sample():
         while not stop.is_set():
@@ -176,6 +196,11 @@ def probe(config: dict):
                     gpu.append(int(head[0].strip()))
             except Exception:
                 pass
+            if psutil is not None:
+                try:
+                    cpu.append(psutil.cpu_percent())
+                except Exception:
+                    pass
             time.sleep(0.5)
 
     sampler = threading.Thread(target=_sample, daemon=True)
@@ -194,7 +219,16 @@ def probe(config: dict):
 
     log = "".join(lines)
     rc = proc.returncode
-    status = "ok" if rc == 0 else ("oom" if "out of memory" in log.lower() else "crash")
+    status = "ok" if rc == 0 else ("oom" if "out of memory" in log.lower() else "error")
+
+    error_detail = None                               # the relevant failure message for the LLM
+    if status != "ok":
+        if status == "oom":
+            error_detail = next((ln.strip() for ln in log.splitlines()
+                                 if "out of memory" in ln.lower()), None)
+        if error_detail is None:                      # fall back to the last non-empty line (the exception)
+            tail = [ln.strip() for ln in log.splitlines() if ln.strip()]
+            error_detail = tail[-1] if tail else None
 
     gpu_mem_gb = None                                 # total GPU memory — PredictivePolicy needs it
     try:
@@ -213,6 +247,9 @@ def probe(config: dict):
         "gpu_mem_gb": gpu_mem_gb,
         "gpu_util_max": max(gpu) if gpu else None,
         "gpu_util_mean": round(sum(gpu) / len(gpu), 1) if gpu else None,
+        "cpu_util_max": max(cpu) if cpu else None,
+        "cpu_util_mean": round(sum(cpu) / len(cpu), 1) if cpu else None,
+        "error_detail": error_detail,
         "step_lines": [ln for ln in log.splitlines() if "global_step/max_steps" in ln],
         "log_tail": log[-3000:],
     }
@@ -225,9 +262,12 @@ def main():
     print("config:", out["config"])
     print("\n--- Layer-1 metrics ---")
     for k in ("samples_per_s", "tokens_per_s", "summary_samples_per_s",
-              "peak_mem_gb", "gpu_util_max", "gpu_util_mean", "steps_measured"):
+              "peak_mem_gb", "gpu_util_max", "gpu_util_mean",
+              "cpu_util_max", "cpu_util_mean", "steps_measured"):
         if k in out:
             print(f"  {k}: {out[k]}")
+    if out.get("error_detail"):
+        print("  error_detail:", out["error_detail"])
     if out.get("samples_per_s") is None:
         print("\n(no steady-state metrics parsed — log tail:)")
         print(out["log_tail"])
