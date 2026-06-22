@@ -33,6 +33,12 @@ never asserts a metric.
 INPUTS (fixed): model, dataset, hardware, effective_batch target
 budget        : hard probe/iteration cap (guardrail — the loop can't run away)
 
+ITER 0 — PRE-SCAN the dataset (once, before any GPU probe; see "Dataset pre-scan"):
+  python dataset_token_scan.py → token_scan.json
+  read the TRUE sequence-length distribution (image + text tokens) to seed bs sensibly and
+  to know the memory-ceiling implication before burning a probe. Does NOT change max_length
+  (off-limits); it produces the evidence for that separate, human-owned decision.
+
 ITER 1 — CHARACTERIZE (the conservative seed; this IS Phase 0, folded in):
   pick a SAFE config — small bs (1 or 2), ga = eff/bs, no extensions, attn_impl=flash_attn
   probe it → read tokens/s, peak_mem, gpu_util, cpu_util
@@ -62,6 +68,36 @@ OUTPUT: the best config found (highest tokens/s).
 LLM picks config → run on Modal → probe returns JSON → LLM reads result/failure
        ↑________________________ learn, pick next ________________________|
 ```
+
+---
+
+## Dataset pre-scan (run once, before any probe)
+
+Before the first GPU probe, measure what the model actually ingests. `dataset_token_scan.py`
+computes the **true per-sample length = image tokens + text tokens** (not text-only): image
+tokens from Qwen's `smart_resize` formula on each image's native `(W,H)` — read lazily from the
+file header, no decode — pinned to the model's real processor config; text tokens from a fast
+tokenizer pass. No model forward, no per-sample `AutoProcessor` call.
+
+```bash
+python dataset_token_scan.py --out token_scan.json          # full scan
+python dataset_token_scan.py --max-samples 2000             # quick look
+```
+
+Read `token_scan.json` and use it to:
+
+- **Seed `bs`** — the length distribution sets the activation-memory worst case; a dataset whose
+  p99 is far below `max_length` has more memory headroom than the cap implies.
+- **Know the OOM driver** — the per-sample `dominant` field (`image` vs `text`) says whether the
+  longest samples are big images or long transcripts. For VLMs this routes the ceiling-breaker:
+  image-dominated → `vit_gradient_checkpointing`; text-dominated → `gradient_checkpointing`.
+- **Inform (not decide) `max_length`** — the `cut` block quantifies what a 15K→8K cut would
+  truncate and whether it's lost *labels* (text-dominated overflow) or just downscaled pages.
+  `max_length` stays off-limits to the loop; this is the evidence for the human decision.
+
+**Caveat:** image tokens depend on `max_pixels`. The scan pins to the processor default (≈1280
+merged tokens/image ceiling); if swift sets a different `max_pixels`, pass `--max-pixels` to match,
+or the image-token counts (and the image-vs-text split) will be off.
 
 ---
 
