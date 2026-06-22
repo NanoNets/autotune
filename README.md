@@ -10,7 +10,7 @@ entirely: it searches the configuration space and surfaces the settings that max
 throughput for a given model, dataset, and GPU.
 
 It runs the same agentic pattern behind Auto-Research — **propose → evaluate → update** — against
-one well-defined objective: **maximize training throughput without OOM**. No babysitting required.
+one well-defined objective: **maximize training throughput**. No babysitting required.
 
 ---
 
@@ -20,30 +20,24 @@ one well-defined objective: **maximize training throughput without OOM**. No bab
 observe history → policy proposes next config → probe runs it → measure → record → repeat
 ```
 
-The loop is a few lines of plumbing in `search.py`; the intelligence and the measurement are
-**injected**, so the same harness runs offline or on a real GPU:
+The intelligence (which config to try next) and the measurement (one probe) are separate. An
+**LLM drives the loop**, reading two docs and running one probe at a time:
 
-```python
-search(probe_fn, policy)
-  while (config := policy.propose(history)) is not None:
-      history.append(probe_fn(config))   # run one experiment, measure
-  return best(history)                   # highest-throughput config + full trace
-```
-
-- **policy** — decides the next config. Baseline `SweepPolicy`: double batch size until OOM or
-  throughput saturates, breaking an OOM with `padding_free` then `gradient_checkpointing`. It's the
-  measuring stick a smarter (e.g. LLM-driven) policy has to beat: same optimum, fewer probes.
-- **probe_fn** — one short `swift sft` run that returns measured metrics, never raw logs. Two
-  interchangeable backends, identical contract:
-  - `fake_probe` — deterministic GPU simulator. No GPU, no Modal. Builds and tests the loop offline.
-  - `modal_probe` — the real run on a Modal serverless GPU. Pinned image + GPU SKU → reproducible,
-    production-matching measurement; per-second billing fits an idle-heavy search.
+- `search_space.md` — the knobs it may set (throughput-safe) vs the training-semantic args that are
+  off-limits, plus the fixed inputs (model, dataset, hardware, effective-batch target).
+- `program.md` — how the loop runs: the LLM picks a config, runs a probe, reads the result/failure,
+  learns, and picks the next. The first probe is a conservative seed that doubles as the
+  bottleneck-characterization read; batch-size search, OOM → `padding_free`/`gradient_checkpointing`
+  recovery, and saturation detection follow from there.
+- `modal_probe.py` — one short `swift sft` run on a Modal serverless GPU that returns measured
+  metrics JSON, never raw logs. Pinned image + GPU SKU → reproducible, production-matching
+  measurement; per-second billing fits an idle-heavy search.
 
 ```
- LOCAL (search loop + state)                    MODAL (ephemeral GPU, pure compute)
+ LOCAL (LLM drives the loop, holds state)       MODAL (ephemeral GPU, pure compute)
  ┌──────────────────────────┐   config dict     ┌─────────────────────────────────┐
- │ search() + policy        │ ────────────────▶ │ probe(config) → metrics JSON     │
- │ ranks results, picks best│ ◀──────────────── │ swift sft (7 steps), self-parsed │
+ │ LLM reads the two docs   │ ────────────────▶ │ probe(config) → metrics JSON     │
+ │ picks next config        │ ◀──────────────── │ swift sft (7 steps), self-parsed │
  └──────────────────────────┘   result JSON      └─────────────────────────────────┘
 ```
 
@@ -60,34 +54,43 @@ variable-length sequences, where samples/second is no longer comparable across c
 captures it live (`Δ tokens / Δ elapsed` over the steady-state window) alongside the corrected
 `samples/s = effective_batch / step_time` and peak memory.
 
-> Status: both probes emit tokens/s and samples/s; the policy's ranking is mid-switch from
-> samples/s → tokens/s. See `program.md`.
+> The probe emits tokens/s and samples/s; the loop **ranks by tokens/s** (samples/s is kept as
+> a secondary cross-check).
 
 ---
 
 ## Run it
 
-```bash
-# Offline — exercise the whole loop with no GPU (asserts the simulator's known optimum)
-python test_search.py
+One-time setup: `pip install modal` then `modal setup` (writes `~/.modal.toml`), and store an HF
+token as a Modal secret so the probe can pull the model/dataset:
 
-# Real — one probe end-to-end on a Modal GPU
-source venv/bin/activate
-modal run modal_probe.py
+```bash
+modal secret create hf-token HF_TOKEN=hf_...
 ```
 
-Modal auth lives in `~/.modal.toml` (`modal setup`); the HF token lives in the Modal Secret
-`hf-token`. The dev track runs a public model + synthetic data so it works with no special access;
-the real run swaps in the work model/dataset and `attn_impl='flash_attn'`.
+Then drive the loop one probe at a time — set the config in `modal_probe.py`'s `CONFIG` dict and run:
+
+```bash
+source venv/bin/activate
+modal run modal_probe.py     # runs CONFIG once, prints the metrics JSON the LLM reads
+```
+
+Read the result, pick the next config per `program.md`, repeat. The dev track uses a public vision
+model + synthetic image data (no special access needed) — swap the model/dataset in `CONFIG` for the
+real run.
 
 ---
 
 ## Status
 
-The probe backend is mid-migration from a persistent SSH VM to Modal serverless GPUs (`MODAL_MIGRATION.md`).
-The dev track works end-to-end; wiring `search()` to drive the Modal probe and re-baselining real
-models against the corrected metric are the remaining steps. The prior VM-derived results and the old
-SSH runbook are preserved under `archive/`.
+The v1 loop is defined in `search_space.md` + `program.md` and driven against `modal_probe.py`,
+which returns the corrected tokens/s metric plus peak memory, GPU/CPU utilization, and structured
+failure detail. Deploy-verifying one end-to-end probe (and the flash-attn image build) is the
+next step.
+
+Remaining: the production model (`Qwen3.5-0.8B` — a linear-attention model that needs the prod env's
+`flash-linear-attention`/`triton` pins) and a real re-baseline against the work dataset (`nn_ocr4`)
+under the work Modal workspace.
 
 ---
 
@@ -95,10 +98,7 @@ SSH runbook are preserved under `archive/`.
 
 | File | Purpose |
 |---|---|
-| `search.py` | The loop — `search(probe_fn, policy)` harness + baseline `SweepPolicy` |
-| `modal_probe.py` | Real probe: runs `swift sft` on a Modal GPU, returns metrics JSON |
-| `fake_probe.py` | Offline GPU simulator with the same probe contract |
-| `test_search.py` | Runs the loop against the simulator; asserts it finds the known optimum |
-| `program.md` | How the loop runs today — the authoritative runbook |
+| `search_space.md` | The knobs — throughput-safe (searchable) vs training-semantic (off-limits) + fixed inputs |
+| `program.md` | How the loop runs — the authoritative runbook |
+| `modal_probe.py` | The probe: runs `swift sft` on a Modal GPU, returns metrics JSON |
 | `MODAL_MIGRATION.md` | The VM → Modal migration plan and probe (Layer-1) contract |
-| `archive/` | Pre-Modal SSH loop, prior results, and the old runbook |

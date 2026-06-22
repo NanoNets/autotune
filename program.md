@@ -302,17 +302,3 @@ When the search converges (plateau or budget), print and save the best config:
 ```
 
 This is the direct input to the production training run.
-
----
-
-## Out of scope for v1 (deferred)
-
-- Bayesian optimization / bisection inner solver.
-- Pre-scanning the dataset for the worst-case memory ceiling — v1 handles OOM **reactively**
-  (hit it, read the error, back off).
-- Learned cost model / surrogate.
-- Cross-run learning database.
-
-> The Python search harness (`search.py`'s `SweepPolicy`/`PredictivePolicy`, `run_search.py`) is
-> the deterministic-solver direction from the fuller plan. It is **set aside for v1** — v1 puts the
-> LLM in the driver's seat reading these two docs and driving `modal_probe.py` directly.
