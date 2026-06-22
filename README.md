@@ -29,16 +29,16 @@ The intelligence (which config to try next) and the measurement (one probe) are 
   learns, and picks the next. The first probe is a conservative seed that doubles as the
   bottleneck-characterization read; batch-size search, OOM → `padding_free`/`gradient_checkpointing`
   recovery, and saturation detection follow from there.
-- `modal_probe.py` — one short `swift sft` run on a Modal serverless GPU that returns measured
-  metrics JSON, never raw logs. Pinned image + GPU SKU → reproducible, production-matching
-  measurement; per-second billing fits an idle-heavy search.
+- `probe_runner.py` — one short `swift sft` run that returns measured metrics JSON, never raw logs.
+  It runs on a **GPU backend you pick** (`AUTOTUNE_BACKEND`): Modal serverless, or your own SSH GPU
+  VM (Paperspace, Lambda Labs, …). Same pipeline, same metrics — only *where it runs* changes.
 
 ```
- LOCAL (LLM drives the loop, holds state)       MODAL (ephemeral GPU, pure compute)
+ LOCAL (LLM drives the loop, holds state)       GPU BACKEND (ephemeral, pure compute)
  ┌──────────────────────────┐   config dict     ┌─────────────────────────────────┐
  │ LLM reads the two docs   │ ────────────────▶ │ probe(config) → metrics JSON     │
  │ picks next config        │ ◀──────────────── │ swift sft (7 steps), self-parsed │
- └──────────────────────────┘   result JSON      └─────────────────────────────────┘
+ └──────────────────────────┘   result JSON      └── Modal  ·  or  ·  SSH VM ───────┘
 ```
 
 Each probe is just **7 optimizer steps** — enough for a stable throughput signal (the first 2 are
@@ -61,32 +61,34 @@ captures it live (`Δ tokens / Δ elapsed` over the steady-state window) alongsi
 
 ## Run it
 
-One-time setup: `pip install modal` then `modal setup` (writes `~/.modal.toml`), and store an HF
-token as a Modal secret so the probe can pull the model/dataset:
+One-time setup: `pip install -r requirements.txt`, then configure the backend you want in `.env`
+(copy from `.env.example`):
 
-```bash
-modal secret create hf-token HF_TOKEN=hf_...
-```
+- **Modal** (`AUTOTUNE_BACKEND=modal`): `modal setup` (writes `~/.modal.toml`) and store an HF token
+  as a Modal secret — `modal secret create hf-token HF_TOKEN=hf_...`.
+- **SSH VM** (`AUTOTUNE_BACKEND=ssh`): set `AUTOTUNE_SSH_HOST` / `AUTOTUNE_SSH_USER` and one of
+  `AUTOTUNE_SSH_KEY` (Lambda) or `AUTOTUNE_SSH_PASSWORD` (Paperspace), plus `AUTOTUNE_SSH_ACTIVATE`.
 
-Then drive the loop one probe at a time — set the config in `modal_probe.py`'s `CONFIG` dict and run:
+Then drive the loop one probe at a time — set the config in `config.json` and run the same command
+regardless of backend:
 
 ```bash
 source venv/bin/activate
-modal run modal_probe.py     # runs CONFIG once, prints the metrics JSON the LLM reads
+AUTOTUNE_BACKEND=modal python probe.py     # or: ssh / paperspace / lambda
 ```
 
-Read the result, pick the next config per `program.md`, repeat. The dev track uses a public vision
-model + synthetic image data (no special access needed) — swap the model/dataset in `CONFIG` for the
-real run.
+Read the printed result (also saved to `probe_result.json`), pick the next config per `program.md`,
+repeat. The dev track uses a public vision model + synthetic image data (no special access needed) —
+swap the model/dataset in `config.json` for the real run.
 
 ---
 
 ## Status
 
-The v1 loop is defined in `search_space.md` + `program.md` and driven against `modal_probe.py`,
-which returns the corrected tokens/s metric plus peak memory, GPU/CPU utilization, and structured
-failure detail. Deploy-verifying one end-to-end probe (and the flash-attn image build) is the
-next step.
+The v1 loop is defined in `search_space.md` + `program.md` and driven against a backend-agnostic
+probe (`probe_runner.py`) that returns the corrected tokens/s metric plus peak memory, GPU/CPU
+utilization, and structured failure detail — on Modal or an SSH GPU VM. Deploy-verifying one
+end-to-end probe on each backend (and the flash-attn image build) is the next step.
 
 Remaining: the production model (`Qwen3.5-0.8B` — a linear-attention model that needs the prod env's
 `flash-linear-attention`/`triton` pins) and a real re-baseline against the work dataset (`nn_ocr4`)
@@ -100,5 +102,8 @@ under the work Modal workspace.
 |---|---|
 | `search_space.md` | The knobs — throughput-safe (searchable) vs training-semantic (off-limits) + fixed inputs |
 | `program.md` | How the loop runs — the authoritative runbook |
-| `modal_probe.py` | The probe: runs `swift sft` on a Modal GPU, returns metrics JSON |
-| `MODAL_MIGRATION.md` | The VM → Modal migration plan and probe (Layer-1) contract |
+| `probe.py` | Backend-agnostic entrypoint — reads `config.json`, dispatches on `AUTOTUNE_BACKEND`, prints metrics JSON |
+| `probe_runner.py` | The portable probe pipeline — runs `swift sft`, samples GPU/CPU, parses metrics (runs on whichever backend) |
+| `modal_probe.py` | Modal backend — ships `probe_runner` to a Modal serverless GPU |
+| `vm_probe.py` | SSH-VM backend — runs `probe_runner` on a Paperspace/Lambda/any SSH GPU box |
+| `config.json` | The editable probe config (model, dataset, bs/ga, knobs) |

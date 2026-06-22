@@ -29,6 +29,7 @@ output/
 completed_runs/
 *.log
 loop_state.json
+probe_result.json
 
 # Editor / IDE
 .idea/

@@ -1,0 +1,6 @@
+# Local orchestration deps (what runs on YOUR machine to drive the loop).
+# The GPU-side deps (torch, ms-swift, psutil, pillow) live in the Modal image or the VM's
+# swift-env — they are NOT installed here.
+
+modal>=1.5        # Modal backend (AUTOTUNE_BACKEND=modal)
+paramiko>=3.0     # SSH backend  (AUTOTUNE_BACKEND=ssh — Paperspace / Lambda / any SSH GPU box)

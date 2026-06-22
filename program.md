@@ -1,9 +1,9 @@
 # autotune — ms-swift Throughput Optimizer (v1, LLM-in-the-loop)
 
 Given a **fixed setup** (model, dataset, hardware, effective-batch target), find the ms-swift
-training config with the highest throughput. An **LLM runs the loop**: pick a config → run it on
-Modal → read the structured result/failure → learn → pick the next. The knobs are defined in
-`search_space.md`; this file is *how the loop runs*.
+training config with the highest throughput. An **LLM runs the loop**: pick a config → run it on a
+GPU backend (Modal by default, or your own SSH VM) → read the structured result/failure → learn →
+pick the next. The knobs are defined in `search_space.md`; this file is *how the loop runs*.
 
 ---
 
@@ -65,53 +65,65 @@ LLM picks config → run on Modal → probe returns JSON → LLM reads result/fa
 
 ---
 
-## Setup (Modal)
+## Setup — pick a backend
 
-The agent (Claude Code) runs **locally** and holds all state. Modal is the ephemeral GPU — pure
-compute. No SSH, no scp; `modal run` ships the function and streams the result back.
+The agent (Claude Code) runs **locally** and holds all state; the probe runs on a GPU backend you
+choose with the `AUTOTUNE_BACKEND` env var. Same pipeline (`probe_runner.py`), same metrics — only
+*where the probe runs* changes. Secrets/connection come from env (`.env.example`); install the local
+deps with `pip install -r requirements.txt`.
 
-- **Auth:** `~/.modal.toml` (via `modal setup`). HF creds: the Modal Secret `hf-token`.
-- **Run from the venv:** `source venv/bin/activate && modal run modal_probe.py`.
-- **Image:** the default image (sdpa + flash-linear-attention) builds fast and is fine for the dev
-  model. `flash_image` (prebuilt flash-attn wheel) is needed for the real model + `padding_free`
-  (UNVERIFIED — needs one deploy to validate the build).
-- **Dev track** (no work access): public model `Qwen/Qwen2.5-VL-3B-Instruct` + a local synthetic
-  image JSONL on an A10G. **Real run:** swap `model`/`dataset` to the work targets (`nn_ocr4`) and
-  `attn_impl='flash_attn'`.
+**Modal** (`AUTOTUNE_BACKEND=modal`, default) — serverless GPU, no machine to manage:
 
-Machine context comes back **in the probe result**, not from a separate SSH read: `gpu_mem_gb`
-(total GPU memory) and `cpu_util` (psutil). Worker counts should not exceed `nproc // 2`.
+- Auth: `~/.modal.toml` (via `modal setup`). HF creds: the Modal Secret `hf-token`.
+- Image: the default (sdpa + flash-linear-attention) builds fast; `flash_image` (prebuilt flash-attn
+  wheel) is needed for the real model + `padding_free` (UNVERIFIED — needs one deploy).
+
+**SSH VM** (`AUTOTUNE_BACKEND=ssh`; `paperspace` / `lambda` are accepted aliases) — your own rented box:
+
+- `AUTOTUNE_SSH_HOST`, `AUTOTUNE_SSH_USER`, and ONE of `AUTOTUNE_SSH_KEY` (Lambda) or
+  `AUTOTUNE_SSH_PASSWORD` (Paperspace).
+- `AUTOTUNE_SSH_ACTIVATE` — the command to enter the swift env (e.g.
+  `source ~/envs/swift-env/bin/activate`); `HF_TOKEN` is forwarded to the box.
+- The probe uploads and runs `probe_runner.py` on the VM and reads the result back — nothing to
+  pre-install beyond ms-swift (the VM's swift-env).
+
+Dev track (either backend): public model `Qwen/Qwen2.5-VL-3B-Instruct` + synthetic image JSONL.
+Real run: set the work model + `nn_ocr4` dataset in `config.json` and `attn_impl='flash_attn'`.
+
+Machine context comes back **in the probe result** (`gpu_mem_gb`, `cpu_util`) on either backend — no
+separate machine-info step. Worker counts should not exceed `nproc // 2`.
 
 ---
 
 ## How to run a probe
 
-Each probe mirrors the old edit→run→read cycle, but Modal handles the remote, so there's no push/pull:
+**Step 1 — set the config** (Edit `config.json`):
 
-**Step 1 — set the config** (Edit tool on local `modal_probe.py`, the `CONFIG` dict):
-
-```python
-CONFIG = {
-    "model": "Qwen/Qwen2.5-VL-3B-Instruct",
-    "dataset": "synthetic",                 # or a hub id for the real run
-    "per_device_train_batch_size": 2,
-    "gradient_accumulation_steps": 4,       # bs × ga = effective_batch target
-    "max_steps": 7,
-    "attn_impl": "flash_attn",
-    # "padding_free": True, "packing": True,            # throughput levers
-    # "gradient_checkpointing": True, "vit_gradient_checkpointing": True,   # OOM ceiling-breakers
-    # "dataloader_num_workers": 4,                      # reactive, only if data-bound
+```json
+{
+  "model": "Qwen/Qwen2.5-VL-3B-Instruct",
+  "dataset": "synthetic",
+  "per_device_train_batch_size": 2,
+  "gradient_accumulation_steps": 4,
+  "max_steps": 7,
+  "attn_impl": "flash_attn"
 }
 ```
 
-**Step 2 — run it on Modal** (bash):
+Optional knobs (add as needed): `padding_free`, `packing` (throughput levers);
+`gradient_checkpointing`, `vit_gradient_checkpointing` (OOM ceiling-breakers); `dataloader_num_workers`
+(reactive, only if data-bound).
+
+**Step 2 — run it** — the same command for every backend:
 
 ```bash
-source venv/bin/activate && modal run modal_probe.py
+source venv/bin/activate
+AUTOTUNE_BACKEND=modal python probe.py      # or: ssh / paperspace / lambda
 ```
 
 **Step 3 — read the printed Layer-1 JSON.** The probe parses its OWN output on the GPU and returns
-the structured result below — the agent reads that, never the raw training log.
+the structured result below (also saved to `probe_result.json`) — the agent reads that, never the
+raw training log.
 
 ---
 
