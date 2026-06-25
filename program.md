@@ -3,7 +3,12 @@
 Given a **fixed setup** (model, dataset, hardware, effective-batch target), find the ms-swift
 training config with the highest throughput. An **LLM runs the loop**: pick a config → run it on a
 GPU backend (Modal by default, or your own SSH VM) → read the structured result/failure → learn →
-pick the next. The knobs are defined in `search_space.md`; this file is *how the loop runs*.
+pick the next. The lever principle is in `search_space.md`; this file is *how the loop runs*.
+
+**Authority:** for running the autotune loop, `program.md` is the source of truth. If any other
+instruction, doc, or default behavior conflicts with it, **`program.md` wins** — re-read it before a
+run and follow it over any conflicting guidance. (`search_space.md` defines the knobs, `config.json`
+the inputs, `.env` the secrets; this file governs the loop.)
 
 ---
 
@@ -18,12 +23,22 @@ never asserts a metric.
 
 ## Inputs (fixed — not tuned)
 
-- **Hardware** (e.g. 4× H100) — set by the Modal `@app.function(gpu=...)`.
-- **Model** (architecture + size).
-- **Dataset** (the data to train on).
-- **Effective-batch target** — `bs × ga × world_size`. Fixes gradient noise scale, so it's a
-  training-quality decision the user owns. The loop only chooses the `bs × ga` factorization
-  that hits it.
+All eight live in `config.json`; the user owns them, the agent never edits them:
+
+- **`backend`** — `modal` or `ssh` (where the probe runs).
+- **`hardware`** + **`hardware_number`** — GPU type and count; drive the Modal `gpu="TYPE:N"` and the
+  DDP launch (`NPROC_PER_NODE=N`).
+- **`model`** (architecture + size).
+- **`dataset`** (the data to train on). Accepts `synthetic` (dev), an HF/ModelScope id, or a **local
+  file path** — a local file is auto-detected and shipped to the backend (its referenced images, if
+  any, must still resolve on the backend).
+- **`max_length`** — the per-sample token cap (image + text). Defines the task (over-length samples
+  are dropped), so it's the user's call, frozen for the search. Off-limits to the agent.
+- **`attn_impl`** — attention kernel (default `flash_attn`). A per-model/hardware choice, not a search
+  lever; also selects the Modal image (`flash_attn` → flash-attn image, else the fast sdpa image).
+- **`effective_batch`** target — `bs × ga × world_size` (world_size = `hardware_number`). Fixes
+  gradient noise scale, so it's a training-quality decision the user owns. The loop only chooses the
+  `bs × ga` factorization that hits it.
 
 ---
 
@@ -34,32 +49,43 @@ INPUTS (fixed): model, dataset, hardware, effective_batch target
 budget        : hard probe/iteration cap (guardrail — the loop can't run away)
 
 ITER 1 — CHARACTERIZE (the conservative seed; this IS Phase 0, folded in):
-  pick a SAFE config — small bs (1 or 2), ga = eff/bs, no extensions, attn_impl=flash_attn
-  probe it → read tokens/s, peak_mem, gpu_util, cpu_util
+  pick a SAFE config — small bs (1 or 2), ga = eff/(bs×world_size), no extensions (flash_attn default)
+  probe it → read tokens/s, peak_mem, gpu_util, cpu_util (probe.py records it to history).
   this first read tells you the regime (compute / memory / data-bound) before pushing anything.
-  No separate Phase 0 step — the seed probe is the characterization.
+  RECORD it: the seed's `note` (what it showed) + your first `beliefs` (the regime). (No separate
+  Phase 0 step — the seed probe IS the characterization.)
 
 LOOP until throughput plateaus or budget is hit:
-  read the last result and pick the SINGLE most informative next config:
+  1. READ search_state.json — the WHOLE `history` + `best` + your last `beliefs` (NOT just the last probe).
+  2. REASON over the history before choosing (this is the judgment we're paying for):
+       REVIEW    — did the last probe match what you predicted? what does the gap teach?
+       INVARIANT — sanity-check the result against physics. If a number looks impossible (e.g. peak_mem
+                   above the GPU's memory with no OOM, or tokens/s that can't match the step times),
+                   suspect the MEASUREMENT, not the GPU — stop and check before probing further.
+       BELIEF    — where is the bottleneck now (compute / memory / data-bound) and what's the ceiling?
+       HYPOTHESIS— the single most informative next config + the tokens/s you predict for it.
+  3. PICK the single most informative next config — ONE change at a time; skip configs already tried.
+     Read the signals for what they MEAN (physics); choosing WHICH lever to pull is your judgment
+     (the full swift surface, per search_space.md — not prescribed here):
+       status == oom       → at the MEMORY ceiling: the config needs less memory (per sample, or fewer).
+       gpu_util ~100%      → COMPUTE-BOUND: the GPU is the bottleneck — the dataloader cannot help here.
+       gpu_util low,       → DATA-BOUND with slack: the GPU is starved and the CPU has room to feed it.
+         CPU headroom
+       gpu_util low,       → PREPROCESSING WALL: the GPU is starved but the CPU is maxed — feeding harder won't help.
+         CPU ~100%
+       throughput flat     → SATURATED at this ceiling: decide whether another regime is worth attacking, else stop.
+     Data-bounding is only worth checking once throughput has plateaued — until then the GPU isn't waiting on data.
+  4. PROBE it (respecting the fixed effective_batch). probe.py appends {config, result} to history.
+  5. RECORD what you learned in search_state.json:
+       - write this probe's `note` on its history entry (the trail: what THIS probe taught).
+       - UPDATE `beliefs` — carry forward what still holds, revise what this probe changed
+         (the cumulative head, not a per-probe overwrite).
 
-    status == oom          → back off: drop bs (raise ga to hold effective_batch), or enable
-                             gradient_checkpointing / vit_gradient_checkpointing
-                             (the extension protocol below)
-    gpu_util ~100%         → COMPUTE-BOUND: push throughput knobs (bs↑, padding_free, packing).
-                             Do NOT touch dataloader_num_workers — the GPU isn't waiting on data.
-    gpu_util low + CPU has → DATA-BOUND with headroom: add dataloader_num_workers.
-      headroom
-    gpu_util low + CPU     → PREPROCESSING WALL: more workers won't help. Stop tuning workers;
-      pinned ~100%           the bottleneck is the data pipeline itself, not worker count.
-    throughput plateaued   → SATURATED (see Saturation detection): stop.
-
-  probe the chosen config (always respecting the fixed effective_batch).
-
-OUTPUT: the best config found (highest tokens/s).
+OUTPUT: `best` from search_state.json (highest tokens/s).
 ```
 
 ```
-LLM picks config → run on Modal → probe returns JSON → LLM reads result/failure
+LLM picks config → run probe on backend → probe returns JSON → LLM reads result/failure
        ↑________________________ learn, pick next ________________________|
 ```
 
@@ -68,17 +94,18 @@ LLM picks config → run on Modal → probe returns JSON → LLM reads result/fa
 ## Setup — pick a backend
 
 The agent (Claude Code) runs **locally** and holds all state; the probe runs on a GPU backend you
-choose with the `AUTOTUNE_BACKEND` env var. Same pipeline (`probe_runner.py`), same metrics — only
-*where the probe runs* changes. Secrets/connection come from env (`.env.example`); install the local
-deps with `pip install -r requirements.txt`.
+choose with the `backend` field in `config.json`. Same pipeline (`probe_runner.py`), same metrics —
+only *where the probe runs* changes. Secrets/connection come from `.env` (`.env.example`, loaded via
+python-dotenv); install the local deps with `pip install -r requirements.txt`.
 
-**Modal** (`AUTOTUNE_BACKEND=modal`, default) — serverless GPU, no machine to manage:
+**Modal** (`"backend": "modal"`, default) — serverless GPU, no machine to manage:
 
 - Auth: `~/.modal.toml` (via `modal setup`). HF creds: the Modal Secret `hf-token`.
+- GPU from config: `hardware` (type) + `hardware_number` (count) → Modal `gpu="TYPE:N"`.
 - Image: the default (sdpa + flash-linear-attention) builds fast; `flash_image` (prebuilt flash-attn
   wheel) is needed for the real model + `padding_free` (UNVERIFIED — needs one deploy).
 
-**SSH VM** (`AUTOTUNE_BACKEND=ssh`; `paperspace` / `lambda` are accepted aliases) — your own rented box:
+**SSH VM** (`"backend": "ssh"`; `paperspace` / `lambda` are accepted aliases) — your own rented box:
 
 - `AUTOTUNE_SSH_HOST`, `AUTOTUNE_SSH_USER`, and ONE of `AUTOTUNE_SSH_KEY` (Lambda) or
   `AUTOTUNE_SSH_PASSWORD` (Paperspace).
@@ -88,7 +115,8 @@ deps with `pip install -r requirements.txt`.
   pre-install beyond ms-swift (the VM's swift-env).
 
 Dev track (either backend): public model `Qwen/Qwen2.5-VL-3B-Instruct` + synthetic image JSONL.
-Real run: set the work model + `nn_ocr4` dataset in `config.json` and `attn_impl='flash_attn'`.
+Real run: set the work `model` + `nn_ocr4` `dataset` in `config.json` (`attn_impl` defaults to
+`flash_attn`).
 
 Machine context comes back **in the probe result** (`gpu_mem_gb`, `cpu_util`) on either backend — no
 separate machine-info step. Worker counts should not exceed `nproc // 2`.
@@ -97,33 +125,45 @@ separate machine-info step. Worker counts should not exceed `nproc // 2`.
 
 ## How to run a probe
 
-**Step 1 — set the config** (Edit `config.json`):
+**Step 1 — `config.json` is the fixed starting point** — inputs only, human-owned, **never rewritten
+by the agent**: `backend`, `model`, `dataset`, `max_length`, `attn_impl`, `effective_batch`,
+`hardware`, `hardware_number`.
 
 ```json
 {
+  "backend": "modal",
   "model": "Qwen/Qwen2.5-VL-3B-Instruct",
   "dataset": "synthetic",
-  "per_device_train_batch_size": 2,
-  "gradient_accumulation_steps": 4,
-  "max_steps": 7,
-  "attn_impl": "flash_attn"
+  "max_length": 8192,
+  "attn_impl": "flash_attn",
+  "effective_batch": 8,
+  "hardware": "A10G",
+  "hardware_number": 1
 }
 ```
 
-Optional knobs (add as needed): `padding_free`, `packing` (throughput levers);
-`gradient_checkpointing`, `vit_gradient_checkpointing` (OOM ceiling-breakers); `dataloader_num_workers`
-(reactive, only if data-bound).
+Secrets/connection (HF_TOKEN, SSH creds) live in `.env`. The rest is automatic:
+- **Probe mechanics are fixed** in `probe_runner.py` (win over any lever): `max_steps=7`,
+  `logging_steps=1`, `truncation_strategy=delete`, `lazy_tokenize=true`,
+  `include_num_input_tokens_seen=true`, `dataloader_pin_memory/persistent_workers=true`.
+- **`ga` is derived**: `ga = effective_batch / (bs × hardware_number)` — `bs` is the one lever the
+  harness reads; a `bs` that doesn't divide it returns `status: error`.
+- `hardware` + `hardware_number` select and size the GPU (Modal `TYPE:N`; DDP via `NPROC_PER_NODE`);
+  `attn_impl` selects the Modal image.
 
-**Step 2 — run it** — the same command for every backend:
+**Step 2 — run a probe.** The agent passes THIS probe's levers (the `swift sft` args it chose — *any*
+arg except the off-limits list; `search_space.md` + the linked ms-swift docs) on the **command line**.
+`config.json` is untouched; the levers are recorded in `search_state.json` history (exactly what ran).
 
 ```bash
 source venv/bin/activate
-AUTOTUNE_BACKEND=modal python probe.py      # or: ssh / paperspace / lambda
+python probe.py                                                               # seed probe (no levers, bs=1)
+python probe.py --levers '{"per_device_train_batch_size": 2, "padding_free": true}'  # an exploration probe
 ```
 
 **Step 3 — read the printed Layer-1 JSON.** The probe parses its OWN output on the GPU and returns
-the structured result below (also saved to `probe_result.json`) — the agent reads that, never the
-raw training log.
+the structured result below; `probe.py` appends it to `search_state.json` (history). The agent reads
+that structured result, never the raw training log.
 
 ---
 
@@ -132,7 +172,12 @@ raw training log.
 ```json
 {
   "status": "ok | oom | error",
-  "config": { "model": "...", "bs": 2, "ga": 4, "effective_batch": 8, "attn_impl": "flash_attn" },
+  "config": {                       // the exact levers that ran (ms-swift CLI args) — feeds search state
+    "model": "...", "world_size": 1, "effective_batch": 8,
+    "per_device_train_batch_size": 2, "gradient_accumulation_steps": 4, "attn_impl": "flash_attn",
+    "max_length": 8192, "padding_free": true, "gradient_checkpointing": false,
+    "vit_gradient_checkpointing": false, "packing": false, "dataloader_num_workers": 1
+  },
   "tokens_per_s": 9421,            // PRIMARY metric (packed sequences)
   "samples_per_s": 0.588,          // cross-check (effective_batch numerator)
   "peak_mem_gb": 4.68,             // OOM margin
@@ -145,8 +190,9 @@ raw training log.
 ```
 
 - `status` is `oom` when the log contains "out of memory", else `error` on any non-zero exit.
-- `cpu_util` is the signal that disambiguates a data-bound GPU: **headroom → workers help; pinned
-  ~100% → preprocessing wall, workers won't.**
+- `cpu_util` is the swift process tree's CPU as a % of the cores allocated to the box (not system-wide,
+  which a container dilutes to ~0). It disambiguates a data-bound GPU: **headroom → workers help;
+  pinned ~100% → preprocessing wall, workers won't.**
 - `error_detail` carries the actual failure message so the LLM can reason about the cause
   (OOM + offending shape, recompile thrash, CUDA error) instead of guessing.
 
@@ -189,10 +235,12 @@ batches in v1 — one search per given target.)
 
 | Parameter | Role | Search space |
 |---|---|---|
-| `per_device_train_batch_size` | Samples per GPU micro-batch | 1 → 2 → 4 → … → effective_batch (double each step) |
-| `gradient_accumulation_steps` | Derived | `ga = effective_batch / bs` (halves as bs doubles) |
+| `per_device_train_batch_size` | Samples per GPU micro-batch | 1 → 2 → 4 → … (double each step) |
+| `gradient_accumulation_steps` | Derived (not set) | `ga = effective_batch / (bs × world_size)` |
 
-The sweep ceiling within the fixed effective batch is `bs = effective_batch` (ga=1). At that point
+`bs` is a **runtime lever the agent picks**, not a config field; `ga` is derived by the probe (a `bs`
+that doesn't divide `effective_batch / world_size` returns `status: error`). The sweep ceiling within
+the fixed effective batch is `bs × world_size = effective_batch` (ga=1). At that point
 there's no room to double bs further — done (or try extensions if OOM was hit first).
 
 ### Reactive dataloader tuning (folded into the loop, not a separate phase)
@@ -204,100 +252,76 @@ help — stop. Cap workers at `nproc // 2`.
 
 ---
 
-## Extension protocol (ceiling-breakers)
+## Ceiling facts (not a recipe)
 
-The extensions have different triggers because they have different natures.
+When the agent hits a ceiling, these are the *physics* of the relevant levers — what they do, not a
+sequence to follow. The agent decides what (if anything) to try.
 
-| Priority | Extension | Trigger | Throughput effect |
-|---|---|---|---|
-| 1 | `padding_free` (and/or `packing`) | OOM **or** saturation | Positive — removes wasted compute on padding, can improve throughput directly |
-| 2 | `gradient_checkpointing` (+ `vit_gradient_checkpointing` for VLMs) | OOM only | Negative — ~30% slower s/it, but a higher bs may compensate |
+- **`padding_free` / `packing`** — remove wasted compute on padding / fill the block with real tokens.
+  Positive for throughput **and** free some memory, so they can help against both compute saturation
+  and OOM.
+- **`gradient_checkpointing`** (and **`vit_gradient_checkpointing`** for a VLM's vision tower) —
+  recompute activations to **trade compute for memory** (~30% slower/step). Useful only when the
+  bottleneck is *memory* (to fit a bigger `bs`); pure overhead on an already compute-bound GPU. The
+  `vit_` variant targets image-token memory specifically.
 
-**`padding_free` on saturation:** saturation means the GPU is compute-bound at the current bs.
-`padding_free` reduces per-sample compute (no padding tokens), which may shift the saturation point
-upward and let the bs sweep continue with real gains.
-
-**`gradient_checkpointing` on saturation:** never invoke — gc adds compute to an already-saturated
-GPU. Only useful when the bottleneck is memory. For VLMs (Qwen2.5-VL / OCR), `vit_gradient_checkpointing`
-is the same trade for the vision tower when image tokens are what blows the memory ceiling.
-
-**Protocol:**
-
-```
-on OOM (before bs = effective_batch):
-  try padding_free / packing if not active:
-    → no OOM: mark active, resume sweep from oom_bs
-    → still OOM: try next
-
-  try gradient_checkpointing (+ vit_gradient_checkpointing for VLMs) if not active:
-    → no OOM: mark active, resume sweep from oom_bs
-    → still OOM: OOM ceiling is final → record best at oom_bs//2, stop
-
-on SATURATION:
-  try padding_free / packing if not active:
-    → tokens/s > best * 1.05: mark active, reset saturation counter, resume sweep
-    → no meaningful gain: saturation ceiling is final → stop
-  (never try gradient_checkpointing on saturation)
-```
-
-When a memory extension activates, resume the bs sweep — it at bs=N may beat no-extension at
-bs=N//2. The recorded best reflects the best `(bs, flags)` found.
-
----
-
-## Saturation detection
-
-Ceiling is "saturated" (not OOM) when throughput improvement over previous bs < 3%,
-for 2 consecutive doublings. Try `padding_free` extension before declaring final.
-If padding_free doesn't help, record best bs and stop.
-
-```
-bs=4,  ga=8  → 1.203 samp/sec  (+51% vs bs=2)  → continue
-bs=8,  ga=4  → 1.231 samp/sec  (+2.3% vs bs=4) → non-improvement 1
-bs=16, ga=2  → 1.235 samp/sec  (+0.3% vs bs=8) → non-improvement 2 → SATURATED → record bs=8
-```
+**Saturation** = throughput stops improving as you push the ceiling lever (gains shrink toward ~0 over
+successive steps) → you've reached the current ceiling. This is the loop's "throughput flat" branch.
 
 ---
 
 ## Guardrails
 
-- **Effective batch is fixed** — the LLM only chooses the `bs × ga` factorization that hits it.
-- **Never touch the off-limits semantic args** (`search_space.md`): lr/vit_lr/aligner_lr,
-  weight_decay, warmup, max_length, dropout, seed, bf16, and the effective-batch target.
+- **Effective batch is fixed** — the LLM only chooses the `bs × ga` factorization (`ga` derived,
+  world_size = `hardware_number`) that hits it.
+- **Inputs vs levers** — never edit the six `config.json` inputs (backend, model, dataset,
+  effective_batch, hardware, hardware_number); only the runtime levers (`bs` + flags) are the agent's.
+- **Only set knobs that don't change the model's output** — anything affecting model quality is
+  off-limits (`search_space.md`). On the agent's judgment, not code-enforced.
 - **Hard probe budget + iteration cap** so the loop can't run away.
 - **Every throughput number comes from a real probe** — the LLM never asserts a metric.
 
 ---
 
-## Search state
+## Search state — the loop's memory (`search_state.json`)
 
-Persist after every probe so an interrupted run resumes from the last state. v1 keeps this light —
-the per-run journal of probes (config → result) plus the running best. No cross-run learning DB
-(deferred).
+`probe.py` appends every probe to `search_state.json` (gitignored, local) — the durable record the
+loop reasons over. One file per **session**: `setup` is the fixed inputs, and a probe with a
+different setup starts a fresh session.
+
+**Division of ownership:**
+- **Code owns `history` + `best`** — auto-written after each probe, so they can't be forgotten.
+- **The agent owns each entry's `note`, plus `beliefs` + `active_extensions`** — it edits these; the
+  code preserves them (it only ever appends).
+
+**`note` (per probe) vs `beliefs` (whole session):**
+- `history[].note` = the **trail** — what THIS probe taught (append-only, never revised). Read it to
+  see *how* the understanding evolved.
+- `beliefs` = the **head** — the single cumulative *current* understanding across all probes, carried
+  forward and revised each iteration. Read it to decide the next probe.
 
 ```json
 {
-  "machine": { "gpu_mem_gb": 24, "gpu": "A10G" },
-  "model": "...", "effective_batch": 16,
+  "setup": { "backend": "modal", "model": "...", "dataset": "...", "max_length": 8192,
+             "effective_batch": 8, "hardware": "A10G", "hardware_number": 1 },
+  "history": [
+    { "iter": 1,
+      "config": { "...": "the exact levers that ran (identical to the probe-output config)" },
+      "result": { "status": "ok", "tokens_per_s": 9421, "samples_per_s": 0.59,
+                  "peak_mem_gb": 12.5, "gpu_util_mean": 71, "cpu_util_mean": 60,
+                  "steps_measured": 4, "error_detail": null },
+      "note": "padding_free at bs=2 → +200% vs seed; util 71% so not yet compute-bound" }
+  ],
+  "best": { "config": { "...": "..." }, "tokens_per_s": 9421 },
   "active_extensions": ["padding_free"],
-  "best": { "bs": 2, "ga": 8, "flags": ["padding_free"], "tokens_per_s": 9421 },
-  "history": [ { "config": { "...": "..." }, "result": { "...": "..." } } ]
+  "beliefs": "cumulative current understanding: regime (compute/mem/data-bound), ceilings, invariants held/violated"
 }
 ```
 
----
-
-## Results log
-
-Append one row per probe; never modify existing rows.
-
-```
-model  eff_batch  bs  ga  workers  flags                         tokens_per_s  status  notes
-3B     16         1   16  1        -                             3120          ok      seed / characterization
-3B     16         2   8   1        padding_free                  9421          ok      +200%
-3B     16         4   4   1        padding_free                  9500          ok      +0.8% → non-improvement 1
-3B     16         8   2   1        padding_free,gradient_ckpt    6100          oom→ok  gc broke ceiling but slower
-```
+- `history` is **lean** — no raw logs (they stream live during the run); `result` keeps
+  `error_detail` for failure diagnosis. `history` is the source of truth; `probe.py` also renders it
+  to **`probes.md`** (a human-readable table) each run.
+- The agent reads the **whole `history`** before each probe (see the loop) and writes `beliefs` after.
 
 ---
 

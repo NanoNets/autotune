@@ -2,5 +2,6 @@
 # The GPU-side deps (torch, ms-swift, psutil, pillow) live in the Modal image or the VM's
 # swift-env — they are NOT installed here.
 
-modal>=1.5        # Modal backend (AUTOTUNE_BACKEND=modal)
-paramiko>=3.0     # SSH backend  (AUTOTUNE_BACKEND=ssh — Paperspace / Lambda / any SSH GPU box)
+modal>=1.5        # Modal backend (config backend="modal")
+paramiko>=3.0     # SSH backend  (config backend="ssh" — Paperspace / Lambda / any SSH GPU box)
+python-dotenv>=1.0  # load secrets from .env (HF_TOKEN, SSH creds) into the environment

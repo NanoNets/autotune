@@ -1,15 +1,14 @@
-"""Portable autotune probe — the single on-box pipeline, backend-agnostic.
+"""Portable autotune probe — backend-agnostic.
 
-Runs one short ms-swift training probe on whatever GPU box it executes on, samples GPU/CPU
-utilization, parses ms-swift's OWN output, and returns the structured Layer-1 result. No Modal,
-no SSH here — just the probe itself, so both backends run identical code:
+Runs one short ms-swift training probe on the local GPU, samples GPU/CPU utilization, parses
+ms-swift's own log output, and returns a structured result. The same code runs on every backend:
 
   - `modal_probe.py` imports `run_probe` and runs it inside a Modal GPU function.
   - `vm_probe.py` uploads this file to an SSH GPU VM and runs it as a script:
         python probe_runner.py config.json result.json
     (swift output streams to stdout; the JSON result is written to result.json)
 
-The metrics come from swift's logs + nvidia-smi/psutil — nothing here is tied to a provider.
+Metrics come from swift's logs plus nvidia-smi/psutil — nothing here is tied to a provider.
 """
 import json
 import os
@@ -19,11 +18,11 @@ import sys
 import threading
 import time
 
-# --- log parsing: corrected metric + memory (locked to swift's real format) -----
-# Confirmed live: {'global_step/max_steps': '3/7', 'elapsed_time': '4s',
-#                  'num_input_tokens_seen': 5518, 'memory(GiB)': '4.68', ...}
-# global_step = OPTIMIZER step → samples/step = effective_batch (bs*ga). elapsed_time is
-# humanized ('2s', '1m 30s'); num_input_tokens_seen is cumulative (unquoted int).
+# --- log parsing: metrics + memory from swift's per-step log lines, e.g.: -------
+#   {'global_step/max_steps': '3/7', 'elapsed_time': '4s',
+#    'num_input_tokens_seen': 5518, 'memory(GiB)': '4.68', ...}
+# global_step is the optimizer step; elapsed_time is humanized ('2s', '1m 30s');
+# num_input_tokens_seen is cumulative.
 _STEP_RE = re.compile(r"'global_step/max_steps':\s*'(\d+)/\d+'")
 _ELAPSED_RE = re.compile(r"'elapsed_time':\s*'([^']+)'")
 _TOK_RE = re.compile(r"'num_input_tokens_seen':\s*(\d+)")
@@ -46,9 +45,8 @@ def _to_seconds(t):
 
 
 def parse_metrics(text, effective_batch, warmup=2):
-    """Steady-state tokens/s & samples/s (effective_batch numerator) over post-warmup steps,
-    plus peak memory. ALWAYS returns samples_per_s/tokens_per_s keys — falling back to swift's
-    end-of-run figures when per-step timing is too coarse (very fast steps log 0s deltas)."""
+    """Steady-state tokens/s and samples/s over post-warmup steps, plus peak memory.
+    Falls back to swift's end-of-run figures when per-step timing is too coarse to measure."""
     per_step = {}  # global_step -> (elapsed_s, tokens_seen)
     for line in text.splitlines():
         ms, me, mt = _STEP_RE.search(line), _ELAPSED_RE.search(line), _TOK_RE.search(line)
@@ -82,13 +80,13 @@ def parse_metrics(text, effective_batch, warmup=2):
 
 
 def _synthetic_dataset(path="/tmp/probe_data.jsonl"):
-    """Tiny synthetic IMAGE dataset (dev) — production is OCR, so vision tokens (image resolution)
-    drive memory + throughput. Vary resolution per sample to exercise that (and padding_free)."""
+    """Tiny synthetic image dataset for dev runs. Resolution varies per sample so vision-token
+    count — the main driver of memory and throughput for this OCR workload — varies too."""
     from PIL import Image
     os.makedirs("/tmp/imgs", exist_ok=True)
     with open(path, "w") as f:
         for i in range(128):
-            side = 224 + (i % 6) * 48            # 224-464 px, varied (small enough to fit max_length)
+            side = 224 + (i % 6) * 48            # 224-464 px
             p = f"/tmp/imgs/{i}.png"
             Image.new("RGB", (side, side), (i % 255, 90, 160)).save(p)
             f.write(json.dumps({
@@ -100,69 +98,105 @@ def _synthetic_dataset(path="/tmp/probe_data.jsonl"):
 
 
 def run_probe(config: dict) -> dict:
-    """Run one probe and return the Layer-1 result dict. Identical on every backend."""
-    bs = config["per_device_train_batch_size"]
-    ga = config["gradient_accumulation_steps"]
-    eff = bs * ga
+    """Run one probe and return the result dict. Identical on every backend."""
+    # Levers: arbitrary `swift sft` CLI args, passed through unmodified. Harness-managed args
+    # (model/dataset/max_length/ga/plumbing) stay protected because `fixed` below wins on overlap.
+    levers = dict(config.get("levers", {}))
 
-    # dev track: a tiny synthetic dataset avoids all hub/dataset-id flakiness. Real runs pass a hub id.
+    bs = int(levers.get("per_device_train_batch_size", 1))   # read by the harness to derive ga
+    eff = config["effective_batch"]                          # fixed input
+    n_gpu = int(config.get("hardware_number", 1))            # DDP world_size
+    attn = config.get("attn_impl", "flash_attn")             # fixed input (also selects the Modal image)
+    denom = bs * n_gpu
+    if denom == 0 or eff % denom:                            # eff = bs * ga * world_size → ga must be a +int
+        return {"status": "error",
+                "config": {"model": config["model"], "per_device_train_batch_size": bs, "attn_impl": attn,
+                           "world_size": n_gpu, "effective_batch": eff, "gradient_accumulation_steps": None},
+                "error_detail": f"effective_batch {eff} not divisible by bs*hardware_number "
+                                f"({bs}*{n_gpu}={denom}) — pick a bs that divides it"}
+    ga = eff // denom
+
+    # Dataset resolution: an inlined local file (dataset_file, from probe.py) is materialized here;
+    # 'synthetic' generates a local dev file; anything else is an HF/MS id swift resolves on the box.
     ds = config["dataset"]
-    if ds == "synthetic":
+    if config.get("dataset_file") is not None:
+        ds = f"/tmp/{os.path.basename(ds)}"
+        with open(ds, "w") as f:
+            f.write(config["dataset_file"])
+    elif ds == "synthetic":
         ds = _synthetic_dataset()
 
-    cmd = [
-        "swift", "sft",
-        "--model", config["model"],
-        "--dataset", ds,
-        "--lazy_tokenize", "true",                   # tokenize on the fly — don't pre-tokenize the whole set
-        "--per_device_train_batch_size", str(bs),
-        "--gradient_accumulation_steps", str(ga),
-        "--padding_free", str(config.get("padding_free", False)).lower(),
-        "--gradient_checkpointing", str(config.get("gradient_checkpointing", False)).lower(),
-        "--dataloader_num_workers", str(config.get("dataloader_num_workers", 1)),
-        "--max_length", str(config.get("max_length", 8192)),   # room for vision tokens (OCR images)
-        "--truncation_strategy", "delete",                      # drop any over-length sample, don't crash
-        "--max_steps", str(config["max_steps"]),
-        "--logging_steps", "1",                      # required for per-step parsing
-        "--attn_impl", config["attn_impl"],
-        "--include_num_input_tokens_seen", "true",   # emits num_input_tokens_seen → tokens/s
-        "--output_dir", "/tmp/out",
-        "--report_to", "none",
-    ]
-    # v1 throughput knobs — only passed when set (avoid handing swift unrecognized flags on
-    # non-VLM models / older versions). packing = sample concatenation; vit_gc = ViT checkpointing.
-    for flag in ("packing", "vit_gradient_checkpointing"):
-        if config.get(flag):
-            cmd += [f"--{flag}", "true"]
-    # USE_HF=1 resolves the model on HF (ModelScope's slow download was the timeout). Respect any
-    # CUDA_VISIBLE_DEVICES already set by the backend (e.g. a multi-GPU VM); default to GPU 0.
+    levers.setdefault("per_device_train_batch_size", bs)    # default, overridable via levers
+
+    # Fixed plumbing the harness always sets; wins over any lever. Required for correct measurement
+    # or always-a-win defaults (search_space.md). ga is derived; bs stays in levers; attn is an input.
+    fixed = {
+        "model": config["model"], "dataset": ds,
+        "max_length": int(config.get("max_length", 8192)),  # task's token cap
+        "attn_impl": attn,                                  # fixed input, not a lever
+        "gradient_accumulation_steps": ga,
+        "max_steps": int(config.get("max_steps", 7)),       # probe mechanic
+        "lazy_tokenize": "true",
+        "truncation_strategy": "delete",                    # drop over-length samples, don't crash
+        "logging_steps": "1",                               # required for per-step parsing
+        "include_num_input_tokens_seen": "true",            # emits num_input_tokens_seen → tokens/s
+        "dataloader_pin_memory": "true",                    # always a win (search_space.md)
+        "dataloader_persistent_workers": "true",            # always a win (search_space.md)
+        "output_dir": "/tmp/out", "report_to": "none",
+    }
+    args = {**levers, **fixed}                              # fixed wins on any overlap
+    cmd = ["swift", "sft"]
+    for k, v in args.items():
+        cmd += [f"--{k}", str(v).lower() if isinstance(v, bool) else str(v)]
+    # Multi-GPU: expose N GPUs and launch N DDP processes (NPROC_PER_NODE). USE_HF=1 resolves the
+    # model on HF rather than ModelScope.
+    # NOTE: unverified on >1 GPU — assumes num_input_tokens_seen is the global token count across
+    # ranks, so tokens/s needs no ×N correction.
+    cvd = os.environ.get("CUDA_VISIBLE_DEVICES") or ",".join(str(i) for i in range(n_gpu))
     env = {**os.environ,
-           "CUDA_VISIBLE_DEVICES": os.environ.get("CUDA_VISIBLE_DEVICES", "0"),
+           "CUDA_VISIBLE_DEVICES": cvd,
+           "NPROC_PER_NODE": str(n_gpu),               # swift → torchrun with N processes (DDP)
            "USE_HF": os.environ.get("USE_HF", "1")}
 
-    # background GPU + CPU utilization sampler — feeds regime detection: gpu ~100% => compute-bound;
-    # gpu low + cpu pinned ~100% => preprocessing wall (workers won't help) vs cpu headroom (they will).
+    # Launch swift first so the sampler can watch its process tree by pid.
+    proc = subprocess.Popen(cmd, env=env, stdout=subprocess.PIPE,
+                            stderr=subprocess.STDOUT, text=True, bufsize=1)
+
+    # Background sampler: GPU util (nvidia-smi) + CPU util of the SWIFT PROCESS TREE, normalized to
+    # the cores allocated to this container/VM. Watching the tree (not the whole system) is what makes
+    # cpu_util meaningful in a container, where system-wide % is diluted by the host's many cores.
+    # Distinguishes compute-bound (GPU ~100%) from data-bound (GPU low; CPU headroom → workers help,
+    # CPU pinned → preprocessing wall).
     gpu, cpu, stop = [], [], threading.Event()
     try:
         import psutil
-        psutil.cpu_percent()                         # prime the first (throwaway) reading
     except Exception:
         psutil = None
+    ncores = len(os.sched_getaffinity(0)) if hasattr(os, "sched_getaffinity") else (os.cpu_count() or 1)
 
     def _sample():
+        seen = {}                                       # pid -> primed Process (cpu_percent needs a prior reading)
         while not stop.is_set():
             try:
                 r = subprocess.run(
                     ["nvidia-smi", "--query-gpu=utilization.gpu", "--format=csv,noheader,nounits"],
                     capture_output=True, text=True, timeout=2)
-                head = r.stdout.strip().splitlines()
-                if head and head[0].strip().isdigit():
-                    gpu.append(int(head[0].strip()))
+                vals = [int(x.strip()) for x in r.stdout.strip().splitlines() if x.strip().isdigit()]
+                if vals:
+                    gpu.append(round(sum(vals) / len(vals)))    # mean util across all N GPUs
             except Exception:
                 pass
             if psutil is not None:
                 try:
-                    cpu.append(psutil.cpu_percent())
+                    root = psutil.Process(proc.pid)
+                    total = 0.0                                  # sum of per-proc % (each up to 100×cores)
+                    for c in [root, *root.children(recursive=True)]:
+                        o = seen.get(c.pid)
+                        if o is None:
+                            c.cpu_percent(); seen[c.pid] = c     # prime; contributes 0 this round
+                        else:
+                            total += o.cpu_percent()
+                    cpu.append(round(total / ncores, 1))         # % of allocated cores (0–100)
                 except Exception:
                     pass
             time.sleep(0.5)
@@ -170,9 +204,7 @@ def run_probe(config: dict) -> dict:
     sampler = threading.Thread(target=_sample, daemon=True)
     sampler.start()
 
-    # stream swift output live (visible in the backend's logs) while collecting it
-    proc = subprocess.Popen(cmd, env=env, stdout=subprocess.PIPE,
-                            stderr=subprocess.STDOUT, text=True, bufsize=1)
+    # stream swift output live while collecting it
     lines = []
     for line in proc.stdout:
         print(line, end="", flush=True)
@@ -185,7 +217,7 @@ def run_probe(config: dict) -> dict:
     rc = proc.returncode
     status = "ok" if rc == 0 else ("oom" if "out of memory" in log.lower() else "error")
 
-    error_detail = None                               # the relevant failure message for the LLM
+    error_detail = None                               # the relevant failure message
     if status != "ok":
         if status == "oom":
             error_detail = next((ln.strip() for ln in log.splitlines()
@@ -205,8 +237,8 @@ def run_probe(config: dict) -> dict:
     return {
         "status": status,
         "returncode": rc,
-        "config": {"model": config["model"], "bs": bs, "ga": ga,
-                   "effective_batch": eff, "attn_impl": config["attn_impl"]},
+        "config": {**levers, "model": config["model"], "world_size": n_gpu, "effective_batch": eff,
+                   "attn_impl": attn, "gradient_accumulation_steps": ga},   # harness values win (match the cmd)
         **parse_metrics(log, eff),
         "gpu_mem_gb": gpu_mem_gb,
         "gpu_util_max": max(gpu) if gpu else None,
@@ -215,7 +247,7 @@ def run_probe(config: dict) -> dict:
         "cpu_util_mean": round(sum(cpu) / len(cpu), 1) if cpu else None,
         "error_detail": error_detail,
         "step_lines": [ln for ln in log.splitlines() if "global_step/max_steps" in ln],
-        "log_tail": log[-3000:],
+        "log_tail": log[-20000:],     # tail of the raw swift output (for debugging; not persisted)
     }
 
 

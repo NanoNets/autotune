@@ -1,98 +1,122 @@
 # auto_tune
 
-> Applying Karpathy's Auto-Research loop to the unglamorous-but-critical problem of training throughput.
+> The Auto-Research loop applied to GPU training throughput.
 
-**auto_tune** optimizes the performance of training and fine-tuning jobs on GPUs. A poorly
-configured run can leave 2–4x throughput on the table — entirely due to parameters like
-batch size, gradient accumulation, and dataloader workers. Finding the sweet spot manually
-means hours of trial-and-error OOM crashes and log-parsing. auto_tune eliminates that
-entirely: it searches the configuration space and surfaces the settings that maximize
+auto_tune finds the GPU training config that runs fastest. A badly configured run can leave
+2–4x throughput on the table — from parameters like batch size, gradient accumulation, and
+dataloader workers. Tuning these by hand means hours of OOM crashes and log-reading. auto_tune
+does the search for you: it explores the config space and reports the settings that maximize
 throughput for a given model, dataset, and GPU.
 
-It runs the same agentic pattern behind Auto-Research — **propose → evaluate → update** — against
-one well-defined objective: **maximize training throughput**. No babysitting required.
+It uses the Auto-Research pattern — **propose → evaluate → update** — against one objective:
+maximize training throughput.
 
 ---
 
 ## The loop
 
 ```
-observe history → policy proposes next config → probe runs it → measure → record → repeat
+read history → reason → propose next config → probe runs it → record → repeat
 ```
 
-The intelligence (which config to try next) and the measurement (one probe) are separate. An
-**LLM drives the loop**, reading two docs and running one probe at a time:
+Two jobs stay separate: deciding which config to try next, and measuring one config. An LLM
+decides; a probe measures. Each iteration the LLM reads the full history and picks the next move.
 
-- `search_space.md` — the knobs it may set (throughput-safe) vs the training-semantic args that are
-  off-limits, plus the fixed inputs (model, dataset, hardware, effective-batch target).
-- `program.md` — how the loop runs: the LLM picks a config, runs a probe, reads the result/failure,
-  learns, and picks the next. The first probe is a conservative seed that doubles as the
-  bottleneck-characterization read; batch-size search, OOM → `padding_free`/`gradient_checkpointing`
-  recovery, and saturation detection follow from there.
-- `probe_runner.py` — one short `swift sft` run that returns measured metrics JSON, never raw logs.
-  It runs on a **GPU backend you pick** (`AUTOTUNE_BACKEND`): Modal serverless, or your own SSH GPU
-  VM (Paperspace, Lambda Labs, …). Same pipeline, same metrics — only *where it runs* changes.
+- `program.md` — the runbook for how the loop runs. It tells the agent which signals to read and
+  what they mean, then asks it to propose the single most useful next config, run it, and record
+  what it learned. Guidance, not a fixed script.
+- `search_space.md` — the rule for what the agent may change. A **lever** is any `swift sft`
+  argument that affects throughput or memory but not the trained model. Which lever to try is the
+  agent's call.
+- `probe_runner.py` — one short `swift sft` run that returns measured metrics as JSON. It runs on
+  the GPU backend you pick in `config.json`: Modal serverless or your own SSH GPU VM (Paperspace,
+  Lambda Labs, …). Same pipeline and metrics either way — only *where it runs* changes.
 
 ```
  LOCAL (LLM drives the loop, holds state)       GPU BACKEND (ephemeral, pure compute)
- ┌──────────────────────────┐   config dict     ┌─────────────────────────────────┐
- │ LLM reads the two docs   │ ────────────────▶ │ probe(config) → metrics JSON     │
+ ┌──────────────────────────┐   config+levers   ┌─────────────────────────────────┐
+ │ LLM reads search_state   │ ────────────────▶ │ probe(config) → metrics JSON     │
  │ picks next config        │ ◀──────────────── │ swift sft (7 steps), self-parsed │
  └──────────────────────────┘   result JSON      └── Modal  ·  or  ·  SSH VM ───────┘
 ```
 
-Each probe is just **7 optimizer steps** — enough for a stable throughput signal (the first 2 are
-discarded as warmup), cheap enough to run dozens. OOM recovery, extension activation, and saturation
-detection are all automatic.
+Each probe runs 7 optimizer steps — enough for a stable throughput reading (the first 2 are
+dropped as warmup), cheap enough to run dozens. There's no fixed recovery flowchart: the probe
+reports the regime signals (`gpu_util`, `peak_mem`, `cpu_util`) and the agent decides what to try.
+
+---
+
+## Inputs, levers, and state
+
+- **Inputs** (`config.json`, set by you, static) — `backend`, `model`, `dataset`, `max_length`,
+  `attn_impl`, `effective_batch`, `hardware`, `hardware_number`. The effective batch is fixed; the
+  loop only picks the `bs × ga` split that hits it (`ga` is derived and multi-GPU aware).
+- **Secrets** (`.env`) — `HF_TOKEN` and any SSH credentials. Nothing else.
+- **Levers** — passed per probe on the command line (`--levers '{...}'`): any `swift sft` argument
+  except the model-changing ones. `config.json` is never rewritten.
+- **State** (`search_state.json`, one per session) — an append-only `history` of
+  `{config, result, note}`, a running `best`, and cumulative `beliefs`. `probe.py` also writes
+  `probes.md`, a readable table of the session.
 
 ---
 
 ## The metric
 
-Throughput is measured as **tokens/second** — the right objective once `padding_free` packs
-variable-length sequences, where samples/second is no longer comparable across configs. The probe
-captures it live (`Δ tokens / Δ elapsed` over the steady-state window) alongside the corrected
-`samples/s = effective_batch / step_time` and peak memory.
+Throughput is measured in **tokens/second**. That's the right objective once `padding_free` or
+`packing` pack variable-length sequences, where samples/second is no longer comparable across
+configs. The probe measures it live as `Δ tokens / Δ elapsed` over the steady-state window. It
+also reports `samples/s = effective_batch × Δsteps / Δelapsed` (so the numerator is
+`bs × ga × world_size`, not `bs`) and peak memory.
 
-> The probe emits tokens/s and samples/s; the loop **ranks by tokens/s** (samples/s is kept as
-> a secondary cross-check).
+> The loop ranks configs by tokens/s; samples/s is a cross-check.
 
 ---
 
 ## Run it
 
-One-time setup: `pip install -r requirements.txt`, then configure the backend you want in `.env`
-(copy from `.env.example`):
+One-time setup — create a virtualenv, install deps, and add secrets:
 
-- **Modal** (`AUTOTUNE_BACKEND=modal`): `modal setup` (writes `~/.modal.toml`) and store an HF token
-  as a Modal secret — `modal secret create hf-token HF_TOKEN=hf_...`.
-- **SSH VM** (`AUTOTUNE_BACKEND=ssh`): set `AUTOTUNE_SSH_HOST` / `AUTOTUNE_SSH_USER` and one of
-  `AUTOTUNE_SSH_KEY` (Lambda) or `AUTOTUNE_SSH_PASSWORD` (Paperspace), plus `AUTOTUNE_SSH_ACTIVATE`.
+```bash
+python -m venv venv && source venv/bin/activate
+pip install -r requirements.txt
+cp .env.example .env        # then fill in HF_TOKEN and any SSH creds
+```
 
-Then drive the loop one probe at a time — set the config in `config.json` and run the same command
-regardless of backend:
+Then configure your backend:
+
+- **Modal** (`"backend": "modal"`): run `modal setup` (writes `~/.modal.toml`) and store an HF
+  token as a Modal secret — `modal secret create hf-token HF_TOKEN=hf_...`. The GPU comes from
+  `hardware` + `hardware_number` in `config.json` (e.g. `"A100"` × `4` → `gpu="A100:4"`).
+- **SSH VM** (`"backend": "ssh"`): set `AUTOTUNE_SSH_HOST` and `AUTOTUNE_SSH_USER`, plus one of
+  `AUTOTUNE_SSH_KEY` (Lambda) or `AUTOTUNE_SSH_PASSWORD` (Paperspace), and `AUTOTUNE_SSH_ACTIVATE`.
+
+Set the fixed inputs in `config.json`, then run the loop one probe at a time (the backend is read
+from the config):
 
 ```bash
 source venv/bin/activate
-AUTOTUNE_BACKEND=modal python probe.py     # or: ssh / paperspace / lambda
+python probe.py                                                   # seed probe (no levers)
+python probe.py --levers '{"per_device_train_batch_size": 2, "padding_free": true}'  # exploration probe
 ```
 
-Read the printed result (also saved to `probe_result.json`), pick the next config per `program.md`,
-repeat. The dev track uses a public vision model + synthetic image data (no special access needed) —
-swap the model/dataset in `config.json` for the real run.
+Each run appends to `search_state.json` and re-renders `probes.md`. The agent reads the history,
+picks the next config per `program.md`, and repeats. The dev setup uses a public vision model and
+synthetic image data, so no special access is needed — swap the model and dataset in `config.json`
+for a real run.
 
 ---
 
 ## Status
 
-The v1 loop is defined in `search_space.md` + `program.md` and driven against a backend-agnostic
-probe (`probe_runner.py`) that returns the corrected tokens/s metric plus peak memory, GPU/CPU
-utilization, and structured failure detail — on Modal or an SSH GPU VM. Deploy-verifying one
-end-to-end probe on each backend (and the flash-attn image build) is the next step.
+The v1 loop is defined by `program.md` (the runbook) and `search_space.md` (the lever rule), and
+driven against a backend-agnostic probe (`probe_runner.py`). The probe returns tokens/s plus peak
+memory, GPU/CPU utilization, and structured failure detail — on Modal or an SSH GPU VM, single- or
+multi-GPU (DDP). Next step: verify one end-to-end probe on a real deploy and confirm the multi-GPU
+token metric is global across ranks.
 
-Remaining: the production model (`Qwen3.5-0.8B` — a linear-attention model that needs the prod env's
-`flash-linear-attention`/`triton` pins) and a real re-baseline against the work dataset (`nn_ocr4`)
-under the work Modal workspace.
+Still to do: bring in the production model (`Qwen3.5-0.8B`, which needs the prod env's
+`flash-linear-attention`/`triton` pins) and re-baseline against the work dataset (`nn_ocr4`) in the
+work Modal workspace.
 
 ---
 
@@ -100,10 +124,11 @@ under the work Modal workspace.
 
 | File | Purpose |
 |---|---|
-| `search_space.md` | The knobs — throughput-safe (searchable) vs training-semantic (off-limits) + fixed inputs |
-| `program.md` | How the loop runs — the authoritative runbook |
-| `probe.py` | Backend-agnostic entrypoint — reads `config.json`, dispatches on `AUTOTUNE_BACKEND`, prints metrics JSON |
-| `probe_runner.py` | The portable probe pipeline — runs `swift sft`, samples GPU/CPU, parses metrics (runs on whichever backend) |
+| `program.md` | How the loop runs — the runbook |
+| `search_space.md` | The lever rule — what the agent may change (principles only) |
+| `config.json` | Fixed inputs: backend, model, dataset, max_length, attn_impl, effective_batch, hardware, hardware_number |
+| `probe.py` | Entrypoint — reads `config.json` + `--levers`, dispatches on `config.backend`, writes `search_state.json` and `probes.md` |
+| `probe_runner.py` | The portable probe — runs `swift sft`, samples GPU/CPU, parses metrics (runs on whichever backend) |
 | `modal_probe.py` | Modal backend — ships `probe_runner` to a Modal serverless GPU |
 | `vm_probe.py` | SSH-VM backend — runs `probe_runner` on a Paperspace/Lambda/any SSH GPU box |
-| `config.json` | The editable probe config (model, dataset, bs/ga, knobs) |
+| `search_state.json` | Per-session memory: history + best + beliefs (gitignored; `probes.md` is the readable view) |

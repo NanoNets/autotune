@@ -2,7 +2,6 @@
 PLAN.md
 HANDOFF.md
 notes.md
-MODAL_MIGRATION.md
 CLAUDE.md
 
 # macOS
@@ -30,6 +29,11 @@ completed_runs/
 *.log
 loop_state.json
 probe_result.json
+search_state.json
+probes.md
+
+# Local datasets / customer data (never commit — may contain private images/paths)
+*.jsonl
 
 # Editor / IDE
 .idea/

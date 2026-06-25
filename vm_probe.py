@@ -1,8 +1,7 @@
 """SSH-VM backend for the autotune probe (Paperspace, Lambda Labs, any SSH GPU box).
 
-Uploads `probe_runner.py` + the config to the VM, runs it over SSH, and returns the SAME Layer-1
-JSON the Modal backend returns. Connection + secrets come entirely from env, so the user just
-exports them and picks the backend — no code changes:
+Uploads `probe_runner.py` + the config to the VM, runs it over SSH, and returns the same result
+JSON the Modal backend returns. Connection and secrets come entirely from env:
 
   AUTOTUNE_SSH_HOST              (required)  e.g. 184.105.190.154
   AUTOTUNE_SSH_USER              (required)  e.g. paperspace / ubuntu
@@ -11,7 +10,7 @@ exports them and picks the backend — no code changes:
   AUTOTUNE_SSH_ACTIVATE          (optional)  enter the swift env, e.g.
                                              'source ~/envs/swift-env/bin/activate'
   AUTOTUNE_REMOTE_DIR            (optional)  default /tmp/autotune
-  AUTOTUNE_CUDA_VISIBLE_DEVICES  (optional)  default '0'
+  AUTOTUNE_CUDA_VISIBLE_DEVICES  (optional)  default 0..N-1 from hardware_number
   HF_TOKEN                       (optional)  forwarded so swift can pull the model/dataset
 """
 import json
@@ -20,11 +19,13 @@ import posixpath
 
 
 def _echo(config):
-    bs = config.get("per_device_train_batch_size")
-    ga = config.get("gradient_accumulation_steps")
-    return {"model": config.get("model"), "bs": bs, "ga": ga,
-            "effective_batch": (bs * ga) if bs and ga else None,
-            "attn_impl": config.get("attn_impl")}
+    bs = config.get("per_device_train_batch_size", 1)
+    eff = config.get("effective_batch")
+    n = int(config.get("hardware_number", 1))
+    denom = bs * n
+    ga = (eff // denom) if (denom and eff and eff % denom == 0) else None   # mirrors probe_runner
+    return {"model": config.get("model"), "bs": bs, "ga": ga, "world_size": n,
+            "effective_batch": eff, "attn_impl": config.get("attn_impl", "flash_attn")}
 
 
 def _connect():
@@ -45,7 +46,7 @@ def _connect():
 
 
 def run_probe(config: dict) -> dict:
-    """Run one probe on the SSH VM. Returns the Layer-1 dict, or a status='error' dict on failure."""
+    """Run one probe on the SSH VM. Returns the result dict, or a status='error' dict on failure."""
     try:
         import paramiko  # noqa: F401
     except ImportError:
@@ -59,7 +60,8 @@ def run_probe(config: dict) -> dict:
 
     remote_dir = os.environ.get("AUTOTUNE_REMOTE_DIR", "/tmp/autotune")
     activate = os.environ.get("AUTOTUNE_SSH_ACTIVATE", "").strip()
-    cvd = os.environ.get("AUTOTUNE_CUDA_VISIBLE_DEVICES", "0")
+    n_gpu = int(config.get("hardware_number", 1))      # default visible devices to 0..N-1 (multi-GPU)
+    cvd = os.environ.get("AUTOTUNE_CUDA_VISIBLE_DEVICES") or ",".join(str(i) for i in range(n_gpu))
     hf = os.environ.get("HF_TOKEN", "")
     here = os.path.dirname(os.path.abspath(__file__))
 

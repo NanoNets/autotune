@@ -1,17 +1,33 @@
 """Modal backend for the autotune probe.
 
-Thin wrapper: it ships `probe_runner.py` to a Modal serverless GPU and runs the shared
-`run_probe()` there. The probe pipeline itself lives in `probe_runner.py` (same code the SSH
-backend runs), so Modal and an SSH VM measure identically.
+Ships `probe_runner.py` to a Modal serverless GPU and runs the shared `run_probe()` there — the
+same pipeline the SSH backend runs, so both backends measure identically.
 
-Usually invoked via the backend dispatcher (`AUTOTUNE_BACKEND=modal python probe.py`); can also be
-run standalone for a quick Modal-only check:  modal run modal_probe.py
+Usually invoked via the dispatcher (`python probe.py` with backend=modal); can also run
+standalone:  modal run modal_probe.py
 """
 import json
+import os
 
 import modal
 
 app = modal.App("autotune-probe")
+
+# The decorator below needs the GPU + image at IMPORT time, so they're resolved here from config —
+# the SAME `config.json` inputs a user edits. `python probe.py` exports them as env vars first (so a
+# custom config path works); standalone `modal run modal_probe.py` falls back to reading config.json.
+try:
+    _CONFIG = json.load(open("config.json"))
+except Exception:
+    _CONFIG = {}
+
+def _setting(key, env, default):
+    return os.environ.get(env) or _CONFIG.get(key, default)
+
+GPU = _setting("hardware", "AUTOTUNE_GPU", "A10G")
+GPU_COUNT = int(_setting("hardware_number", "AUTOTUNE_GPU_COUNT", 1))
+GPU_SPEC = f"{GPU}:{GPU_COUNT}" if GPU_COUNT > 1 else GPU        # Modal spec, "TYPE:N" for N>1
+ATTN = _setting("attn_impl", "AUTOTUNE_ATTN", "flash_attn")
 
 # Default image: sdpa attention, no flash-attn (fast to build; fine for the dev model + the loop).
 # `add_local_python_source` bakes probe_runner.py into the image so the function can import it.
@@ -24,8 +40,8 @@ image = (
     .add_local_python_source("probe_runner")
 )
 
-# Flash-attn image — UNVERIFIED (needs a deploy to validate the build; ~10-20min first compile).
-# Only needed for the real model and padding_free runs.
+# Flash-attn image — only needed for the real model and padding_free runs. First build just
+# downloads the large CUDA wheels (prebuilt flash-attn, no compilation) — slow once, then cached.
 flash_image = (
     modal.Image.debian_slim(python_version="3.11")
     # Pinned torch (cu124) + a PREBUILT flash-attn wheel matched to it (cu12, torch2.6, cp311,
@@ -40,13 +56,18 @@ flash_image = (
 
 hf_cache = modal.Volume.from_name("autotune-hf-cache", create_if_missing=True)
 
+# Image follows config `attn_impl`: flash_attn → the prebuilt flash-attn image, anything else → the
+# fast sdpa image. Note: padding_free/packing also need flash-attn, so only use a non-flash attn_impl
+# for an all-sdpa session.
+IMAGE = flash_image if ATTN == "flash_attn" else image
+
 
 @app.function(
-    image=flash_image,                # padding_free on Qwen3.5 requires flash-attn
-    gpu="A10G",
+    image=IMAGE,                      # from config `attn_impl` (AUTOTUNE_ATTN)
+    gpu=GPU_SPEC,                      # from config `hardware`/`hardware_number`, e.g. "A100:4"
     volumes={"/root/.cache/huggingface": hf_cache},
     secrets=[modal.Secret.from_name("hf-token")],
-    timeout=1800,                     # probe RUN ceiling (not the image build, which has its own budget)
+    timeout=1800,                     # probe run ceiling (not the image build)
 )
 def probe(config: dict):
     from probe_runner import run_probe
@@ -55,12 +76,12 @@ def probe(config: dict):
 
 @app.local_entrypoint()
 def main():
-    # Standalone Modal-only check: runs config.json once and prints the Layer-1 metrics.
+    # Standalone check: run config.json once and print the metrics.
     config = json.load(open("config.json"))
     out = probe.remote(config)
     print("status:", out["status"], "| returncode:", out["returncode"])
     print("config:", out["config"])
-    print("\n--- Layer-1 metrics ---")
+    print("\n--- metrics ---")
     for k in ("samples_per_s", "tokens_per_s", "summary_samples_per_s",
               "peak_mem_gb", "gpu_util_max", "gpu_util_mean",
               "cpu_util_max", "cpu_util_mean", "steps_measured"):

@@ -1,8 +1,10 @@
 {
+  "backend": "modal",
   "model": "Qwen/Qwen2.5-VL-3B-Instruct",
   "dataset": "synthetic",
-  "per_device_train_batch_size": 2,
-  "gradient_accumulation_steps": 4,
-  "max_steps": 7,
-  "attn_impl": "flash_attn"
+  "max_length": 8192,
+  "attn_impl": "flash_attn",
+  "effective_batch": 8,
+  "hardware": "A10G",
+  "hardware_number": 1
 }
