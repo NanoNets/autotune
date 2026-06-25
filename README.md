@@ -35,14 +35,14 @@ decides; a probe measures. Each iteration the LLM reads the full history and pic
 ```
  LOCAL (LLM drives the loop, holds state)       GPU BACKEND (ephemeral, pure compute)
  ┌──────────────────────────┐   config+levers   ┌─────────────────────────────────┐
- │ LLM reads search_state   │ ────────────────▶ │ probe(config) → metrics JSON     │
+ │ reads search_state.json  │ ────────────────▶ │ probe(config) → metrics JSON     │
  │ picks next config        │ ◀──────────────── │ swift sft (7 steps), self-parsed │
  └──────────────────────────┘   result JSON      └── Modal  ·  or  ·  SSH VM ───────┘
 ```
 
 Each probe runs 7 optimizer steps — enough for a stable throughput reading (the first 2 are
 dropped as warmup), cheap enough to run dozens. There's no fixed recovery flowchart: the probe
-reports the regime signals (`gpu_util`, `peak_mem`, `cpu_util`) and the agent decides what to try.
+reports the regime signals (`gpu_util`, `peak_mem`, `cpu_util`) and the agent uses the throughput to decide the next action.
 
 ---
 
