@@ -111,8 +111,8 @@ for a real run.
 The v1 loop is defined by `program.md` (the runbook) and `search_space.md` (the lever rule), and
 driven against a backend-agnostic probe (`probe_runner.py`). The probe returns tokens/s plus peak
 memory, GPU/CPU utilization, and structured failure detail — on Modal or an SSH GPU VM, single- or
-multi-GPU (DDP). Next step: verify one end-to-end probe on a real deploy and confirm the multi-GPU
-token metric is global across ranks.
+multi-GPU (DDP). Multi-GPU is verified end-to-end on Modal (A10G×2): tokens/s is a valid global
+metric — `num_input_tokens_seen` is all-reduced across ranks, so it needs no ×world_size correction.
 
 Still to do: bring in the production model (`Qwen3.5-0.8B`, which needs the prod env's
 `flash-linear-attention`/`triton` pins) and re-baseline against the work dataset (`nn_ocr4`) in the

@@ -29,7 +29,7 @@ GPU_COUNT = int(_setting("hardware_number", "AUTOTUNE_GPU_COUNT", 1))
 GPU_SPEC = f"{GPU}:{GPU_COUNT}" if GPU_COUNT > 1 else GPU        # Modal spec, "TYPE:N" for N>1
 ATTN = _setting("attn_impl", "AUTOTUNE_ATTN", "flash_attn")
 
-# Default image: sdpa attention, no flash-attn (fast to build; fine for the dev model + the loop).
+# Default image: sdpa attention, no flash-attn (fast to build; fine for quick iteration).
 # `add_local_python_source` bakes probe_runner.py into the image so the function can import it.
 image = (
     modal.Image.debian_slim(python_version="3.11")

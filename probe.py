@@ -57,7 +57,7 @@ def run_probe(config: dict) -> dict:
 
 def update_search_state(config: dict, out: dict, path: str = STATE_PATH):
     """Append this probe to search_state.json (history + recomputed best).
-    Agent-owned fields (each entry's `note`, plus top-level `beliefs`/`active_extensions`) are preserved."""
+    Caller-managed fields (each entry's `note`, plus top-level `beliefs`/`active_extensions`) are preserved."""
     setup = {k: config.get(k) for k in SETUP_KEYS}
     state = None
     if os.path.exists(path):
@@ -73,7 +73,7 @@ def update_search_state(config: dict, out: dict, path: str = STATE_PATH):
         "iter": len(state["history"]) + 1,
         "config": out.get("config", {}),             # exact levers that ran
         "result": {k: out.get(k) for k in RESULT_KEYS},
-        "note": "",                                  # filled in by the agent
+        "note": "",                                  # annotated later by the caller
     })
 
     ok = [h for h in state["history"]

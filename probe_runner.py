@@ -80,7 +80,7 @@ def parse_metrics(text, effective_batch, warmup=2):
 
 
 def _synthetic_dataset(path="/tmp/probe_data.jsonl"):
-    """Tiny synthetic image dataset for dev runs. Resolution varies per sample so vision-token
+    """Tiny synthetic image dataset for quick local runs. Resolution varies per sample so vision-token
     count — the main driver of memory and throughput for this OCR workload — varies too."""
     from PIL import Image
     os.makedirs("/tmp/imgs", exist_ok=True)
@@ -103,7 +103,7 @@ def run_probe(config: dict) -> dict:
     # (model/dataset/max_length/ga/plumbing) stay protected because `fixed` below wins on overlap.
     levers = dict(config.get("levers", {}))
 
-    bs = int(levers.get("per_device_train_batch_size", 1))   # read by the harness to derive ga
+    bs = int(levers.get("per_device_train_batch_size", 1))   # used to derive ga
     eff = config["effective_batch"]                          # fixed input
     n_gpu = int(config.get("hardware_number", 1))            # DDP world_size
     attn = config.get("attn_impl", "flash_attn")             # fixed input (also selects the Modal image)
@@ -128,8 +128,8 @@ def run_probe(config: dict) -> dict:
 
     levers.setdefault("per_device_train_batch_size", bs)    # default, overridable via levers
 
-    # Fixed plumbing the harness always sets; wins over any lever. Required for correct measurement
-    # or always-a-win defaults (search_space.md). ga is derived; bs stays in levers; attn is an input.
+    # Fixed plumbing always set here; wins over any lever. Required for correct measurement, or
+    # defaults that are always a win. ga is derived; bs stays in levers; attn is an input.
     fixed = {
         "model": config["model"], "dataset": ds,
         "max_length": int(config.get("max_length", 8192)),  # task's token cap
@@ -140,8 +140,8 @@ def run_probe(config: dict) -> dict:
         "truncation_strategy": "delete",                    # drop over-length samples, don't crash
         "logging_steps": "1",                               # required for per-step parsing
         "include_num_input_tokens_seen": "true",            # emits num_input_tokens_seen → tokens/s
-        "dataloader_pin_memory": "true",                    # always a win (search_space.md)
-        "dataloader_persistent_workers": "true",            # always a win (search_space.md)
+        "dataloader_pin_memory": "true",                    # always a win
+        "dataloader_persistent_workers": "true",            # always a win
         "output_dir": "/tmp/out", "report_to": "none",
     }
     args = {**levers, **fixed}                              # fixed wins on any overlap
@@ -150,8 +150,8 @@ def run_probe(config: dict) -> dict:
         cmd += [f"--{k}", str(v).lower() if isinstance(v, bool) else str(v)]
     # Multi-GPU: expose N GPUs and launch N DDP processes (NPROC_PER_NODE). USE_HF=1 resolves the
     # model on HF rather than ModelScope.
-    # NOTE: unverified on >1 GPU — assumes num_input_tokens_seen is the global token count across
-    # ranks, so tokens/s needs no ×N correction.
+    # num_input_tokens_seen is the global (all-reduced) token count across ranks, so the parsed
+    # tokens/s is already a whole-job figure and needs no ×N correction.
     cvd = os.environ.get("CUDA_VISIBLE_DEVICES") or ",".join(str(i) for i in range(n_gpu))
     env = {**os.environ,
            "CUDA_VISIBLE_DEVICES": cvd,
