@@ -14,10 +14,10 @@ the inputs, `.env` the secrets; this file governs the loop.)
 
 ## Goal
 
-Maximize **training throughput (tokens/second)** for the given setup without hitting OOM.
-tokens/s is the primary metric (packed, variable-length OCR data); samples/s is a cross-check.
-The probe measures everything and returns structured JSON — the LLM never parses raw logs and
-never asserts a metric.
+Maximize **training throughput** for the given setup without hitting OOM. Two objectives, weigh
+**both**: `tokens_per_s` and `samples_per_s` — they diverge under padding/variable-length data (see
+Metric). The probe measures everything and returns structured JSON — the LLM never parses raw logs
+and never asserts a metric.
 
 ---
 
@@ -50,7 +50,8 @@ budget        : hard probe/iteration cap (guardrail — the loop can't run away)
 
 ITER 1 — CHARACTERIZE (the conservative seed; this IS Phase 0, folded in):
   pick a SAFE config — small bs (1 or 2), ga = eff/(bs×world_size), no extensions (flash_attn default)
-  probe it → read tokens/s, peak_mem, gpu_util, cpu_util (probe.py records it to history).
+  probe it → read throughput (tokens/s + samples/s), memory.peak_mem_gb; consult utilization for the
+  regime (probe.py records it to history).
   this first read tells you the regime (compute / memory / data-bound) before pushing anything.
   RECORD it: the seed's `note` (what it showed) + your first `beliefs` (the regime). (No separate
   Phase 0 step — the seed probe IS the characterization.)
@@ -66,15 +67,19 @@ LOOP until throughput plateaus or budget is hit:
        HYPOTHESIS— the single most informative next config + the tokens/s you predict for it.
   3. PICK the single most informative next config — ONE change at a time; skip configs already tried.
      Read the signals for what they MEAN (physics); choosing WHICH lever to pull is your judgment
-     (the full swift surface, per search_space.md — not prescribed here):
+     (the full swift surface, per search_space.md — not prescribed here).
+     PRIMARY (drives the decision) — throughput Δ + memory/OOM:
        status == oom       → at the MEMORY ceiling: the config needs less memory (per sample, or fewer).
-       gpu_util ~100%      → COMPUTE-BOUND: the GPU is the bottleneck — the dataloader cannot help here.
-       gpu_util low,       → DATA-BOUND with slack: the GPU is starved and the CPU has room to feed it.
-         CPU headroom
-       gpu_util low,       → PREPROCESSING WALL: the GPU is starved but the CPU is maxed — feeding harder won't help.
-         CPU ~100%
        throughput flat     → SATURATED at this ceiling: decide whether another regime is worth attacking, else stop.
-     Data-bounding is only worth checking once throughput has plateaued — until then the GPU isn't waiting on data.
+     SECONDARY (diagnostic only — consult utilization AFTER throughput plateaus, to decide if dataloader
+     tuning is even worth a probe; do NOT let a util scalar pick a lever before then):
+       gpu idle_frac ≈ 0        → COMPUTE-BOUND: the GPU isn't waiting — the dataloader cannot help.
+       gpu idle_frac high,      → DATA-BOUND with slack: GPU starved, CPU has room → workers may help.
+         cpu p90 < ~70%
+       gpu idle_frac high,      → PREPROCESSING WALL: GPU starved but CPU pinned → more workers won't help; stop.
+         cpu p90 ~100%
+     Until throughput plateaus the GPU isn't waiting on data — don't tune the dataloader. Memory is
+     often the real wall; don't over-trust one util number.
   4. PROBE it (respecting the fixed effective_batch). probe.py appends {config, result} to history.
   5. RECORD what you learned in search_state.json:
        - write this probe's `note` on its history entry (the trail: what THIS probe taught).
@@ -118,8 +123,8 @@ Dev track (either backend): public model `Qwen/Qwen2.5-VL-3B-Instruct` + synthet
 Real run: set the work `model` + `nn_ocr4` `dataset` in `config.json` (`attn_impl` defaults to
 `flash_attn`).
 
-Machine context comes back **in the probe result** (`gpu_mem_gb`, `cpu_util`) on either backend — no
-separate machine-info step. Worker counts should not exceed `nproc // 2`.
+Machine context comes back **in the probe result** (`memory.gpu_mem_gb`, `utilization.cpu`) on either
+backend — no separate machine-info step. Worker counts should not exceed `nproc // 2`.
 
 ---
 
@@ -178,21 +183,25 @@ that structured result, never the raw training log.
     "max_length": 8192, "padding_free": true, "gradient_checkpointing": false,
     "vit_gradient_checkpointing": false, "packing": false, "dataloader_num_workers": 1
   },
-  "tokens_per_s": 9421,            // PRIMARY metric (packed sequences)
-  "samples_per_s": 0.588,          // cross-check (effective_batch numerator)
-  "peak_mem_gb": 4.68,             // OOM margin
-  "gpu_util_max": 98, "gpu_util_mean": 71.0,   // ~100% => compute-bound
-  "cpu_util_max": 96, "cpu_util_mean": 60.0,   // best-effort (psutil); WHY the GPU is idle
-  "gpu_mem_gb": 24.0,              // total GPU memory
-  "steps_measured": 4,
-  "error_detail": null             // on failure: the relevant message (OOM shape, traceback, …)
+  "throughput": {                   // PRIMARY — weigh BOTH (they diverge under padding/packing)
+    "tokens_per_s": 1027, "samples_per_s": 0.42, "steps_measured": 4
+  },
+  "memory": { "peak_mem_gb": 70.0, "gpu_mem_gb": 79.6 },   // OOM margin + total GPU memory
+  "utilization": {                  // SECONDARY/diagnostic — null when no measurable step window (OOM/crash/too-fast)
+    "gpu": { "idle_frac": 0.05, "p10": 82, "p50": 96, "p90": 100, "max": 100 },  // idle_frac = share of window < 20% (GPU waiting)
+    "cpu": { "p10": 20, "p50": 41, "p90": 68, "max": 90 },                       // p90 = preprocessing ceiling
+    "window_steps": [3, 7], "n_samples": 18           // util is windowed to the SAME steps as tokens/s
+  },
+  "error_detail": null              // on failure: the relevant message (OOM shape, traceback, …)
 }
 ```
 
 - `status` is `oom` when the log contains "out of memory", else `error` on any non-zero exit.
-- `cpu_util` is the swift process tree's CPU as a % of the cores allocated to the box (not system-wide,
-  which a container dilutes to ~0). It disambiguates a data-bound GPU: **headroom → workers help;
-  pinned ~100% → preprocessing wall, workers won't.**
+- `utilization` is windowed to the measured steps (the load/save phases are excluded), and is
+  **diagnostic only** — consult it after throughput plateaus, never to pick a lever before then.
+  `gpu.idle_frac` = how often the GPU sat waiting (sawtooth/data-starve); `cpu.p90` is the swift
+  process-tree CPU ceiling as a % of allocated cores: **idle GPU + cpu p90 headroom → workers may
+  help; idle GPU + cpu p90 ~100% → preprocessing wall, workers won't.**
 - `error_detail` carries the actual failure message so the LLM can reason about the cause
   (OOM + offending shape, recompile thrash, CUDA error) instead of guessing.
 
@@ -200,9 +209,11 @@ that structured result, never the raw training log.
 
 ## Metric
 
-**Primary: tokens/second** (steady-state). With `padding_free` / `packing` + variable-length OCR
-data, sequences are packed and per-step token volume varies, so samples/s isn't comparable across
-configs — only tokens/s is. **Cross-check: samples/second.**
+**Two objectives — weigh both** (steady-state): `tokens_per_s` (token throughput) and `samples_per_s`
+(sample throughput). They DIVERGE under padding / variable-length data: tokens/s can be inflated by
+padding tokens (work on padding = wasted), while samples/s tracks real dataset throughput. For
+`padding_free` / `packing` especially, compare both — a config that wins on tokens/s but not
+samples/s may just be chewing more padding.
 
 - `tokens_per_s = Δ(num_input_tokens_seen) / Δelapsed` over post-warmup steps (captured live via
   `--include_num_input_tokens_seen true`; can't be back-filled).
@@ -307,10 +318,14 @@ different setup starts a fresh session.
   "history": [
     { "iter": 1,
       "config": { "...": "the exact levers that ran (identical to the probe-output config)" },
-      "result": { "status": "ok", "tokens_per_s": 9421, "samples_per_s": 0.59,
-                  "peak_mem_gb": 12.5, "gpu_util_mean": 71, "cpu_util_mean": 60,
-                  "steps_measured": 4, "error_detail": null },
-      "note": "padding_free at bs=2 → +200% vs seed; util 71% so not yet compute-bound" }
+      "result": { "status": "ok",
+                  "throughput": { "tokens_per_s": 9421, "samples_per_s": 0.59, "steps_measured": 4 },
+                  "memory": { "peak_mem_gb": 12.5, "gpu_mem_gb": 24.0 },
+                  "utilization": { "gpu": {"idle_frac": 0.18, "p10": 35, "p50": 80, "p90": 99, "max": 100},
+                                   "cpu": {"p10": 30, "p50": 55, "p90": 70, "max": 96},
+                                   "window_steps": [3, 7], "n_samples": 18 },
+                  "error_detail": null },
+      "note": "padding_free at bs=2 → +200% vs seed; idle_frac 0.18 so not yet compute-bound" }
   ],
   "best": { "config": { "...": "..." }, "tokens_per_s": 9421 },
   "active_extensions": ["padding_free"],
@@ -319,8 +334,8 @@ different setup starts a fresh session.
 ```
 
 - `history` is **lean** — no raw logs (they stream live during the run); `result` keeps
-  `error_detail` for failure diagnosis. `history` is the source of truth; `probe.py` also renders it
-  to **`probes.md`** (a human-readable table) each run.
+  `error_detail` for failure diagnosis. `history` (in `search_state.json`) is the source of truth the
+  agent reads directly.
 - The agent reads the **whole `history`** before each probe (see the loop) and writes `beliefs` after.
 
 ---

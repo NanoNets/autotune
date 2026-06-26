@@ -55,8 +55,8 @@ reports the regime signals (`gpu_util`, `peak_mem`, `cpu_util`) and the agent us
 - **Levers** — passed per probe on the command line (`--levers '{...}'`): any `swift sft` argument
   except the model-changing ones. `config.json` is never rewritten.
 - **State** (`search_state.json`, one per session) — an append-only `history` of
-  `{config, result, note}`, a running `best`, and cumulative `beliefs`. `probe.py` also writes
-  `probes.md`, a readable table of the session.
+  `{config, result, note}`, a running `best`, and cumulative `beliefs`. The agent reads this JSON
+  directly.
 
 ---
 
@@ -103,7 +103,7 @@ python probe.py                                                   # seed probe (
 python probe.py --levers '{"per_device_train_batch_size": 2, "padding_free": true}'  # exploration probe
 ```
 
-Each run appends to `search_state.json` and re-renders `probes.md`. The agent reads the history,
+Each run appends to `search_state.json`. The agent reads the history,
 picks the next config per `program.md`, and repeats. The dev setup uses a public vision model and
 synthetic image data, so no special access is needed — swap the model and dataset in `config.json`
 for a real run.
@@ -131,8 +131,8 @@ work Modal workspace.
 | `program.md` | How the loop runs — the runbook |
 | `search_space.md` | The lever rule — what the agent may change (principles only) |
 | `config.json` | Fixed inputs: backend, model, dataset, max_length, attn_impl, effective_batch, hardware, hardware_number |
-| `probe.py` | Entrypoint — reads `config.json` + `--levers`, dispatches on `config.backend`, writes `search_state.json` and `probes.md` |
+| `probe.py` | Entrypoint — reads `config.json` + `--levers`, dispatches on `config.backend`, writes `search_state.json` |
 | `probe_runner.py` | The portable probe — runs `swift sft`, samples GPU/CPU, parses metrics (runs on whichever backend) |
 | `modal_probe.py` | Modal backend — ships `probe_runner` to a Modal serverless GPU |
 | `vm_probe.py` | SSH-VM backend — runs `probe_runner` on a Paperspace/Lambda/any SSH GPU box |
-| `search_state.json` | Per-session memory: history + best + beliefs (gitignored; `probes.md` is the readable view) |
+| `search_state.json` | Per-session memory: history + best + beliefs (gitignored) |

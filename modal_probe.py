@@ -82,13 +82,11 @@ def main():
     print("status:", out["status"], "| returncode:", out["returncode"])
     print("config:", out["config"])
     print("\n--- metrics ---")
-    for k in ("samples_per_s", "tokens_per_s", "summary_samples_per_s",
-              "peak_mem_gb", "gpu_util_max", "gpu_util_mean",
-              "cpu_util_max", "cpu_util_mean", "steps_measured"):
-        if k in out:
-            print(f"  {k}: {out[k]}")
+    for grp in ("throughput", "memory", "utilization"):
+        if out.get(grp):
+            print(f"  {grp}: {out[grp]}")
     if out.get("error_detail"):
         print("  error_detail:", out["error_detail"])
-    if out.get("samples_per_s") is None:
+    if (out.get("throughput") or {}).get("samples_per_s") is None:
         print("\n(no steady-state metrics parsed — log tail:)")
         print(out["log_tail"])

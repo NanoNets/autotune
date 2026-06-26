@@ -79,6 +79,47 @@ def parse_metrics(text, effective_batch, warmup=2):
 # ------------------------------------------------------------------------------
 
 
+# --- utilization windowing: align the util time-series with the measured steps -----
+IDLE_GPU_PCT = 20          # a GPU sample below this counts as "idle" (GPU waiting, not computing)
+
+
+def _pct(xs, q):
+    """qth percentile (0-100) of a SORTED list, linear interpolation."""
+    if not xs:
+        return None
+    i = (len(xs) - 1) * q / 100.0
+    lo, hi = int(i), min(int(i) + 1, len(xs) - 1)
+    return round(xs[lo] + (xs[hi] - xs[lo]) * (i - lo), 1)
+
+
+def _util_stats(samples, idle=False):
+    """p10/p50/p90/max over the samples; idle_frac (share < IDLE_GPU_PCT) only when idle=True (GPU)."""
+    vals = sorted(samples)
+    s = {"p10": _pct(vals, 10), "p50": _pct(vals, 50), "p90": _pct(vals, 90),
+         "max": max(vals) if vals else None}
+    if idle:                              # GPU only: how often it sat waiting; meaningless for CPU
+        s["idle_frac"] = round(sum(v < IDLE_GPU_PCT for v in vals) / len(vals), 3) if vals else None
+    return s
+
+
+def _compute_util(gpu, cpu, step_times, warmup=2):
+    """Window the (timestamp, value) util series to the measured steps (gs > warmup — the SAME window
+    as tokens/s) and summarize. Both series live on our wall clock: util samples carry time.time(),
+    step boundaries are stamped when each step's log line arrives. Returns None when there's no valid
+    step window (OOM/crash/too-fast) or no in-window samples."""
+    steps = sorted((gs, ts) for gs, ts in step_times if gs > warmup)
+    if len(steps) < 2:
+        return None
+    t0, t1 = steps[0][1], steps[-1][1]
+    g = [v for ts, v in gpu if t0 <= ts <= t1]
+    c = [v for ts, v in cpu if t0 <= ts <= t1]
+    if not g and not c:
+        return None
+    return {"gpu": _util_stats(g, idle=True), "cpu": _util_stats(c),
+            "window_steps": [steps[0][0], steps[-1][0]], "n_samples": len(g)}
+# ------------------------------------------------------------------------------
+
+
 def _synthetic_dataset(path="/tmp/probe_data.jsonl"):
     """Tiny synthetic image dataset for quick local runs. Resolution varies per sample so vision-token
     count — the main driver of memory and throughput for this OCR workload — varies too."""
@@ -185,7 +226,7 @@ def run_probe(config: dict) -> dict:
                     capture_output=True, text=True, timeout=2)
                 vals = [int(x.strip()) for x in r.stdout.strip().splitlines() if x.strip().isdigit()]
                 if vals:
-                    gpu.append(round(sum(vals) / len(vals)))    # mean util across all N GPUs
+                    gpu.append((time.time(), round(sum(vals) / len(vals))))   # (ts, mean util across N GPUs)
             except Exception:
                 pass
             if psutil is not None:
@@ -198,19 +239,24 @@ def run_probe(config: dict) -> dict:
                             c.cpu_percent(); seen[c.pid] = c     # prime; contributes 0 this round
                         else:
                             total += o.cpu_percent()
-                    cpu.append(round(total / ncores, 1))         # % of allocated cores (0–100)
+                    cpu.append((time.time(), round(total / ncores, 1)))   # (ts, % of allocated cores)
                 except Exception:
                     pass
-            time.sleep(0.5)
+            # NOTE: spawns nvidia-smi per tick; switch to pynvml for cheaper/finer sampling later.
+            time.sleep(0.25)
 
     sampler = threading.Thread(target=_sample, daemon=True)
     sampler.start()
 
-    # stream swift output live while collecting it
-    lines = []
+    # stream swift output live while collecting it; stamp each step-line arrival on our wall clock
+    # (the other half of the alignment — util samples carry time.time() too).
+    lines, step_times = [], []
     for line in proc.stdout:
         print(line, end="", flush=True)
         lines.append(line)
+        ms = _STEP_RE.search(line)
+        if ms:
+            step_times.append((int(ms.group(1)), time.time()))
     proc.wait()
     stop.set()
     sampler.join(timeout=2)
@@ -236,17 +282,17 @@ def run_probe(config: dict) -> dict:
     except Exception:
         pass
 
+    m = parse_metrics(log, eff)
     return {
         "status": status,
         "returncode": rc,
         "config": {**levers, "model": config["model"], "world_size": n_gpu, "effective_batch": eff,
                    "attn_impl": attn, "gradient_accumulation_steps": ga},   # harness values win (match the cmd)
-        **parse_metrics(log, eff),
-        "gpu_mem_gb": gpu_mem_gb,
-        "gpu_util_max": max(gpu) if gpu else None,
-        "gpu_util_mean": round(sum(gpu) / len(gpu), 1) if gpu else None,
-        "cpu_util_max": max(cpu) if cpu else None,
-        "cpu_util_mean": round(sum(cpu) / len(cpu), 1) if cpu else None,
+        # grouped metric contract (throughput + memory + utilization)
+        "throughput": {"tokens_per_s": m["tokens_per_s"], "samples_per_s": m["samples_per_s"],
+                       "steps_measured": m["steps_measured"]},
+        "memory": {"peak_mem_gb": m["peak_mem_gb"], "gpu_mem_gb": gpu_mem_gb},
+        "utilization": _compute_util(gpu, cpu, step_times),    # None when no measurable step window
         "error_detail": error_detail,
         "step_lines": [ln for ln in log.splitlines() if "global_step/max_steps" in ln],
         "log_tail": log[-20000:],     # tail of the raw swift output (for debugging; not persisted)

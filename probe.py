@@ -23,9 +23,8 @@ STATE_PATH = "search_state.json"
 # identifies a session; a probe with a different setup starts a new one
 SETUP_KEYS = ("backend", "model", "dataset", "max_length", "attn_impl",
               "effective_batch", "hardware", "hardware_number")
-# result fields persisted to history (raw logs excluded)
-RESULT_KEYS = ("status", "tokens_per_s", "samples_per_s", "peak_mem_gb",
-               "gpu_util_mean", "cpu_util_mean", "steps_measured", "error_detail")
+# result fields persisted to history (raw logs excluded) — grouped blocks carried through whole
+RESULT_KEYS = ("status", "throughput", "memory", "utilization", "error_detail")
 
 
 def _inline_local_dataset(config: dict) -> dict:
@@ -77,63 +76,24 @@ def update_search_state(config: dict, out: dict, path: str = STATE_PATH):
     })
 
     ok = [h for h in state["history"]
-          if h["result"].get("status") == "ok" and h["result"].get("tokens_per_s") is not None]
+          if h["result"].get("status") == "ok"
+          and (h["result"].get("throughput") or {}).get("tokens_per_s") is not None]
     if ok:
-        win = max(ok, key=lambda h: h["result"]["tokens_per_s"])
-        state["best"] = {"config": win["config"], "tokens_per_s": win["result"]["tokens_per_s"]}
+        win = max(ok, key=lambda h: h["result"]["throughput"]["tokens_per_s"])
+        state["best"] = {"config": win["config"],
+                         "tokens_per_s": win["result"]["throughput"]["tokens_per_s"]}
 
     with open(path, "w") as f:
         json.dump(state, f, indent=2)
     return state
 
 
-def _flags(cfg):
-    """Notable levers in a config, excluding bs/ga and the always-present fields."""
-    skip = {"model", "world_size", "effective_batch",
-            "per_device_train_batch_size", "gradient_accumulation_steps"}
-    parts = []
-    for k, v in cfg.items():
-        if k in skip or v in (False, None):
-            continue
-        if k == "attn_impl" and v == "flash_attn":        # default; omitted from the table
-            continue
-        parts.append(k if v is True else f"{k}={v}")
-    return ", ".join(parts) or "-"
-
-
-def render_table(state):
-    """Markdown table of the whole session."""
-    s = state["setup"]
-    cell = lambda x: "-" if x is None else x
-    lines = [f"# Probes — {s.get('model')} @ eff_batch {s.get('effective_batch')}, "
-             f"max_len {s.get('max_length')}, {s.get('hardware')}×{s.get('hardware_number')}", ""]
-    best = state.get("best")
-    if best:
-        bc = best.get("config", {})
-        lines += [f"**best:** {best.get('tokens_per_s')} tok/s — bs "
-                  f"{bc.get('per_device_train_batch_size')}, {_flags(bc)}", ""]
-    if state.get("beliefs"):
-        lines += [f"**beliefs:** {state['beliefs']}", ""]
-    lines += ["| # | bs | ga | flags | tok/s | mem(G) | gpu% | cpu% | status | note |",
-              "|---|----|----|-------|-------|--------|------|------|--------|------|"]
-    for h in state["history"]:
-        c, r = h["config"], h["result"]
-        lines.append(
-            f"| {h['iter']} | {cell(c.get('per_device_train_batch_size'))} | "
-            f"{cell(c.get('gradient_accumulation_steps'))} | {_flags(c)} | "
-            f"{cell(r.get('tokens_per_s'))} | {cell(r.get('peak_mem_gb'))} | "
-            f"{cell(r.get('gpu_util_mean'))} | {cell(r.get('cpu_util_mean'))} | "
-            f"{cell(r.get('status'))} | {h.get('note', '')} |")
-    return "\n".join(lines) + "\n"
-
-
 def _print(out, backend):
     print(f"status: {out.get('status')} | backend: {backend}")
     print(f"config: {out.get('config')}")
-    for k in ("tokens_per_s", "samples_per_s", "peak_mem_gb", "gpu_util_max", "gpu_util_mean",
-              "cpu_util_max", "cpu_util_mean", "gpu_mem_gb", "steps_measured"):
-        if out.get(k) is not None:
-            print(f"  {k}: {out[k]}")
+    for grp in ("throughput", "memory", "utilization"):
+        if out.get(grp):
+            print(f"  {grp}: {out[grp]}")
     if out.get("error_detail"):
         print(f"  error_detail: {out['error_detail']}")
 
@@ -150,6 +110,4 @@ if __name__ == "__main__":
     out = run_probe(config)
     _print(out, config.get("backend", "modal"))
     state = update_search_state(config, out)
-    with open("probes.md", "w") as f:                 # session table
-        f.write(render_table(state))
-    print(f"\nappended probe #{len(state['history'])} -> {STATE_PATH}  |  table -> probes.md")
+    print(f"\nappended probe #{len(state['history'])} -> {STATE_PATH}")
