@@ -44,3 +44,7 @@ probes.md
 .env.*
 !.env.example
 
+# Run inputs
+config.json
+!config.json.example
+

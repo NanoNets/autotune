@@ -79,8 +79,12 @@ One-time setup — create a virtualenv, install deps, and add secrets:
 ```bash
 python -m venv venv && source venv/bin/activate
 pip install -r requirements.txt
-cp .env.example .env        # then fill in HF_TOKEN and any SSH creds
+cp .env.example .env                  # then fill in HF_TOKEN and any SSH creds
+cp config.json.example config.json    # then set your fixed inputs (model, dataset, hardware, …)
 ```
+
+`config.json` is gitignored (it holds your run inputs); `config.json.example` is the committed
+template — same pattern as `.env`/`.env.example`.
 
 Then configure your backend:
 
