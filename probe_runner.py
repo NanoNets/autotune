@@ -136,7 +136,9 @@ def run_probe(config: dict) -> dict:
         "attn_impl": attn,                                  # fixed input, not a lever
         "gradient_accumulation_steps": ga,
         "max_steps": int(config.get("max_steps", 7)),       # probe mechanic
-        "lazy_tokenize": "true",
+        # lazy_tokenize is the default win, but packing requires eager tokenization (they're
+        # mutually exclusive in swift) — let packing override it so the lever is testable.
+        "lazy_tokenize": "false" if levers.get("packing") else "true",
         "truncation_strategy": "delete",                    # drop over-length samples, don't crash
         "logging_steps": "1",                               # required for per-step parsing
         "include_num_input_tokens_seen": "true",            # emits num_input_tokens_seen → tokens/s
