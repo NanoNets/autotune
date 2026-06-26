@@ -120,6 +120,42 @@ def _compute_util(gpu, cpu, step_times, warmup=2):
 # ------------------------------------------------------------------------------
 
 
+def scan_env() -> dict:
+    """No-training capability scan: versions, GPU, and which accel libs are importable. Run once per
+    session before the seed so the agent can skip env-unsupported kernel/compile levers.
+    LIMIT: 'importable' != 'has a kernel for this arch' (liger imported yet had no Qwen3.5 kernels) —
+    this kills missing-lib dead-ends, not present-but-no-kernel ones."""
+    import importlib.util
+
+    def have(mod):
+        try:
+            return importlib.util.find_spec(mod) is not None
+        except Exception:
+            return False
+
+    env = {"libs": {m: have(m) for m in           # fla = flash-linear-attention (the linear-attn fast path)
+                    ("causal_conv1d", "liger_kernel", "flash_attn", "fla")}}
+    try:
+        import torch
+        env["torch"] = torch.__version__
+        env["torch_cuda"] = torch.version.cuda    # CUDA toolkit torch was built against
+        if torch.cuda.is_available():
+            cc = torch.cuda.get_device_capability(0)
+            env["gpu_name"] = torch.cuda.get_device_name(0)
+            env["compute_capability"] = f"{cc[0]}.{cc[1]}"
+            env["gpu_count"] = torch.cuda.device_count()
+    except Exception as e:
+        env["torch_error"] = str(e)
+    try:                                          # system driver (separate from torch's toolkit)
+        r = subprocess.run(["nvidia-smi", "--query-gpu=driver_version", "--format=csv,noheader"],
+                           capture_output=True, text=True, timeout=5)
+        out = r.stdout.strip().splitlines()
+        env["driver_version"] = out[0].strip() if out else None
+    except Exception:
+        pass
+    return env
+
+
 def _synthetic_dataset(path="/tmp/probe_data.jsonl"):
     """Tiny synthetic image dataset for quick local runs. Resolution varies per sample so vision-token
     count — the main driver of memory and throughput for this OCR workload — varies too."""
@@ -300,10 +336,15 @@ def run_probe(config: dict) -> dict:
 
 
 if __name__ == "__main__":
-    # SSH/VM entrypoint: read a config json, run the probe, write the result json.
-    cfg = json.load(open(sys.argv[1]))
-    result = run_probe(cfg)
-    out_path = sys.argv[2] if len(sys.argv) > 2 else None
+    # SSH/VM entrypoint. `--scan result.json` runs the capability scan; otherwise read a config json,
+    # run the probe, and write the result json.
+    if sys.argv[1] == "--scan":
+        result = scan_env()
+        out_path = sys.argv[2] if len(sys.argv) > 2 else None
+    else:
+        cfg = json.load(open(sys.argv[1]))
+        result = run_probe(cfg)
+        out_path = sys.argv[2] if len(sys.argv) > 2 else None
     if out_path:
         with open(out_path, "w") as f:
             json.dump(result, f)

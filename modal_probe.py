@@ -74,6 +74,16 @@ def probe(config: dict):
     return run_probe(config)
 
 
+@app.function(
+    image=IMAGE,                      # SAME image as the probe, so the scan reports the probe's libs
+    gpu=GPU_SPEC,                      # GPU present so the scan can read its name + compute capability
+    timeout=300,                      # no training — just imports + nvidia-smi
+)
+def scan():
+    from probe_runner import scan_env
+    return scan_env()
+
+
 @app.local_entrypoint()
 def main():
     # Standalone check: run config.json once and print the metrics.

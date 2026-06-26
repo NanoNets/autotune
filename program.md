@@ -48,13 +48,21 @@ All eight live in `config.json`; the user owns them, the agent never edits them:
 INPUTS (fixed): model, dataset, hardware, effective_batch target
 budget        : hard probe/iteration cap (guardrail — the loop can't run away)
 
-ITER 1 — CHARACTERIZE (the conservative seed; this IS Phase 0, folded in):
+PHASE 0 — CAPABILITY SCAN (once, no training):
+  run `python probe.py --scan` → records env facts to search_state.json `env` (torch/cuda versions,
+  GPU name + compute capability, and which accel libs are importable: causal_conv1d, liger_kernel,
+  flash_attn, fla). CONSULT it before proposing any kernel/compile lever: a missing lib means that
+  fast path is unavailable (e.g. causal_conv1d absent → linear-attn runs the slow fallback; no
+  flash_attn → can't select it). LIMIT: "importable" ≠ "has a kernel for THIS model" (liger imported
+  but had no Qwen3.5 kernels) — the scan kills missing-lib dead-ends, not present-but-no-kernel ones
+  (those still need one probe to rule out).
+
+ITER 1 — CHARACTERIZE (the conservative seed):
   pick a SAFE config — small bs (1 or 2), ga = eff/(bs×world_size), no extensions (flash_attn default)
   probe it → read throughput (tokens/s + samples/s), memory.peak_mem_gb; consult utilization for the
   regime (probe.py records it to history).
   this first read tells you the regime (compute / memory / data-bound) before pushing anything.
-  RECORD it: the seed's `note` (what it showed) + your first `beliefs` (the regime). (No separate
-  Phase 0 step — the seed probe IS the characterization.)
+  RECORD it: the seed's `note` (what it showed) + your first `beliefs` (the regime).
 
 LOOP until throughput plateaus or budget is hit:
   1. READ search_state.json — the WHOLE `history` + `best` + your last `beliefs` (NOT just the last probe).
@@ -162,6 +170,7 @@ arg except the off-limits list; `search_space.md` + the linked ms-swift docs) on
 
 ```bash
 source venv/bin/activate
+python probe.py --scan                                                        # phase-0 capability scan (once)
 python probe.py                                                               # seed probe (no levers, bs=1)
 python probe.py --levers '{"per_device_train_batch_size": 2, "padding_free": true}'  # an exploration probe
 ```
@@ -301,9 +310,14 @@ loop reasons over. One file per **session**: `setup` is the fixed inputs, and a 
 different setup starts a fresh session.
 
 **Division of ownership:**
-- **Code owns `history` + `best`** — auto-written after each probe, so they can't be forgotten.
+- **Code owns `history` + `best` + `env`** — auto-written (`env` once by `--scan`, history per probe),
+  so they can't be forgotten.
 - **The agent owns each entry's `note`, plus `beliefs` + `active_extensions`** — it edits these; the
   code preserves them (it only ever appends).
+
+`env` is the **capability scan** (top-level, written once by `python probe.py --scan`): versions, GPU
++ compute capability, and which accel libs are importable. It is session-level (NOT in `setup`, so it
+can't break session matching). Consult it before kernel/compile levers.
 
 **`note` (per probe) vs `beliefs` (whole session):**
 - `history[].note` = the **trail** — what THIS probe taught (append-only, never revised). Read it to
@@ -315,6 +329,9 @@ different setup starts a fresh session.
 {
   "setup": { "backend": "modal", "model": "...", "dataset": "...", "max_length": 8192,
              "effective_batch": 8, "hardware": "A10G", "hardware_number": 1 },
+  "env": { "torch": "2.6.0", "torch_cuda": "12.4", "driver_version": "550.x",
+           "gpu_name": "NVIDIA H100", "compute_capability": "9.0", "gpu_count": 1,
+           "libs": { "causal_conv1d": false, "liger_kernel": true, "flash_attn": true, "fla": true } },
   "history": [
     { "iter": 1,
       "config": { "...": "the exact levers that ran (identical to the probe-output config)" },

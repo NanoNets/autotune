@@ -54,19 +54,51 @@ def run_probe(config: dict) -> dict:
     raise SystemExit(f"unknown backend={backend!r} in config — use 'modal' or 'ssh' (paperspace/lambda)")
 
 
-def update_search_state(config: dict, out: dict, path: str = STATE_PATH):
-    """Append this probe to search_state.json (history + recomputed best).
-    Caller-managed fields (each entry's `note`, plus top-level `beliefs`/`active_extensions`) are preserved."""
-    setup = {k: config.get(k) for k in SETUP_KEYS}
-    state = None
+def scan_env(config: dict) -> dict:
+    """Dispatch a no-training capability scan to the configured backend (runs where the probe runs)."""
+    config = _inline_local_dataset(config)
+    backend = str(config.get("backend", "modal")).strip().lower()
+    if backend in SSH_ALIASES:
+        import vm_probe
+        return vm_probe.scan_env(config)
+    if backend == "modal":
+        os.environ["AUTOTUNE_GPU"] = str(config.get("hardware", "A10G"))
+        os.environ["AUTOTUNE_GPU_COUNT"] = str(config.get("hardware_number", 1))
+        os.environ["AUTOTUNE_ATTN"] = str(config.get("attn_impl", "flash_attn"))
+        import modal_probe
+        with modal_probe.app.run():
+            return modal_probe.scan.remote()
+    raise SystemExit(f"unknown backend={backend!r} in config — use 'modal' or 'ssh' (paperspace/lambda)")
+
+
+def _load_state(setup: dict, path: str):
+    """Load the session's state, or a fresh one if absent / the setup changed. `setup` (SETUP_KEYS) is
+    the session identity; the capability scan lives at top-level `env`, NOT in setup, so it can't break
+    session matching."""
     if os.path.exists(path):
         state = json.load(open(path))
-        if state.get("setup") != setup:               # different setup → new session
-            print("  (search_state.json was for a different setup — starting a fresh session)")
-            state = None
-    if state is None:
-        state = {"setup": setup, "history": [], "best": None,
-                 "active_extensions": [], "beliefs": ""}
+        if state.get("setup") == setup:
+            return state
+        print("  (search_state.json was for a different setup — starting a fresh session)")
+    return {"setup": setup, "history": [], "best": None,
+            "active_extensions": [], "beliefs": "", "env": None}
+
+
+def write_env_scan(config: dict, env: dict, path: str = STATE_PATH):
+    """Record the one-time capability scan at session level (search_state.json `env`)."""
+    setup = {k: config.get(k) for k in SETUP_KEYS}
+    state = _load_state(setup, path)
+    state["env"] = env
+    with open(path, "w") as f:
+        json.dump(state, f, indent=2)
+    return state
+
+
+def update_search_state(config: dict, out: dict, path: str = STATE_PATH):
+    """Append this probe to search_state.json (history + recomputed best).
+    Caller-managed fields (each entry's `note`, plus top-level `beliefs`/`active_extensions`/`env`) are preserved."""
+    setup = {k: config.get(k) for k in SETUP_KEYS}
+    state = _load_state(setup, path)
 
     state["history"].append({
         "iter": len(state["history"]) + 1,
@@ -103,8 +135,16 @@ if __name__ == "__main__":
     ap = argparse.ArgumentParser()
     ap.add_argument("config", nargs="?", default="config.json", help="config file with fixed inputs")
     ap.add_argument("--levers", default=None, help="JSON dict of swift sft args for this probe")
+    ap.add_argument("--scan", action="store_true",
+                    help="run the no-training capability scan, record to search_state.json `env`, exit")
     a = ap.parse_args()
     config = json.load(open(a.config))
+    if a.scan:                                         # phase-0 capability scan (once per session)
+        env = scan_env(config)
+        print(json.dumps(env, indent=2))
+        write_env_scan(config, env)
+        print(f"\nwrote capability scan -> {STATE_PATH} (env)")
+        sys.exit(0)
     if a.levers:                                       # per-probe levers, not persisted to config.json
         config["levers"] = json.loads(a.levers)
     out = run_probe(config)

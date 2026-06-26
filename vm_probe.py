@@ -45,8 +45,9 @@ def _connect():
     return client
 
 
-def run_probe(config: dict) -> dict:
-    """Run one probe on the SSH VM. Returns the result dict, or a status='error' dict on failure."""
+def _run_remote(config: dict, remote_tail: str) -> dict:
+    """Shared SSH plumbing: upload probe_runner.py + config.json, run `remote_tail` in the remote dir
+    (behind the activate prefix), stream output, return the parsed result.json (or an error dict)."""
     try:
         import paramiko  # noqa: F401
     except ImportError:
@@ -60,9 +61,6 @@ def run_probe(config: dict) -> dict:
 
     remote_dir = os.environ.get("AUTOTUNE_REMOTE_DIR", "/tmp/autotune")
     activate = os.environ.get("AUTOTUNE_SSH_ACTIVATE", "").strip()
-    n_gpu = int(config.get("hardware_number", 1))      # default visible devices to 0..N-1 (multi-GPU)
-    cvd = os.environ.get("AUTOTUNE_CUDA_VISIBLE_DEVICES") or ",".join(str(i) for i in range(n_gpu))
-    hf = os.environ.get("HF_TOKEN", "")
     here = os.path.dirname(os.path.abspath(__file__))
 
     try:
@@ -80,12 +78,11 @@ def run_probe(config: dict) -> dict:
         with sftp.open(posixpath.join(remote_dir, "config.json"), "w") as f:
             f.write(json.dumps(config))
 
-        envs = f"CUDA_VISIBLE_DEVICES={cvd} USE_HF=1" + (f" HF_TOKEN={hf}" if hf else "")
         prefix = f"{activate} && " if activate else ""
-        cmd = f"cd {remote_dir} && {prefix}{envs} python probe_runner.py config.json result.json"
+        cmd = f"cd {remote_dir} && {prefix}{remote_tail}"
 
         _stdin, stdout, _stderr = client.exec_command(cmd, get_pty=True)
-        for line in iter(stdout.readline, ""):                # stream remote swift output live
+        for line in iter(stdout.readline, ""):                # stream remote output live
             print(line, end="")
         rc = stdout.channel.recv_exit_status()
 
@@ -94,6 +91,20 @@ def run_probe(config: dict) -> dict:
                 return json.loads(f.read().decode())
         except Exception as e:
             return {"status": "error", "config": _echo(config),
-                    "error_detail": f"probe produced no result.json (remote exit {rc}): {e}"}
+                    "error_detail": f"remote produced no result.json (exit {rc}): {e}"}
     finally:
         client.close()
+
+
+def run_probe(config: dict) -> dict:
+    """Run one probe on the SSH VM. Returns the result dict, or a status='error' dict on failure."""
+    n_gpu = int(config.get("hardware_number", 1))      # default visible devices to 0..N-1 (multi-GPU)
+    cvd = os.environ.get("AUTOTUNE_CUDA_VISIBLE_DEVICES") or ",".join(str(i) for i in range(n_gpu))
+    hf = os.environ.get("HF_TOKEN", "")
+    envs = f"CUDA_VISIBLE_DEVICES={cvd} USE_HF=1" + (f" HF_TOKEN={hf}" if hf else "")
+    return _run_remote(config, f"{envs} python probe_runner.py config.json result.json")
+
+
+def scan_env(config: dict) -> dict:
+    """Run the no-training capability scan on the SSH VM (same box the probe will use)."""
+    return _run_remote(config, "python probe_runner.py --scan result.json")
