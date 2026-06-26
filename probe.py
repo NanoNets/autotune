@@ -94,7 +94,7 @@ def write_env_scan(config: dict, env: dict, path: str = STATE_PATH):
     return state
 
 
-def update_search_state(config: dict, out: dict, path: str = STATE_PATH):
+def update_search_state(config: dict, out: dict, hypothesis: str = "", path: str = STATE_PATH):
     """Append this probe to search_state.json (history + recomputed best).
     Caller-managed fields (each entry's `note`, plus top-level `beliefs`/`active_extensions`/`env`) are preserved."""
     setup = {k: config.get(k) for k in SETUP_KEYS}
@@ -103,8 +103,9 @@ def update_search_state(config: dict, out: dict, path: str = STATE_PATH):
     state["history"].append({
         "iter": len(state["history"]) + 1,
         "config": out.get("config", {}),             # exact levers that ran
+        "hypothesis": hypothesis,                    # the agent's at-launch "why + prediction + confirm/refute"
         "result": {k: out.get(k) for k in RESULT_KEYS},
-        "note": "",                                  # annotated later by the caller
+        "note": "",                                  # agent fills later — the REVIEW (prediction vs actual)
     })
 
     ok = [h for h in state["history"]
@@ -137,6 +138,8 @@ if __name__ == "__main__":
     ap.add_argument("--levers", default=None, help="JSON dict of swift sft args for this probe")
     ap.add_argument("--scan", action="store_true",
                     help="run the no-training capability scan, record to search_state.json `env`, exit")
+    ap.add_argument("--hypothesis", default="",
+                    help="why this lever + predicted throughput + what confirms/refutes (persisted at launch)")
     a = ap.parse_args()
     config = json.load(open(a.config))
     if a.scan:                                         # phase-0 capability scan (once per session)
@@ -149,5 +152,5 @@ if __name__ == "__main__":
         config["levers"] = json.loads(a.levers)
     out = run_probe(config)
     _print(out, config.get("backend", "modal"))
-    state = update_search_state(config, out)
+    state = update_search_state(config, out, hypothesis=a.hypothesis)
     print(f"\nappended probe #{len(state['history'])} -> {STATE_PATH}")

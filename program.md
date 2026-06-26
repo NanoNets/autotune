@@ -72,7 +72,9 @@ LOOP until throughput plateaus or budget is hit:
                    above the GPU's memory with no OOM, or tokens/s that can't match the step times),
                    suspect the MEASUREMENT, not the GPU — stop and check before probing further.
        BELIEF    — where is the bottleneck now (compute / memory / data-bound) and what's the ceiling?
-       HYPOTHESIS— the single most informative next config + the tokens/s you predict for it.
+       HYPOTHESIS— the single most informative next config, the throughput you predict, and what
+                   result would confirm vs refute it. You pass this to the probe (step 4) — it is
+                   persisted at launch, BEFORE the outcome is known.
   3. PICK the single most informative next config — ONE change at a time; skip configs already tried.
      Read the signals for what they MEAN (physics); choosing WHICH lever to pull is your judgment
      (the full swift surface, per search_space.md — not prescribed here).
@@ -88,9 +90,11 @@ LOOP until throughput plateaus or budget is hit:
          cpu p90 ~100%
      Until throughput plateaus the GPU isn't waiting on data — don't tune the dataloader. Memory is
      often the real wall; don't over-trust one util number.
-  4. PROBE it (respecting the fixed effective_batch). probe.py appends {config, result} to history.
+  4. PROBE it (respecting the fixed effective_batch). Pass your HYPOTHESIS with `--hypothesis` so it's
+     persisted at launch. probe.py appends {config, hypothesis, result} to history.
   5. RECORD what you learned in search_state.json:
-       - write this probe's `note` on its history entry (the trail: what THIS probe taught).
+       - write this probe's `note` = the REVIEW: your hypothesis's prediction vs the actual result,
+         and what the gap taught (the trail — append-only, never revised).
        - UPDATE `beliefs` — carry forward what still holds, revise what this probe changed
          (the cumulative head, not a per-probe overwrite).
 
@@ -172,7 +176,8 @@ arg except the off-limits list; `search_space.md` + the linked ms-swift docs) on
 source venv/bin/activate
 python probe.py --scan                                                        # phase-0 capability scan (once)
 python probe.py                                                               # seed probe (no levers, bs=1)
-python probe.py --levers '{"per_device_train_batch_size": 2, "padding_free": true}'  # an exploration probe
+python probe.py --levers '{"per_device_train_batch_size": 2, "padding_free": true}' \
+                --hypothesis "bs2 halves steps; predict ~+20% tok/s unless mem-bound (OOM refutes)"  # exploration probe
 ```
 
 **Step 3 — read the printed Layer-1 JSON.** The probe parses its OWN output on the GPU and returns
@@ -314,14 +319,18 @@ different setup starts a fresh session.
   so they can't be forgotten.
 - **The agent owns each entry's `note`, plus `beliefs` + `active_extensions`** — it edits these; the
   code preserves them (it only ever appends).
+- **`hypothesis` is write-once at launch** — the agent passes it via `--hypothesis`; code persists it
+  with the probe (before the result is known). Not revised — `note` is where the review goes.
 
 `env` is the **capability scan** (top-level, written once by `python probe.py --scan`): versions, GPU
 + compute capability, and which accel libs are importable. It is session-level (NOT in `setup`, so it
 can't break session matching). Consult it before kernel/compile levers.
 
-**`note` (per probe) vs `beliefs` (whole session):**
-- `history[].note` = the **trail** — what THIS probe taught (append-only, never revised). Read it to
-  see *how* the understanding evolved.
+**`hypothesis` (at launch) → `note` (after) → `beliefs` (whole session):**
+- `history[].hypothesis` = the **prediction** — why this lever, predicted throughput, what
+  confirms/refutes. Written at launch, before the outcome.
+- `history[].note` = the **REVIEW** — prediction vs actual + what the gap taught (append-only, never
+  revised). The pair makes each probe self-documenting/auditable.
 - `beliefs` = the **head** — the single cumulative *current* understanding across all probes, carried
   forward and revised each iteration. Read it to decide the next probe.
 
@@ -335,6 +344,7 @@ can't break session matching). Consult it before kernel/compile levers.
   "history": [
     { "iter": 1,
       "config": { "...": "the exact levers that ran (identical to the probe-output config)" },
+      "hypothesis": "padding_free at bs=2: predict ~+200% (long uniform samples, little padding to lose); OOM or <seed refutes",
       "result": { "status": "ok",
                   "throughput": { "tokens_per_s": 9421, "samples_per_s": 0.59, "steps_measured": 4 },
                   "memory": { "peak_mem_gb": 12.5, "gpu_mem_gb": 24.0 },
