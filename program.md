@@ -160,9 +160,11 @@ by the agent**: `backend`, `model`, `dataset`, `max_length`, `attn_impl`, `effec
 ```
 
 Secrets/connection (HF_TOKEN, SSH creds) live in `.env`. The rest is automatic:
-- **Probe mechanics are fixed** in `probe_runner.py` (win over any lever): `max_steps=7`,
-  `logging_steps=1`, `truncation_strategy=delete`, `lazy_tokenize=true`,
-  `include_num_input_tokens_seen=true`, `dataloader_pin_memory/persistent_workers=true`.
+- **Probe mechanics win over any lever** (`probe_runner.py`): `logging_steps=1`,
+  `truncation_strategy=delete`, `include_num_input_tokens_seen=true`,
+  `dataloader_pin_memory/persistent_workers=true`. `lazy_tokenize=true` UNLESS `packing` or
+  `dataset_num_proc` is set (both need eager preprocessing). `max_steps`/`warmup` are set per probe
+  by `--max-steps`/`--warmup` (default 7/2; raise for data levers — see Metric).
 - **`ga` is derived**: `ga = effective_batch / (bs × hardware_number)` — `bs` is the one lever the
   harness reads; a `bs` that doesn't divide it returns `status: error`.
 - `hardware` + `hardware_number` select and size the GPU (Modal `TYPE:N`; DDP via `NPROC_PER_NODE`);
@@ -177,7 +179,9 @@ source venv/bin/activate
 python probe.py --scan                                                        # phase-0 capability scan (once)
 python probe.py                                                               # seed probe (no levers, bs=1)
 python probe.py --levers '{"per_device_train_batch_size": 2, "padding_free": true}' \
-                --hypothesis "bs2 halves steps; predict ~+20% tok/s unless mem-bound (OOM refutes)"  # exploration probe
+                --hypothesis "bs2 halves steps; predict ~+20% tok/s unless mem-bound (OOM refutes)"  # compute lever
+python probe.py --levers '{"dataloader_num_workers": 8}' --max-steps 20 --warmup 5 \
+                --hypothesis "GPU idle + CPU headroom → workers feed it; predict idle_frac drops"     # data lever
 ```
 
 **Step 3 — read the printed Layer-1 JSON.** The probe parses its OWN output on the GPU and returns
@@ -238,11 +242,13 @@ samples/s may just be chewing more padding.
   batches — `ga` cannot change steady-state per-micro-batch work. If it isn't, suspect the metric,
   not the GPU.
 
-Probe mechanics:
+Probe length (per probe, via `--max-steps`/`--warmup`; both windows skip the warmup):
 
-- Probe runs `max_steps=7`.
-- Skip steps 1–2 (CUDA kernel warmup, data pipeline spin-up); measure steps 3–7.
-- Higher tokens/s = better.
+- **Compute levers** (bs, GC, padding_free, …) stabilize fast → default `--max-steps 7 --warmup 2`.
+- **Data levers** (workers, prefetch, dataset_num_proc) need warm caches + spun-up workers, so a short
+  probe under-counts them → use `--max-steps 20 --warmup 5`. (Our one 7-step `workers=8` probe read
+  −20% mostly from unamortized spin-up.)
+- Higher throughput = better.
 
 OOM detection: log contains "out of memory". Crash: non-zero exit → `status: error` + `error_detail`.
 
@@ -268,12 +274,18 @@ that doesn't divide `effective_batch / world_size` returns `status: error`). The
 the fixed effective batch is `bs × world_size = effective_batch` (ga=1). At that point
 there's no room to double bs further — done (or try extensions if OOM was hit first).
 
-### Reactive dataloader tuning (folded into the loop, not a separate phase)
+### Dataloader tuning (reactive — only after throughput plateaus)
 
-There is **no standalone Phase 2 sweep** in v1. `dataloader_num_workers` is a *reactive* move the
-LLM makes only when the seed/characterization read shows the GPU is **data-bound** (gpu_util low)
-**and** CPU has headroom. If CPU is pinned ~100%, it's a preprocessing wall and more workers won't
-help — stop. Cap workers at `nproc // 2`.
+Not a separate phase. Tune the dataloader ONLY once throughput has plateaued AND utilization says the
+GPU is data-bound (high `gpu.idle_frac`). Read `cpu.p90` for *which* lever:
+
+- **cpu p90 has headroom (< ~70%)** → GPU is starved but the CPU can feed it: try
+  `dataloader_num_workers` (cap at `nproc // 2`), then `dataloader_prefetch_factor`. Measure with a
+  longer probe (`--max-steps 20 --warmup 5`) so worker spin-up is amortized.
+- **cpu p90 pinned (~100%)** → preprocessing wall, more workers won't help. `dataset_num_proc`
+  parallelizes the upfront tokenize instead (auto-disables `lazy_tokenize`); beyond that it's a
+  decode/IO wall (out of scope for now).
+- **idle_frac ≈ 0** → compute-bound, the dataloader can't help — leave it.
 
 ---
 

@@ -212,10 +212,11 @@ def run_probe(config: dict) -> dict:
         "max_length": int(config.get("max_length", 8192)),  # task's token cap
         "attn_impl": attn,                                  # fixed input, not a lever
         "gradient_accumulation_steps": ga,
-        "max_steps": int(config.get("max_steps", 7)),       # probe mechanic
-        # lazy_tokenize is the default win, but packing requires eager tokenization (they're
-        # mutually exclusive in swift) — let packing override it so the lever is testable.
-        "lazy_tokenize": "false" if levers.get("packing") else "true",
+        "max_steps": int(config.get("max_steps", 7)),       # probe mechanic (data levers want more)
+        # lazy_tokenize is the default win, but it's incompatible with upfront preprocessing: packing
+        # needs eager tokenization, and dataset_num_proc only parallelizes an eager .map(). Either
+        # one flips it off so the lever is actually exercised.
+        "lazy_tokenize": "false" if (levers.get("packing") or levers.get("dataset_num_proc")) else "true",
         "truncation_strategy": "delete",                    # drop over-length samples, don't crash
         "logging_steps": "1",                               # required for per-step parsing
         "include_num_input_tokens_seen": "true",            # emits num_input_tokens_seen → tokens/s
@@ -318,7 +319,8 @@ def run_probe(config: dict) -> dict:
     except Exception:
         pass
 
-    m = parse_metrics(log, eff)
+    warmup = int(config.get("warmup", 2))                # skip leading steps in BOTH windows (throughput + util)
+    m = parse_metrics(log, eff, warmup=warmup)
     return {
         "status": status,
         "returncode": rc,
@@ -328,7 +330,7 @@ def run_probe(config: dict) -> dict:
         "throughput": {"tokens_per_s": m["tokens_per_s"], "samples_per_s": m["samples_per_s"],
                        "steps_measured": m["steps_measured"]},
         "memory": {"peak_mem_gb": m["peak_mem_gb"], "gpu_mem_gb": gpu_mem_gb},
-        "utilization": _compute_util(gpu, cpu, step_times),    # None when no measurable step window
+        "utilization": _compute_util(gpu, cpu, step_times, warmup=warmup),  # None when no measurable window
         "error_detail": error_detail,
         "step_lines": [ln for ln in log.splitlines() if "global_step/max_steps" in ln],
         "log_tail": log[-20000:],     # tail of the raw swift output (for debugging; not persisted)
