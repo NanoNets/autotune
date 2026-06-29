@@ -58,12 +58,15 @@ PRIORS — READ knowledge.md (the cross-run KB) once at start, filter each entry
   contextual, matches  → strong prior; probe only if cheap or you doubt it.
   contextual, differs  → do NOT assume — carry it in as a HYPOTHESIS and test it (it was learned elsewhere).
 
-ITER 1 — CHARACTERIZE (the conservative seed):
-  pick a SAFE config — small bs (1 or 2), ga = eff/(bs×world_size), no extensions (flash_attn default)
-  probe it → read throughput (tokens/s + samples/s), memory.peak_mem_gb; consult utilization for the
-  regime (probe.py records it to history).
-  this first read tells you the regime (compute / memory / data-bound) before pushing anything.
-  RECORD it: the seed's `note` (what it showed) + your first `beliefs` (the regime).
+ITER 1 — OPEN (you choose the first probe from PRIORS + reasoning — don't waste it):
+  COLD (no/weak matching priors): open SAFE to characterize the regime — small bs (1 or 2),
+    ga = eff/(bs×world_size), no extensions (flash_attn default).
+  PRIORS MATCH this setup: skip re-confirming the known baseline — open with the most-informative
+    SAFE probe, applying matching invariant/strong priors (e.g. a mandatory GC) so you don't seed a
+    known OOM or burn a probe on what you already know.
+  EITHER WAY: probe it → read throughput (tokens/s + samples/s), memory.peak_mem_gb; consult
+    utilization for the regime (compute / memory / data-bound).
+  RECORD: the opener's `note` (what it showed) + your first `beliefs` (the regime).
 
 LOOP until throughput plateaus or budget is hit:
   1. READ search_state.json — the WHOLE `history` + `best` + your last `beliefs` (NOT just the last probe).
