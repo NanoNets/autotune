@@ -57,6 +57,11 @@ PHASE 0 — CAPABILITY SCAN (once, no training):
   but had no Qwen3.5 kernels) — the scan kills missing-lib dead-ends, not present-but-no-kernel ones
   (those still need one probe to rule out).
 
+PRIORS — READ knowledge.md (the cross-run KB) once at start, filter each entry against THIS setup + env:
+  invariant            → apply as a prior; don't waste a probe re-confirming the direction.
+  contextual, matches  → strong prior; probe only if cheap or you doubt it.
+  contextual, differs  → do NOT assume — carry it in as a HYPOTHESIS and test it (it was learned elsewhere).
+
 ITER 1 — CHARACTERIZE (the conservative seed):
   pick a SAFE config — small bs (1 or 2), ga = eff/(bs×world_size), no extensions (flash_attn default)
   probe it → read throughput (tokens/s + samples/s), memory.peak_mem_gb; consult utilization for the
@@ -97,6 +102,11 @@ LOOP until throughput plateaus or budget is hit:
          and what the gap taught (the trail — append-only, never revised).
        - UPDATE `beliefs` — carry forward what still holds, revise what this probe changed
          (the cumulative head, not a per-probe overwrite).
+
+PROMOTE — at run end, curate knowledge.md (the gate that grows cross-run memory):
+  promote durable, CONTEXT-TAGGED, confirmed beliefs into knowledge.md (schema there).
+  contradicted an existing entry? amend it (add the caveat) or retire it (mark superseded).
+  gate it: only confirmed findings, never per-probe churn — that's what `beliefs` is for.
 
 OUTPUT: `best` from search_state.json (highest tokens/s).
 ```
@@ -325,6 +335,9 @@ successive steps) → you've reached the current ceiling. This is the loop's "th
 `probe.py` appends every probe to `search_state.json` (gitignored, local) — the durable record the
 loop reasons over. One file per **session**: `setup` is the fixed inputs, and a probe with a
 different setup starts a fresh session.
+
+Memory has three tiers: `history[].note` (per probe) → `beliefs` (per session) → **`knowledge.md`**
+(across runs — the curated KB, read at start, promoted to at end; see PRIORS/PROMOTE in the loop).
 
 **Division of ownership:**
 - **Code owns `history` + `best` + `env`** — auto-written (`env` once by `--scan`, history per probe),
