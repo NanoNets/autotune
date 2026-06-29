@@ -81,7 +81,7 @@ def _load_state(setup: dict, path: str):
             return state
         print("  (search_state.json was for a different setup — starting a fresh session)")
     return {"setup": setup, "history": [], "best": None,
-            "active_extensions": [], "beliefs": "", "env": None}
+            "beliefs": "", "env": None}
 
 
 def write_env_scan(config: dict, env: dict, path: str = STATE_PATH):
@@ -96,7 +96,7 @@ def write_env_scan(config: dict, env: dict, path: str = STATE_PATH):
 
 def update_search_state(config: dict, out: dict, hypothesis: str = "", path: str = STATE_PATH):
     """Append this probe to search_state.json (history + recomputed best).
-    Caller-managed fields (each entry's `note`, plus top-level `beliefs`/`active_extensions`/`env`) are preserved."""
+    Caller-managed fields (each entry's `note`, plus top-level `beliefs`/`env`) are preserved."""
     setup = {k: config.get(k) for k in SETUP_KEYS}
     state = _load_state(setup, path)
 
