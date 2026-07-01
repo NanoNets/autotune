@@ -156,6 +156,66 @@ def scan_env() -> dict:
     return env
 
 
+# --- data-wait plugin: measures the fraction of step time the loop blocks on next(batch) ----------
+# The authoritative data-starvation signal. Written to a temp file on the backend and loaded via
+# swift's `--external_plugins` when config['wait'] is set. It times EVERY DataLoader.__next__ (with
+# grad-accum the ga fetches are interleaved inside a step, so timing between steps would miss them)
+# and prints per-optimizer-step totals; probe_runner windows them. General across model/dataset/ga/
+# backend; rank-0 only; fully guarded so it can never crash the training run.
+_WAIT_RE = re.compile(r"AUTOTUNE_WAIT step=(\d+) wait_s=([\d.]+) step_s=([\d.]+)")
+_WAIT_PLUGIN = r'''
+import time
+try:
+    import torch.utils.data as _tud
+    _wait = {"blocked": 0.0}                       # cumulative seconds blocked on next(batch)
+    _orig = _tud.DataLoader.__iter__
+    def _timed(self):
+        it = _orig(self)
+        class _T:
+            def __iter__(self_): return self_
+            def __next__(self_):
+                t = time.perf_counter()
+                try:
+                    return it.__next__()
+                finally:
+                    _wait["blocked"] += time.perf_counter() - t
+        return _T()
+    _tud.DataLoader.__iter__ = _timed              # time every batch fetch, any dataloader
+
+    from swift.callbacks import callbacks_map, TrainerCallback
+
+    class DataWaitCallback(TrainerCallback):
+        def __init__(self, args, trainer):
+            try: super().__init__(args, trainer)
+            except Exception: pass
+            self._t0, self._w0 = None, 0.0
+        def on_step_begin(self, args, state, control, **kw):
+            self._t0, self._w0 = time.perf_counter(), _wait["blocked"]
+        def on_step_end(self, args, state, control, **kw):
+            if self._t0 is None or not getattr(state, "is_world_process_zero", True):
+                return
+            print("AUTOTUNE_WAIT step=%d wait_s=%.4f step_s=%.4f"
+                  % (int(state.global_step), _wait["blocked"] - self._w0, time.perf_counter() - self._t0),
+                  flush=True)
+
+    callbacks_map["data_wait"] = DataWaitCallback
+except Exception as _e:                            # never break training if the hook shifts
+    print("AUTOTUNE_WAIT_ERROR %r" % (_e,), flush=True)
+'''
+
+
+def parse_wait(text, warmup=2):
+    """Windowed data-wait fraction from the plugin's per-step lines (steps > warmup — same window as
+    tokens/s). None if the plugin emitted nothing usable (not requested, unsupported, or errored)."""
+    rows = [(int(s), float(w), float(st)) for s, w, st in _WAIT_RE.findall(text)]
+    post = [(w, st) for s, w, st in rows if s > warmup and st > 0]
+    if not post:
+        return None
+    tw, ts = sum(w for w, _ in post), sum(st for _, st in post)
+    return round(tw / ts, 3) if ts > 0 else None
+# ------------------------------------------------------------------------------
+
+
 def _synthetic_dataset(path="/tmp/probe_data.jsonl"):
     """Tiny synthetic image dataset for quick local runs. Resolution varies per sample so vision-token
     count — the main driver of memory and throughput for this OCR workload — varies too."""
@@ -224,6 +284,19 @@ def run_probe(config: dict) -> dict:
         "dataloader_persistent_workers": "true",            # always a win
         "output_dir": "/tmp/out", "report_to": "none",
     }
+    # Optional: measure dataloader wait-time via our external plugin (config['wait']). Written to the
+    # backend's /tmp and loaded by swift; the callback prints per-step wait we parse back. Opt-in so a
+    # plugin/version issue can't affect ordinary probes.
+    if config.get("wait"):
+        try:
+            plugin_path = "/tmp/autotune_wait_plugin.py"
+            with open(plugin_path, "w") as f:
+                f.write(_WAIT_PLUGIN)
+            fixed["external_plugins"] = plugin_path         # swift imports it at startup
+            fixed["callbacks"] = "data_wait"                # activates the registered callback
+        except Exception:
+            pass                                            # fall back to no wait-time; never block the probe
+
     args = {**levers, **fixed}                              # fixed wins on any overlap
     cmd = ["swift", "sft"]
     for k, v in args.items():
@@ -321,6 +394,9 @@ def run_probe(config: dict) -> dict:
 
     warmup = int(config.get("warmup", 2))                # skip leading steps in BOTH windows (throughput + util)
     m = parse_metrics(log, eff, warmup=warmup)
+    util = _compute_util(gpu, cpu, step_times, warmup=warmup)   # None when no measurable window
+    if config.get("wait"):                               # authoritative data-starvation signal (opt-in)
+        util = {**(util or {}), "data_wait_frac": parse_wait(log, warmup)}
     return {
         "status": status,
         "returncode": rc,
@@ -330,7 +406,7 @@ def run_probe(config: dict) -> dict:
         "throughput": {"tokens_per_s": m["tokens_per_s"], "samples_per_s": m["samples_per_s"],
                        "steps_measured": m["steps_measured"]},
         "memory": {"peak_mem_gb": m["peak_mem_gb"], "gpu_mem_gb": gpu_mem_gb},
-        "utilization": _compute_util(gpu, cpu, step_times, warmup=warmup),  # None when no measurable window
+        "utilization": util,
         "error_detail": error_detail,
         "step_lines": [ln for ln in log.splitlines() if "global_step/max_steps" in ln],
         "log_tail": log[-20000:],     # tail of the raw swift output (for debugging; not persisted)

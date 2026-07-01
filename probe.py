@@ -142,9 +142,12 @@ if __name__ == "__main__":
                     help="why this lever + predicted throughput + what confirms/refutes (persisted at launch)")
     ap.add_argument("--max-steps", type=int, default=7, help="probe length (compute levers ~7; data levers ~20)")
     ap.add_argument("--warmup", type=int, default=2, help="leading steps to skip before measuring (data levers ~5)")
+    ap.add_argument("--wait", action="store_true",
+                    help="measure dataloader wait-time (data-starvation signal) via the swift plugin")
     a = ap.parse_args()
     config = json.load(open(a.config))
     config["max_steps"], config["warmup"] = a.max_steps, a.warmup   # probe mechanics, not swift levers
+    config["wait"] = a.wait                                          # opt-in data-wait measurement
     if a.scan:                                         # phase-0 capability scan (once per session)
         env = scan_env(config)
         print(json.dumps(env, indent=2))

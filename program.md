@@ -87,7 +87,9 @@ LOOP until throughput plateaus or budget is hit:
        throughput flat     → SATURATED (plateau = last 3 lever attempts each <5% over best): try another regime, else stop.
      SECONDARY (diagnostic only — consult utilization AFTER throughput plateaus, to decide if dataloader
      tuning is even worth a probe; do NOT let a util scalar pick a lever before then):
-     CPU tells you whether the idle is even data-related, THEN whether workers help (idle high = idle_frac >~0.15):
+     BEST data signal — run a `--wait` probe to get `utilization.data_wait_frac` (fraction of step time
+     blocked on next(batch)): ~0 → not data-bound; high → data-bound (then cpu p90 picks the lever below).
+     Without `--wait`, fall back to idle_frac + cpu (CPU says whether the idle is even data, THEN which lever):
        gpu idle_frac <~0.05          → COMPUTE-BOUND: the GPU isn't waiting — the dataloader cannot help.
        idle high + cpu p90 ~idle     → NOT DATA: idle is structure (GC/optimizer/sync) or launch gaps — the
          (<~30%)                         workers aren't even busy, so it's not starvation. Leave the dataloader alone.
@@ -186,8 +188,8 @@ python probe.py --scan                                                        # 
 python probe.py                                                               # seed probe (no levers, bs=1)
 python probe.py --levers '{"per_device_train_batch_size": 2, "padding_free": true}' \
                 --hypothesis "bs2 halves steps; predict ~+20% tok/s unless mem-bound (OOM refutes)"  # compute lever
-python probe.py --levers '{"dataloader_num_workers": 8}' --max-steps 20 --warmup 5 \
-                --hypothesis "GPU idle + CPU headroom → workers feed it; predict idle_frac drops"     # data lever
+python probe.py --levers '{"dataloader_num_workers": 8}' --max-steps 20 --warmup 5 --wait \
+                --hypothesis "data_wait_frac was high; more workers should drop it & raise tok/s"      # data lever (--wait)
 ```
 
 **3. Read the printed JSON** — probe parses its OWN output on the GPU, returns the structured result
@@ -214,7 +216,8 @@ the raw training log.
   "utilization": {                  // SECONDARY/diagnostic — null when no measurable step window (OOM/crash/too-fast)
     "gpu": { "idle_frac": 0.05, "p10": 82, "p50": 96, "p90": 100, "max": 100 },  // idle_frac = share of window < 20% (GPU waiting)
     "cpu": { "p10": 20, "p50": 41, "p90": 68, "max": 90 },                       // p90 = preprocessing ceiling
-    "window_steps": [3, 7], "n_samples": 18           // util is windowed to the SAME steps as tokens/s
+    "window_steps": [3, 7], "n_samples": 18,          // util is windowed to the SAME steps as tokens/s
+    "data_wait_frac": 0.03            // ONLY with --wait: fraction of step time blocked on next(batch) — direct data signal
   },
   "error_detail": null              // on failure: the relevant message (OOM shape, traceback, …)
 }
@@ -275,8 +278,9 @@ the raw training log.
   try extensions if OOM hit first).
 
 **Dataloader tuning (reactive — only after throughput plateaus)**
-- Not a separate phase. Tune ONLY once throughput plateaued AND the idle is actually data (idle high +
-  CPU busy — see below). `cpu.p90` first tells you IF it's data, then which lever:
+- Not a separate phase. Tune ONLY once throughput plateaued AND the idle is actually data. Confirm with a
+  **`--wait` probe** (`--max-steps 20 --warmup 5 --wait`): `data_wait_frac` is the direct check (~0 → not
+  data, stop); idle+CPU is the fallback when you don't have it. Then `cpu.p90` picks the lever:
   - **cpu p90 ~idle (< ~30%)** → the idle is NOT data (GC/optimizer/sync structure or launch gaps — the
     workers aren't even busy). Leave the dataloader alone.
   - **cpu p90 active (~30-70%)** → data-bound, under-parallelized: try `dataloader_num_workers` (cap
