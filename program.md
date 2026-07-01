@@ -87,11 +87,14 @@ LOOP until throughput plateaus or budget is hit:
        throughput flat     → SATURATED (plateau = last 3 lever attempts each <5% over best): try another regime, else stop.
      SECONDARY (diagnostic only — consult utilization AFTER throughput plateaus, to decide if dataloader
      tuning is even worth a probe; do NOT let a util scalar pick a lever before then):
-       gpu idle_frac <~0.05     → COMPUTE-BOUND: the GPU isn't waiting — the dataloader cannot help.
-       gpu idle_frac >~0.15,    → DATA-BOUND with slack: GPU starved, CPU has room → workers may help.
-         cpu p90 < ~70%
-       gpu idle_frac >~0.15,    → PREPROCESSING WALL: GPU starved but CPU pinned → more workers won't help; stop.
-         cpu p90 ~100%
+     CPU tells you whether the idle is even data-related, THEN whether workers help (idle high = idle_frac >~0.15):
+       gpu idle_frac <~0.05          → COMPUTE-BOUND: the GPU isn't waiting — the dataloader cannot help.
+       idle high + cpu p90 ~idle     → NOT DATA: idle is structure (GC/optimizer/sync) or launch gaps — the
+         (<~30%)                         workers aren't even busy, so it's not starvation. Leave the dataloader alone.
+       idle high + cpu p90 active    → DATA-BOUND, under-parallelized: CPU is feeding but has room → workers/prefetch may help.
+         (~30-70%)
+       idle high + cpu p90 pinned    → PREPROCESSING WALL: CPU maxed feeding the GPU → more workers won't help; stop.
+         (~100%)
      Until throughput plateaus the GPU isn't waiting on data — don't tune the dataloader. Memory is
      often the real wall; don't over-trust one util number.
   4. PROBE it (respecting the fixed effective_batch). Pass your HYPOTHESIS with `--hypothesis` so it's
@@ -220,9 +223,10 @@ the raw training log.
 - `status`: `oom` when log contains "out of memory", else `error` on any non-zero exit.
 - `utilization`: windowed to the measured steps (load/save phases excluded); **diagnostic only** —
   consult after throughput plateaus, never to pick a lever before then.
-  - `gpu.idle_frac` = how often the GPU sat waiting (sawtooth/data-starve).
-  - `cpu.p90` = swift process-tree CPU ceiling (% of allocated cores): idle GPU + cpu p90 headroom →
-    workers may help; idle GPU + cpu p90 ~100% → preprocessing wall, workers won't.
+  - `gpu.idle_frac` = how often the GPU sat waiting (any cause — not necessarily data).
+  - `cpu.p90` = swift process-tree CPU ceiling (% of allocated cores); it disambiguates the idle:
+    cpu ~idle (<~30%) → NOT data (structure/launch), leave the dataloader; cpu active (~30-70%) →
+    data-bound, workers may help; cpu pinned (~100%) → preprocessing wall.
 - `error_detail`: the actual failure message (OOM + offending shape, recompile thrash, CUDA error) —
   reason about the cause instead of guessing.
 
@@ -271,9 +275,11 @@ the raw training log.
   try extensions if OOM hit first).
 
 **Dataloader tuning (reactive — only after throughput plateaus)**
-- Not a separate phase. Tune ONLY once throughput plateaued AND GPU is data-bound (`gpu.idle_frac` >~0.15).
-  Read `cpu.p90` for *which* lever:
-  - **cpu p90 headroom (< ~70%)** → GPU starved, CPU can feed it: try `dataloader_num_workers` (cap
+- Not a separate phase. Tune ONLY once throughput plateaued AND the idle is actually data (idle high +
+  CPU busy — see below). `cpu.p90` first tells you IF it's data, then which lever:
+  - **cpu p90 ~idle (< ~30%)** → the idle is NOT data (GC/optimizer/sync structure or launch gaps — the
+    workers aren't even busy). Leave the dataloader alone.
+  - **cpu p90 active (~30-70%)** → data-bound, under-parallelized: try `dataloader_num_workers` (cap
     `nproc // 2`), then `dataloader_prefetch_factor`. Measure with a longer probe (`--max-steps 20
     --warmup 5`) so spin-up amortizes.
   - **cpu p90 pinned (~100%)** → preprocessing wall, more workers won't help. `dataset_num_proc`
