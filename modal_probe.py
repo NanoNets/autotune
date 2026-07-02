@@ -57,7 +57,7 @@ flash_image = (
 hf_cache = modal.Volume.from_name("autotune-hf-cache", create_if_missing=True)
 
 # Image follows config `attn_impl`: flash_attn → the prebuilt flash-attn image, anything else → the
-# fast sdpa image. Note: padding_free/packing also need flash-attn, so only use a non-flash attn_impl
+# fast sdpa image. Note: padding_free also needs flash-attn, so only use a non-flash attn_impl
 # for an all-sdpa session.
 IMAGE = flash_image if ATTN == "flash_attn" else image
 
@@ -79,9 +79,9 @@ def probe(config: dict):
     gpu=GPU_SPEC,                      # GPU present so the scan can read its name + compute capability
     timeout=300,                      # no training — just imports + nvidia-smi
 )
-def scan():
+def scan(check_libs: list = None):
     from probe_runner import scan_env
-    return scan_env()
+    return scan_env(check_libs)
 
 
 @app.local_entrypoint()

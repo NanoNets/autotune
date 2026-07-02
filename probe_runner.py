@@ -120,11 +120,14 @@ def _compute_util(gpu, cpu, step_times, warmup=2):
 # ------------------------------------------------------------------------------
 
 
-def scan_env() -> dict:
+def scan_env(check_libs=None) -> dict:
     """No-training capability scan: versions, GPU, and which accel libs are importable. Run once per
     session before the seed so the agent can skip env-unsupported kernel/compile levers.
+    `check_libs` extends the default candidate list with names the agent nominated (program.md Phase 0:
+    architecture + torch/cuda reasoning) — this function only ever checks importability, it never
+    decides which libraries are worth checking.
     LIMIT: 'importable' != 'has a kernel for this arch' (liger imported yet had no Qwen3.5 kernels) —
-    this kills missing-lib dead-ends, not present-but-no-kernel ones."""
+    this kills missing-lib dead-ends, not present-but-no-kernel ones (Stage B in program.md)."""
     import importlib.util
 
     def have(mod):
@@ -133,8 +136,9 @@ def scan_env() -> dict:
         except Exception:
             return False
 
-    env = {"libs": {m: have(m) for m in           # fla = flash-linear-attention (the linear-attn fast path)
-                    ("causal_conv1d", "liger_kernel", "flash_attn", "fla")}}
+    default_libs = ("causal_conv1d", "liger_kernel", "flash_attn", "fla")   # fla = flash-linear-attention
+    names = list(dict.fromkeys([*default_libs, *(check_libs or [])]))      # dedupe, keep order
+    env = {"libs": {m: have(m) for m in names}}
     try:
         import torch
         env["torch"] = torch.__version__
@@ -273,10 +277,10 @@ def run_probe(config: dict) -> dict:
         "attn_impl": attn,                                  # fixed input, not a lever
         "gradient_accumulation_steps": ga,
         "max_steps": int(config.get("max_steps", 7)),       # probe mechanic (data levers want more)
-        # lazy_tokenize is the default win, but it's incompatible with upfront preprocessing: packing
-        # needs eager tokenization, and dataset_num_proc only parallelizes an eager .map(). Either
-        # one flips it off so the lever is actually exercised.
-        "lazy_tokenize": "false" if (levers.get("packing") or levers.get("dataset_num_proc")) else "true",
+        # lazy_tokenize is the default win, but it's incompatible with upfront preprocessing:
+        # dataset_num_proc only parallelizes an eager .map(), so it flips lazy_tokenize off so the
+        # lever is actually exercised.
+        "lazy_tokenize": "false" if levers.get("dataset_num_proc") else "true",
         "truncation_strategy": "delete",                    # drop over-length samples, don't crash
         "logging_steps": "1",                               # required for per-step parsing
         "include_num_input_tokens_seen": "true",            # emits num_input_tokens_seen → tokens/s
@@ -402,9 +406,10 @@ def run_probe(config: dict) -> dict:
         "returncode": rc,
         "config": {**levers, "model": config["model"], "world_size": n_gpu, "effective_batch": eff,
                    "attn_impl": attn, "gradient_accumulation_steps": ga},   # harness values win (match the cmd)
-        # grouped metric contract (throughput + memory + utilization)
-        "throughput": {"tokens_per_s": m["tokens_per_s"], "samples_per_s": m["samples_per_s"],
-                       "steps_measured": m["steps_measured"]},
+        # grouped metric contract (throughput + memory + utilization). tokens_per_s is still computed
+        # in parse_metrics (m["tokens_per_s"]) but intentionally left out of the returned contract —
+        # samples_per_s is the metric now; re-add it here if that ever changes.
+        "throughput": {"samples_per_s": m["samples_per_s"], "steps_measured": m["steps_measured"]},
         "memory": {"peak_mem_gb": m["peak_mem_gb"], "gpu_mem_gb": gpu_mem_gb},
         "utilization": util,
         "error_detail": error_detail,
@@ -417,7 +422,12 @@ if __name__ == "__main__":
     # SSH/VM entrypoint. `--scan result.json` runs the capability scan; otherwise read a config json,
     # run the probe, and write the result json.
     if sys.argv[1] == "--scan":
-        result = scan_env()
+        check_libs = []
+        try:                                            # config.json is uploaded alongside on the VM
+            check_libs = json.load(open("config.json")).get("check_libs") or []
+        except Exception:
+            pass
+        result = scan_env(check_libs)
         out_path = sys.argv[2] if len(sys.argv) > 2 else None
     else:
         cfg = json.load(open(sys.argv[1]))

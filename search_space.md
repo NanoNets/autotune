@@ -11,8 +11,7 @@ ms-swift `swift sft` parameter reference:
 ## How to choose
 
 - **`effective_batch` is a fixed input** — the loop only picks the `bs × ga` factorization that hits it.
-  `per_device_train_batch_size` is the primary lever; `ga` is derived (`effective_batch / (bs ×
-  world_size)`), never set.
+
 - **Pick by regime** the probe reveals: 
   - memory-bound / OOM → use less memory
   - compute-bound → cut wasted or slow compute

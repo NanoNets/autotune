@@ -40,10 +40,12 @@ context matches → strong prior. contextual + context differs → don't assume,
 - **Scope:** contextual — re-test when sample lengths vary widely (lots of padding to recover); likely flips positive.
 - **Evidence:** 2026-06-25.
 
-## packing OOMs even at bs=1 at 70k max_length (H100×1)
+## packing OOMs even at bs=1 at 70k max_length (H100×1) — SUPERSEDED
 - **Claim:** packing fills the 70k window → ~4× activations → OOM even at bs=1.
 - **Context:** Qwen3.5-0.8B, H100 80GB ×1, max_length 70000.
-- **Scope:** contextual — feasibility depends on max_length × GPU memory; may be fine at smaller windows / more memory.
+- **Scope:** superseded — `packing` is now excluded as a lever entirely (it repacks multiple samples
+  into one block, changing what counts as a "sample" per step and breaking the effective_batch
+  invariant; see program.md Guardrails). This memory-ceiling finding no longer matters.
 - **Evidence:** 2026-06-25.
 
 ## liger_kernel and torch_compile don't help Qwen3.5

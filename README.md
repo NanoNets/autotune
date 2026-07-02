@@ -62,13 +62,11 @@ reports the regime signals (`gpu_util`, `peak_mem`, `cpu_util`) and the agent us
 
 ## The metric
 
-Throughput is measured in **tokens/second**. That's the right objective once `padding_free` or
-`packing` pack variable-length sequences, where samples/second is no longer comparable across
-configs. The probe measures it live as `Δ tokens / Δ elapsed` over the steady-state window. It
-also reports `samples/s = effective_batch × Δsteps / Δelapsed` (so the numerator is
-`bs × ga × world_size`, not `bs`) and peak memory.
+Throughput is measured in **samples/second** — real dataset throughput, immune to padding
+inflation. The probe measures it live as `samples/s = effective_batch × Δsteps / Δelapsed` over
+the steady-state window (numerator is `bs × ga × world_size`, not `bs`), plus peak memory.
 
-> The loop ranks configs by tokens/s; samples/s is a cross-check.
+> The loop ranks configs by samples/s.
 
 ---
 
@@ -91,8 +89,11 @@ Then configure your backend:
 - **Modal** (`"backend": "modal"`): run `modal setup` (writes `~/.modal.toml`) and store an HF
   token as a Modal secret — `modal secret create hf-token HF_TOKEN=hf_...`. The GPU comes from
   `hardware` + `hardware_number` in `config.json` (e.g. `"A100"` × `4` → `gpu="A100:4"`).
-- **SSH VM** (`"backend": "ssh"`): set `AUTOTUNE_SSH_HOST` and `AUTOTUNE_SSH_USER`, plus one of
-  `AUTOTUNE_SSH_KEY` (Lambda) or `AUTOTUNE_SSH_PASSWORD` (Paperspace), and `AUTOTUNE_SSH_ACTIVATE`.
+- **SSH VM** (`"backend": "ssh"` — aliases `vm`/`paperspace`/`lambda`/`lambda_labs`/`lambdalabs`
+  also work): set `AUTOTUNE_SSH_HOST` and `AUTOTUNE_SSH_USER`, plus one of `AUTOTUNE_SSH_KEY`
+  (Lambda) or `AUTOTUNE_SSH_PASSWORD` (Paperspace), and `AUTOTUNE_SSH_ACTIVATE` — the command that
+  enters your swift env (e.g. `source ~/envs/swift-env/bin/activate`). The probe uploads and runs
+  itself on the VM and reads the result back — nothing to pre-install beyond ms-swift in that env.
 
 Set the fixed inputs in `config.json`, then run the loop one probe at a time (the backend is read
 from the config):
@@ -113,10 +114,9 @@ for a real run.
 ## Status
 
 The v1 loop is defined by `program.md` (the runbook) and `search_space.md` (the lever rule), and
-driven against a backend-agnostic probe (`probe_runner.py`). The probe returns tokens/s plus peak
+driven against a backend-agnostic probe (`probe_runner.py`). The probe returns samples/s plus peak
 memory, GPU/CPU utilization, and structured failure detail — on Modal or an SSH GPU VM, single- or
-multi-GPU (DDP). Multi-GPU is verified end-to-end on Modal (A10G×2): tokens/s is a valid global
-metric — `num_input_tokens_seen` is all-reduced across ranks, so it needs no ×world_size correction.
+multi-GPU (DDP). Multi-GPU is verified end-to-end on Modal (A10G×2).
 
 Still to do: bring in the production model (`Qwen3.5-0.8B`, which needs the prod env's
 `flash-linear-attention`/`triton` pins) and re-baseline against the work dataset (`nn_ocr4`) in the

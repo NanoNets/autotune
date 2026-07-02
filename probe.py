@@ -67,7 +67,7 @@ def scan_env(config: dict) -> dict:
         os.environ["AUTOTUNE_ATTN"] = str(config.get("attn_impl", "flash_attn"))
         import modal_probe
         with modal_probe.app.run():
-            return modal_probe.scan.remote()
+            return modal_probe.scan.remote(config.get("check_libs"))
     raise SystemExit(f"unknown backend={backend!r} in config — use 'modal' or 'ssh' (paperspace/lambda)")
 
 
@@ -110,11 +110,11 @@ def update_search_state(config: dict, out: dict, hypothesis: str = "", path: str
 
     ok = [h for h in state["history"]
           if h["result"].get("status") == "ok"
-          and (h["result"].get("throughput") or {}).get("tokens_per_s") is not None]
+          and (h["result"].get("throughput") or {}).get("samples_per_s") is not None]
     if ok:
-        win = max(ok, key=lambda h: h["result"]["throughput"]["tokens_per_s"])
+        win = max(ok, key=lambda h: h["result"]["throughput"]["samples_per_s"])
         state["best"] = {"config": win["config"],
-                         "tokens_per_s": win["result"]["throughput"]["tokens_per_s"]}
+                         "samples_per_s": win["result"]["throughput"]["samples_per_s"]}
 
     with open(path, "w") as f:
         json.dump(state, f, indent=2)
@@ -138,6 +138,9 @@ if __name__ == "__main__":
     ap.add_argument("--levers", default=None, help="JSON dict of swift sft args for this probe")
     ap.add_argument("--scan", action="store_true",
                     help="run the no-training capability scan, record to search_state.json `env`, exit")
+    ap.add_argument("--check-libs", default=None,
+                    help="comma-separated extra lib names to check importability for, beyond the "
+                         "default 4 (Phase 0 candidates the agent nominated; used with --scan)")
     ap.add_argument("--hypothesis", default="",
                     help="why this lever + predicted throughput + what confirms/refutes (persisted at launch)")
     ap.add_argument("--max-steps", type=int, default=7, help="probe length (compute levers ~7; data levers ~20)")
@@ -149,6 +152,7 @@ if __name__ == "__main__":
     config["max_steps"], config["warmup"] = a.max_steps, a.warmup   # probe mechanics, not swift levers
     config["wait"] = a.wait                                          # opt-in data-wait measurement
     if a.scan:                                         # phase-0 capability scan (once per session)
+        config["check_libs"] = [s.strip() for s in a.check_libs.split(",") if s.strip()] if a.check_libs else []
         env = scan_env(config)
         print(json.dumps(env, indent=2))
         write_env_scan(config, env)
