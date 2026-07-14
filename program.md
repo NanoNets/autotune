@@ -74,13 +74,15 @@ LLM picks config → run on Modal → probe returns JSON → LLM reads result/fa
 ## Dataset pre-scan (run once, before any probe)
 
 Before the first GPU probe, measure what the model actually ingests. `dataset_token_scan.py`
-computes the **true per-sample length = image tokens + text tokens** (not text-only): image
-tokens from Qwen's `smart_resize` formula on each image's native `(W,H)` — read lazily from the
-file header, no decode — pinned to the model's real processor config; text tokens from a fast
-tokenizer pass. No model forward, no per-sample `AutoProcessor` call.
+**auto-detects modality from the data** (image columns present → vision, else text-only) and
+computes the true per-sample length. Text-only: a fast tokenizer pass. Vision: image tokens
+(Qwen-VL's `smart_resize` formula on each image's native `(W,H)`, read lazily from the file
+header — no decode — pinned to the model's real processor config) **+** text tokens. No model
+forward, no per-sample `AutoProcessor` call. Model/dataset default to `config.json`.
 
 ```bash
-python dataset_token_scan.py --out token_scan.json          # full scan
+python dataset_token_scan.py --out token_scan.json          # full scan (model/dataset from config.json)
+python dataset_token_scan.py --dataset <hub_id> --subset <name>   # override / dataset with a subset
 python dataset_token_scan.py --max-samples 2000             # quick look
 ```
 
