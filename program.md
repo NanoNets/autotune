@@ -10,20 +10,31 @@ pick the next. The knobs are defined in `search_space.md`; this file is *how the
 ## Goal
 
 Maximize **training throughput (tokens/second)** for the given setup without hitting OOM.
-tokens/s is the primary metric (packed, variable-length OCR data); samples/s is a cross-check.
+tokens/s is the primary metric (packed, variable-length data); samples/s is a cross-check.
 The probe measures everything and returns structured JSON — the LLM never parses raw logs and
-never asserts a metric.
+never asserts a metric. The setup is whatever `config.json` names — any model, dataset, and GPU.
 
 ---
 
-## Inputs (fixed — not tuned)
+## Config — every variable, and how the loop treats it
 
-- **Hardware** (e.g. 4× H100) — set by the Modal `@app.function(gpu=...)`.
-- **Model** (architecture + size).
-- **Dataset** (the data to train on).
-- **Effective-batch target** — `bs × ga × world_size`. Fixes gradient noise scale, so it's a
-  training-quality decision the user owns. The loop only chooses the `bs × ga` factorization
-  that hits it.
+Everything the run needs is in `config.json`. `model` + `dataset` are required; the rest have
+defaults, so any version of the file runs. The loop reads these and never edits the *fixed* ones.
+
+| Key | Role | The loop's job |
+|---|---|---|
+| `model` | Fixed input | Modality (text vs vision) is auto-detected on-box → picks the synthetic dev data and which extensions apply. |
+| `dataset` | Fixed input | `synthetic` = tiny on-box dev data (text or image, by modality); anything else = a HF hub id used as-is. |
+| `gpu` | Fixed input (hardware) | Modal GPU SKU (e.g. `A10G`, `H100`). The probe returns `gpu_name` + `gpu_mem_gb`, so the loop knows the memory ceiling. On an SSH VM the box IS the hardware and `gpu` is ignored. |
+| `per_device_train_batch_size` (bs) | **Searched** — primary lever | Double it upward until OOM or saturation. |
+| `gradient_accumulation_steps` (ga) | Derived | Held so `bs × ga = effective_batch` (the fixed target). |
+| `attn_impl` | Throughput knob | `flash_attn` default; if the model has no flash kernel the probe errors → set `sdpa` and continue. Also selects the Modal image, so the kernel is always installed. |
+| `max_steps` | Fixed | Probe length (default 7: 2 warmup + steady-state). |
+| optional knobs | Searched / reactive | `padding_free`, `packing`, `gradient_checkpointing`, `vit_gradient_checkpointing`, `dataloader_num_workers`, `max_length` — see `search_space.md`. Passed only when set. |
+
+**Effective-batch target** = `bs × ga` (samples per gradient update; on multi-GPU, × world_size).
+It fixes the gradient noise scale, so it's a training-quality decision the user owns — the loop only
+chooses the `bs × ga` factorization that hits it, never the target itself.
 
 ---
 
@@ -51,6 +62,8 @@ LOOP until throughput plateaus or budget is hit:
     status == oom          → back off: drop bs (raise ga to hold effective_batch), or enable
                              gradient_checkpointing / vit_gradient_checkpointing
                              (the extension protocol below)
+    status == error        → read error_detail. If it names flash-attn (model has no flash kernel),
+                             set attn_impl=sdpa and re-probe. Otherwise fix the surfaced cause.
     gpu_util ~100%         → COMPUTE-BOUND: push throughput knobs (bs↑, padding_free, packing).
                              Do NOT touch dataloader_num_workers — the GPU isn't waiting on data.
     gpu_util low + CPU has → DATA-BOUND with headroom: add dataloader_num_workers.
@@ -113,8 +126,9 @@ deps with `pip install -r requirements.txt`.
 **Modal** (`AUTOTUNE_BACKEND=modal`, default) — serverless GPU, no machine to manage:
 
 - Auth: `~/.modal.toml` (via `modal setup`). HF creds: the Modal Secret `hf-token`.
-- Image: the default (sdpa + flash-linear-attention) builds fast; `flash_image` (prebuilt flash-attn
-  wheel) is needed for the real model + `padding_free` (UNVERIFIED — needs one deploy).
+- Image: chosen by `attn_impl` — the fast base build (sdpa) by default, or the flash-attn build when
+  `attn_impl=flash_attn` (first flash build ~10-20 min). GPU SKU from `config.json` `gpu` / `MODAL_GPU`.
+  The deps are a superset (text + VLM + linear-attention), so one image serves any model.
 
 **SSH VM** (`AUTOTUNE_BACKEND=ssh`; `paperspace` / `lambda` are accepted aliases) — your own rented box:
 
@@ -125,11 +139,12 @@ deps with `pip install -r requirements.txt`.
 - The probe uploads and runs `probe_runner.py` on the VM and reads the result back — nothing to
   pre-install beyond ms-swift (the VM's swift-env).
 
-Dev track (either backend): public model `Qwen/Qwen2.5-VL-3B-Instruct` + synthetic image JSONL.
-Real run: set the work model + `nn_ocr4` dataset in `config.json` and `attn_impl='flash_attn'`.
+Dev track (either backend): `dataset: "synthetic"` generates tiny on-box data matched to the model's
+modality (text or image) — no hub access needed. Real run: set the real `model` + a HF `dataset` id
+(and its `--subset` for the pre-scan) in `config.json`.
 
-Machine context comes back **in the probe result** (`gpu_mem_gb`, `cpu_util`) on either backend — no
-separate machine-info step. Worker counts should not exceed `nproc // 2`.
+Machine context comes back **in the probe result** (`gpu_name`, `gpu_mem_gb`, `cpu_util`) on either
+backend — no separate machine-info step. Worker counts should not exceed `nproc // 2`.
 
 ---
 
@@ -141,6 +156,7 @@ separate machine-info step. Worker counts should not exceed `nproc // 2`.
 {
   "model": "Qwen/Qwen2.5-VL-3B-Instruct",
   "dataset": "synthetic",
+  "gpu": "A10G",
   "per_device_train_batch_size": 2,
   "gradient_accumulation_steps": 4,
   "max_steps": 7,
@@ -176,7 +192,7 @@ raw training log.
   "peak_mem_gb": 4.68,             // OOM margin
   "gpu_util_max": 98, "gpu_util_mean": 71.0,   // ~100% => compute-bound
   "cpu_util_max": 96, "cpu_util_mean": 60.0,   // best-effort (psutil); WHY the GPU is idle
-  "gpu_mem_gb": 24.0,              // total GPU memory
+  "gpu_mem_gb": 24.0, "gpu_name": "A10G",      // total GPU memory + SKU (hardware context)
   "steps_measured": 4,
   "error_detail": null             // on failure: the relevant message (OOM shape, traceback, …)
 }
@@ -192,7 +208,7 @@ raw training log.
 
 ## Metric
 
-**Primary: tokens/second** (steady-state). With `padding_free` / `packing` + variable-length OCR
+**Primary: tokens/second** (steady-state). With `padding_free` / `packing` + variable-length
 data, sequences are packed and per-step token volume varies, so samples/s isn't comparable across
 configs — only tokens/s is. **Cross-check: samples/second.**
 
@@ -315,7 +331,7 @@ the per-run journal of probes (config → result) plus the running best. No cros
 
 ```json
 {
-  "machine": { "gpu_mem_gb": 24, "gpu": "A10G" },
+  "machine": { "gpu_mem_gb": 24, "gpu_name": "A10G" },
   "model": "...", "effective_batch": 16,
   "active_extensions": ["padding_free"],
   "best": { "bs": 2, "ga": 8, "flags": ["padding_free"], "tokens_per_s": 9421 },
