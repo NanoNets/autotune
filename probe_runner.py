@@ -81,9 +81,20 @@ def parse_metrics(text, effective_batch, warmup=2):
 # ------------------------------------------------------------------------------
 
 
-def _synthetic_dataset(path="/tmp/probe_data.jsonl"):
-    """Tiny synthetic IMAGE dataset (dev) — production is OCR, so vision tokens (image resolution)
-    drive memory + throughput. Vary resolution per sample to exercise that (and padding_free)."""
+def _is_vision_model(model: str) -> bool:
+    """Vision (image-in) model? Read the model's HF config on-box (transformers is present here).
+    VLMs carry a nested vision_config; fall back to a name heuristic if the config can't be fetched."""
+    try:
+        from transformers import AutoConfig
+        cfg = AutoConfig.from_pretrained(model, trust_remote_code=True)
+        return hasattr(cfg, "vision_config") or "vl" in getattr(cfg, "model_type", "").lower()
+    except Exception:
+        return any(t in model.lower() for t in ("-vl", "vl-", "vision", "llava"))
+
+
+def _synthetic_image_dataset(path="/tmp/probe_data.jsonl"):
+    """Tiny synthetic IMAGE dataset (dev, vision models) — vision tokens (image resolution) drive
+    memory + throughput. Vary resolution per sample to exercise that (and padding_free)."""
     from PIL import Image
     os.makedirs("/tmp/imgs", exist_ok=True)
     with open(path, "w") as f:
@@ -99,16 +110,32 @@ def _synthetic_dataset(path="/tmp/probe_data.jsonl"):
     return path
 
 
-def run_probe(config: dict) -> dict:
-    """Run one probe and return the Layer-1 result dict. Identical on every backend."""
-    bs = config["per_device_train_batch_size"]
-    ga = config["gradient_accumulation_steps"]
-    eff = bs * ga
+def _synthetic_text_dataset(path="/tmp/probe_data.jsonl"):
+    """Tiny synthetic TEXT dataset (dev, text models) — varied-length messages to exercise the
+    length distribution that packing / padding_free act on."""
+    with open(path, "w") as f:
+        for i in range(128):
+            n = 20 + (i % 6) * 60                # varied length → uneven steps, like real data
+            f.write(json.dumps({
+                "messages": [{"role": "user", "content": "Summarize this: " + ("lorem ipsum " * n)},
+                             {"role": "assistant", "content": "A concise summary of the text."}],
+            }) + "\n")
+    return path
 
-    # dev track: a tiny synthetic dataset avoids all hub/dataset-id flakiness. Real runs pass a hub id.
+
+def run_probe(config: dict) -> dict:
+    """Run one probe and return the Layer-1 result dict. Identical on every backend.
+    Reads knobs with defaults so any config version runs (only model + dataset are required)."""
+    bs = config.get("per_device_train_batch_size", 1)
+    ga = config.get("gradient_accumulation_steps", 1)
+    eff = bs * ga
+    attn = config.get("attn_impl", "flash_attn")
+
+    # dev track: a tiny synthetic dataset avoids all hub/dataset-id flakiness — text or image to
+    # match the model's modality. Real runs pass a hub id (any modality) straight through.
     ds = config["dataset"]
     if ds == "synthetic":
-        ds = _synthetic_dataset()
+        ds = _synthetic_image_dataset() if _is_vision_model(config["model"]) else _synthetic_text_dataset()
 
     cmd = [
         "swift", "sft",
@@ -120,11 +147,11 @@ def run_probe(config: dict) -> dict:
         "--padding_free", str(config.get("padding_free", False)).lower(),
         "--gradient_checkpointing", str(config.get("gradient_checkpointing", False)).lower(),
         "--dataloader_num_workers", str(config.get("dataloader_num_workers", 1)),
-        "--max_length", str(config.get("max_length", 8192)),   # room for vision tokens (OCR images)
+        "--max_length", str(config.get("max_length", 8192)),   # universal cap; leaves room for vision tokens
         "--truncation_strategy", "delete",                      # drop any over-length sample, don't crash
-        "--max_steps", str(config["max_steps"]),
+        "--max_steps", str(config.get("max_steps", 7)),
         "--logging_steps", "1",                      # required for per-step parsing
-        "--attn_impl", config["attn_impl"],
+        "--attn_impl", attn,
         "--include_num_input_tokens_seen", "true",   # emits num_input_tokens_seen → tokens/s
         "--output_dir", "/tmp/out",
         "--report_to", "none",
@@ -194,11 +221,13 @@ def run_probe(config: dict) -> dict:
             tail = [ln.strip() for ln in log.splitlines() if ln.strip()]
             error_detail = tail[-1] if tail else None
 
-    gpu_mem_gb = None                                 # total GPU memory — informs the OOM ceiling
+    gpu_mem_gb, gpu_name = None, None                 # total GPU memory + SKU — informs the OOM ceiling
     try:
-        r = subprocess.run(["nvidia-smi", "--query-gpu=memory.total", "--format=csv,noheader,nounits"],
+        r = subprocess.run(["nvidia-smi", "--query-gpu=memory.total,name", "--format=csv,noheader,nounits"],
                            capture_output=True, text=True, timeout=5)
-        gpu_mem_gb = round(int(r.stdout.strip().splitlines()[0]) / 1024, 1)
+        mem, _, name = r.stdout.strip().splitlines()[0].partition(",")
+        gpu_mem_gb = round(int(mem.strip()) / 1024, 1)
+        gpu_name = name.strip() or None
     except Exception:
         pass
 
@@ -206,9 +235,10 @@ def run_probe(config: dict) -> dict:
         "status": status,
         "returncode": rc,
         "config": {"model": config["model"], "bs": bs, "ga": ga,
-                   "effective_batch": eff, "attn_impl": config["attn_impl"]},
+                   "effective_batch": eff, "attn_impl": attn},
         **parse_metrics(log, eff),
         "gpu_mem_gb": gpu_mem_gb,
+        "gpu_name": gpu_name,
         "gpu_util_max": max(gpu) if gpu else None,
         "gpu_util_mean": round(sum(gpu) / len(gpu), 1) if gpu else None,
         "cpu_util_max": max(cpu) if cpu else None,
