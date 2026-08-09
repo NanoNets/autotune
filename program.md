@@ -127,7 +127,7 @@ deps with `pip install -r requirements.txt`.
 
 - Auth: `~/.modal.toml` (via `modal setup`). HF creds: the Modal Secret `hf-token`.
 - Image: chosen by `attn_impl` — the fast base build (sdpa) by default, or the flash-attn build when
-  `attn_impl=flash_attn` (first flash build ~10-20 min). GPU SKU from `config.json` `gpu` / `MODAL_GPU`.
+  `attn_impl=flash_attn` (first flash build ~10-20 min). GPU SKU from `config.json` `gpu`.
   The deps are a superset (text + VLM + linear-attention), so one image serves any model.
 
 **SSH VM** (`AUTOTUNE_BACKEND=ssh`; `paperspace` / `lambda` are accepted aliases) — your own rented box:

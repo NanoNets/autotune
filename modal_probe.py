@@ -8,21 +8,20 @@ Usually invoked via the backend dispatcher (`AUTOTUNE_BACKEND=modal python probe
 run standalone for a quick Modal-only check:  modal run modal_probe.py
 """
 import json
-import os
 
 import modal
 
 app = modal.App("autotune-probe")
 
-# Infra (GPU SKU + image) follows config.json / env so any hardware + attention impl works. Modal
-# fixes these on the function decorator, so read them at import. GPU: config["gpu"] > MODAL_GPU env
-# > A10G default. Image: flash-attn build when attn_impl=flash_attn, else the fast base build.
+# Infra (GPU SKU + image) follows config.json so any hardware + attention impl works. Modal fixes
+# these on the function decorator, so read config at import. GPU from config["gpu"] (default A10G);
+# image is the flash-attn build when attn_impl=flash_attn, else the fast base build.
 _cfg = {}
 try:
     _cfg = json.load(open("config.json"))
 except Exception:
     pass
-GPU = _cfg.get("gpu") or os.environ.get("MODAL_GPU", "A10G")
+GPU = _cfg.get("gpu", "A10G")
 _ATTN = _cfg.get("attn_impl", "flash_attn")
 
 # Base image: sdpa/default attention, fast to build. Deps are a superset that covers text, VLM
