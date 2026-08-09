@@ -4,8 +4,8 @@ Thin wrapper: it ships `probe_runner.py` to a Modal serverless GPU and runs the 
 `run_probe()` there. The probe pipeline itself lives in `probe_runner.py` (same code the SSH
 backend runs), so Modal and an SSH VM measure identically.
 
-Usually invoked via the backend dispatcher (`AUTOTUNE_BACKEND=modal python probe.py`); can also be
-run standalone for a quick Modal-only check:  modal run modal_probe.py
+Usually invoked via the backend dispatcher (`python probe.py` with `"backend": "modal"` in
+config.json); can also be run standalone for a quick Modal-only check:  modal run modal_probe.py
 """
 import json
 

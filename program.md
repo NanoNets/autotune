@@ -23,6 +23,7 @@ defaults, so any version of the file runs. The loop reads these and never edits 
 
 | Key | Role | The loop's job |
 |---|---|---|
+| `backend` | Fixed input (infra) | Where the probe runs: `modal` or `ssh` (`paperspace`/`lambda` alias ssh). SSH connection is in the `ssh` block; auth secret is in env. |
 | `model` | Fixed input | Modality (text vs vision) is auto-detected on-box → picks the synthetic dev data and which extensions apply. |
 | `dataset` | Fixed input | `synthetic` = tiny on-box dev data (text or image, by modality); anything else = a HF hub id used as-is. |
 | `gpu` | Fixed input (hardware) | Modal GPU SKU (e.g. `A10G`, `H100`). The probe returns `gpu_name` + `gpu_mem_gb`, so the loop knows the memory ceiling. On an SSH VM the box IS the hardware and `gpu` is ignored. |
@@ -118,24 +119,24 @@ or the image-token counts (and the image-vs-text split) will be off.
 
 ## Setup — pick a backend
 
-The agent (Claude Code) runs **locally** and holds all state; the probe runs on a GPU backend you
-choose with the `AUTOTUNE_BACKEND` env var. Same pipeline (`probe_runner.py`), same metrics — only
-*where the probe runs* changes. Secrets/connection come from env (`.env.example`); install the local
-deps with `pip install -r requirements.txt`.
+The agent (Claude Code) runs **locally** and holds all state; the probe runs on the GPU backend named
+by `config.json` `backend`. Same pipeline (`probe_runner.py`), same metrics — only *where the probe
+runs* changes. Everything is configured in `config.json`; only secrets live in env (`.env.example`).
+Install the local deps with `pip install -r requirements.txt`.
 
-**Modal** (`AUTOTUNE_BACKEND=modal`, default) — serverless GPU, no machine to manage:
+**Modal** (`"backend": "modal"`, default) — serverless GPU, no machine to manage:
 
 - Auth: `~/.modal.toml` (via `modal setup`). HF creds: the Modal Secret `hf-token`.
 - Image: chosen by `attn_impl` — the fast base build (sdpa) by default, or the flash-attn build when
   `attn_impl=flash_attn` (first flash build ~10-20 min). GPU SKU from `config.json` `gpu`.
   The deps are a superset (text + VLM + linear-attention), so one image serves any model.
 
-**SSH VM** (`AUTOTUNE_BACKEND=ssh`; `paperspace` / `lambda` are accepted aliases) — your own rented box:
+**SSH VM** (`"backend": "ssh"`; `paperspace` / `lambda` are accepted aliases) — your own rented box:
 
-- `AUTOTUNE_SSH_HOST`, `AUTOTUNE_SSH_USER`, and ONE of `AUTOTUNE_SSH_KEY` (Lambda) or
-  `AUTOTUNE_SSH_PASSWORD` (Paperspace).
-- `AUTOTUNE_SSH_ACTIVATE` — the command to enter the swift env (e.g.
-  `source ~/envs/swift-env/bin/activate`); `HF_TOKEN` is forwarded to the box.
+- `config.json` `ssh`: `host`, `user` (required); `activate` (enter the swift env, e.g.
+  `source ~/envs/swift-env/bin/activate`), `remote_dir`, `cuda_visible_devices` (optional).
+- The auth secret is in env: ONE of `AUTOTUNE_SSH_KEY` (Lambda) or `AUTOTUNE_SSH_PASSWORD`
+  (Paperspace); `HF_TOKEN` is forwarded to the box.
 - The probe uploads and runs `probe_runner.py` on the VM and reads the result back — nothing to
   pre-install beyond ms-swift (the VM's swift-env).
 
@@ -154,6 +155,7 @@ backend — no separate machine-info step. Worker counts should not exceed `npro
 
 ```json
 {
+  "backend": "modal",
   "model": "Qwen/Qwen2.5-VL-3B-Instruct",
   "dataset": "synthetic",
   "gpu": "A10G",
@@ -163,16 +165,18 @@ backend — no separate machine-info step. Worker counts should not exceed `npro
   "attn_impl": "flash_attn"
 }
 ```
+(For `"backend": "ssh"`, add an `ssh` block — `host`/`user` required, `activate`/`remote_dir`/
+`cuda_visible_devices` optional; the auth secret stays in env.)
 
 Optional knobs (add as needed): `padding_free`, `packing` (throughput levers);
 `gradient_checkpointing`, `vit_gradient_checkpointing` (OOM ceiling-breakers); `dataloader_num_workers`
 (reactive, only if data-bound).
 
-**Step 2 — run it** — the same command for every backend:
+**Step 2 — run it** — the same command for every backend (`backend` in config.json picks where):
 
 ```bash
 source venv/bin/activate
-AUTOTUNE_BACKEND=modal python probe.py      # or: ssh / paperspace / lambda
+python probe.py
 ```
 
 **Step 3 — read the printed Layer-1 JSON.** The probe parses its OWN output on the GPU and returns

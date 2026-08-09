@@ -1,18 +1,21 @@
 """SSH-VM backend for the autotune probe (Paperspace, Lambda Labs, any SSH GPU box).
 
 Uploads `probe_runner.py` + the config to the VM, runs it over SSH, and returns the SAME Layer-1
-JSON the Modal backend returns. Connection + secrets come entirely from env, so the user just
-exports them and picks the backend — no code changes:
+JSON the Modal backend returns. The connection lives in config.json under `ssh`; only the auth
+secret lives in env.
 
-  AUTOTUNE_SSH_HOST              (required)  e.g. 184.105.190.154
-  AUTOTUNE_SSH_USER              (required)  e.g. paperspace / ubuntu
-  AUTOTUNE_SSH_PASSWORD          (one of)    password auth (Paperspace)
-  AUTOTUNE_SSH_KEY               (one of)    path to a private key (Lambda Labs)
-  AUTOTUNE_SSH_ACTIVATE          (optional)  enter the swift env, e.g.
-                                             'source ~/envs/swift-env/bin/activate'
-  AUTOTUNE_REMOTE_DIR            (optional)  default /tmp/autotune
-  AUTOTUNE_CUDA_VISIBLE_DEVICES  (optional)  default '0'
-  HF_TOKEN                       (optional)  forwarded so swift can pull the model/dataset
+  config.json "ssh": {
+    "host": "184.105.190.154",       // required
+    "user": "paperspace",            // required (e.g. paperspace / ubuntu)
+    "activate": "source ~/envs/swift-env/bin/activate",   // optional — enter the swift env
+    "remote_dir": "/tmp/autotune",   // optional
+    "cuda_visible_devices": "0"      // optional
+  }
+
+  env (secrets only):
+    AUTOTUNE_SSH_PASSWORD  (one of)  password auth (Paperspace)
+    AUTOTUNE_SSH_KEY       (one of)  path to a private key (Lambda Labs)
+    HF_TOKEN              (optional) forwarded so swift can pull the model/dataset
 """
 import json
 import os
@@ -27,12 +30,12 @@ def _echo(config):
             "attn_impl": config.get("attn_impl")}
 
 
-def _connect():
+def _connect(ssh):
     import paramiko
-    host = os.environ["AUTOTUNE_SSH_HOST"]
-    user = os.environ["AUTOTUNE_SSH_USER"]
-    key = os.environ.get("AUTOTUNE_SSH_KEY")
-    password = os.environ.get("AUTOTUNE_SSH_PASSWORD")
+    host = ssh.get("host")
+    user = ssh.get("user")
+    key = os.environ.get("AUTOTUNE_SSH_KEY")            # secret → env
+    password = os.environ.get("AUTOTUNE_SSH_PASSWORD")  # secret → env
     client = paramiko.SSHClient()
     client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
     if key:
@@ -52,19 +55,20 @@ def run_probe(config: dict) -> dict:
         return {"status": "error", "config": _echo(config),
                 "error_detail": "SSH backend needs paramiko — `pip install paramiko`"}
 
-    for var in ("AUTOTUNE_SSH_HOST", "AUTOTUNE_SSH_USER"):
-        if not os.environ.get(var):
+    ssh = config.get("ssh", {})
+    for key in ("host", "user"):
+        if not ssh.get(key):
             return {"status": "error", "config": _echo(config),
-                    "error_detail": f"missing required env var {var}"}
+                    "error_detail": f"missing config.json ssh.{key}"}
 
-    remote_dir = os.environ.get("AUTOTUNE_REMOTE_DIR", "/tmp/autotune")
-    activate = os.environ.get("AUTOTUNE_SSH_ACTIVATE", "").strip()
-    cvd = os.environ.get("AUTOTUNE_CUDA_VISIBLE_DEVICES", "0")
-    hf = os.environ.get("HF_TOKEN", "")
+    remote_dir = ssh.get("remote_dir") or "/tmp/autotune"
+    activate = (ssh.get("activate") or "").strip()
+    cvd = str(ssh.get("cuda_visible_devices") or "0")
+    hf = os.environ.get("HF_TOKEN", "")                 # secret → env
     here = os.path.dirname(os.path.abspath(__file__))
 
     try:
-        client = _connect()
+        client = _connect(ssh)
     except Exception as e:
         return {"status": "error", "config": _echo(config), "error_detail": f"ssh connect failed: {e}"}
 

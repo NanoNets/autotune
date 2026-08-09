@@ -30,7 +30,7 @@ The intelligence (which config to try next) and the measurement (one probe) are 
   bottleneck-characterization read; batch-size search, OOM → `padding_free`/`gradient_checkpointing`
   recovery, and saturation detection follow from there.
 - `probe_runner.py` — one short `swift sft` run that returns measured metrics JSON, never raw logs.
-  It runs on a **GPU backend you pick** (`AUTOTUNE_BACKEND`): Modal serverless, or your own SSH GPU
+  It runs on a **GPU backend you pick** (`config.json` `backend`): Modal serverless, or your own SSH GPU
   VM (Paperspace, Lambda Labs, …). Same pipeline, same metrics — only *where it runs* changes.
 
 ```
@@ -61,20 +61,21 @@ captures it live (`Δ tokens / Δ elapsed` over the steady-state window) alongsi
 
 ## Run it
 
-One-time setup: `pip install -r requirements.txt`, then configure the backend you want in `.env`
-(copy from `.env.example`):
+One-time setup: `pip install -r requirements.txt`. Everything is configured in `config.json`; only
+secrets go in `.env` (copy from `.env.example`). Set `"backend"` in `config.json`:
 
-- **Modal** (`AUTOTUNE_BACKEND=modal`): `modal setup` (writes `~/.modal.toml`) and store an HF token
-  as a Modal secret — `modal secret create hf-token HF_TOKEN=hf_...`.
-- **SSH VM** (`AUTOTUNE_BACKEND=ssh`): set `AUTOTUNE_SSH_HOST` / `AUTOTUNE_SSH_USER` and one of
-  `AUTOTUNE_SSH_KEY` (Lambda) or `AUTOTUNE_SSH_PASSWORD` (Paperspace), plus `AUTOTUNE_SSH_ACTIVATE`.
+- **Modal** (`"backend": "modal"`): `modal setup` (writes `~/.modal.toml`) and store an HF token as a
+  Modal secret — `modal secret create hf-token HF_TOKEN=hf_...`.
+- **SSH VM** (`"backend": "ssh"`): fill the `ssh` block (`host`/`user`, optional `activate`) in
+  `config.json`; put the auth secret (`AUTOTUNE_SSH_KEY` for Lambda or `AUTOTUNE_SSH_PASSWORD` for
+  Paperspace) in `.env`.
 
 Then drive the loop one probe at a time — set the config in `config.json` and run the same command
 regardless of backend:
 
 ```bash
 source venv/bin/activate
-AUTOTUNE_BACKEND=modal python probe.py     # or: ssh / paperspace / lambda
+python probe.py
 ```
 
 Read the printed result (also saved to `probe_result.json`), pick the next config per `program.md`,
@@ -100,7 +101,7 @@ Point it at your setup and drive the loop.
 |---|---|
 | `search_space.md` | The knobs — throughput-safe (searchable) vs training-semantic (off-limits) + fixed inputs |
 | `program.md` | How the loop runs — the authoritative runbook |
-| `probe.py` | Backend-agnostic entrypoint — reads `config.json`, dispatches on `AUTOTUNE_BACKEND`, prints metrics JSON |
+| `probe.py` | Backend-agnostic entrypoint — reads `config.json`, dispatches on its `backend`, prints metrics JSON |
 | `probe_runner.py` | The portable probe pipeline — runs `swift sft`, samples GPU/CPU, parses metrics (runs on whichever backend) |
 | `modal_probe.py` | Modal backend — ships `probe_runner` to a Modal serverless GPU |
 | `vm_probe.py` | SSH-VM backend — runs `probe_runner` on a Paperspace/Lambda/any SSH GPU box |
