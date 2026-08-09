@@ -8,42 +8,54 @@ Usually invoked via the backend dispatcher (`AUTOTUNE_BACKEND=modal python probe
 run standalone for a quick Modal-only check:  modal run modal_probe.py
 """
 import json
+import os
 
 import modal
 
 app = modal.App("autotune-probe")
 
-# Default image: sdpa attention, no flash-attn (fast to build; fine for the dev model + the loop).
-# `add_local_python_source` bakes probe_runner.py into the image so the function can import it.
-image = (
+# Infra (GPU SKU + image) follows config.json / env so any hardware + attention impl works. Modal
+# fixes these on the function decorator, so read them at import. GPU: config["gpu"] > MODAL_GPU env
+# > A10G default. Image: flash-attn build when attn_impl=flash_attn, else the fast base build.
+_cfg = {}
+try:
+    _cfg = json.load(open("config.json"))
+except Exception:
+    pass
+GPU = _cfg.get("gpu") or os.environ.get("MODAL_GPU", "A10G")
+_ATTN = _cfg.get("attn_impl", "flash_attn")
+
+# Base image: sdpa/default attention, fast to build. Deps are a superset that covers text, VLM
+# (qwen_vl_utils/decord), and linear-attention (flash-linear-attention) models — unused deps are
+# harmless, so one image serves any model. `add_local_python_source` bakes probe_runner in.
+base_image = (
     modal.Image.debian_slim(python_version="3.11")
-    # Qwen3.5-0.8B is a vision + linear-attention model -> VL stack + flash-linear-attention
-    # (its padding_free / single-sequence path needs fla).
     .pip_install("torch", "torchvision", "ms-swift", "modelscope", "qwen_vl_utils", "decord",
-                 "flash-linear-attention", "psutil")
+                 "flash-linear-attention", "psutil", "pillow")
     .add_local_python_source("probe_runner")
 )
 
-# Flash-attn image — UNVERIFIED (needs a deploy to validate the build; ~10-20min first compile).
-# Only needed for the real model and padding_free runs.
+# Flash-attn image: base deps + a PREBUILT flash-attn wheel matched to a pinned torch (cu12, torch2.6,
+# cp311, cxx11abiFALSE — the ABI torch's pip wheels use). No compile -> no ABI mismatch. First build
+# ~10-20min. Used when attn_impl=flash_attn.
 flash_image = (
     modal.Image.debian_slim(python_version="3.11")
-    # Pinned torch (cu124) + a PREBUILT flash-attn wheel matched to it (cu12, torch2.6, cp311,
-    # cxx11abiFALSE = the ABI torch pip wheels use). No compilation -> no ABI/compiler mismatch.
     .pip_install("torch==2.6.0", "torchvision==0.21.0",
                  index_url="https://download.pytorch.org/whl/cu124")
-    .pip_install("ms-swift", "modelscope", "qwen_vl_utils", "decord", "flash-linear-attention", "psutil")
+    .pip_install("ms-swift", "modelscope", "qwen_vl_utils", "decord", "flash-linear-attention",
+                 "psutil", "pillow")
     .pip_install("https://github.com/Dao-AILab/flash-attention/releases/download/v2.7.4.post1/"
                  "flash_attn-2.7.4.post1+cu12torch2.6cxx11abiFALSE-cp311-cp311-linux_x86_64.whl")
     .add_local_python_source("probe_runner")
 )
 
+image = flash_image if _ATTN == "flash_attn" else base_image
 hf_cache = modal.Volume.from_name("autotune-hf-cache", create_if_missing=True)
 
 
 @app.function(
-    image=flash_image,                # padding_free on Qwen3.5 requires flash-attn
-    gpu="A10G",
+    image=image,
+    gpu=GPU,
     volumes={"/root/.cache/huggingface": hf_cache},
     secrets=[modal.Secret.from_name("hf-token")],
     timeout=1800,                     # probe RUN ceiling (not the image build, which has its own budget)
