@@ -78,8 +78,8 @@ AUTOTUNE_BACKEND=modal python probe.py     # or: ssh / paperspace / lambda
 ```
 
 Read the printed result (also saved to `probe_result.json`), pick the next config per `program.md`,
-repeat. The dev track uses a public vision model + synthetic image data (no special access needed) —
-swap the model/dataset in `config.json` for the real run.
+repeat. The dev track uses a public model + synthetic data matched to the model's modality (text or
+image, no special access needed) — swap the model/dataset in `config.json` for the real run.
 
 ---
 
@@ -87,12 +87,10 @@ swap the model/dataset in `config.json` for the real run.
 
 The v1 loop is defined in `search_space.md` + `program.md` and driven against a backend-agnostic
 probe (`probe_runner.py`) that returns the corrected tokens/s metric plus peak memory, GPU/CPU
-utilization, and structured failure detail — on Modal or an SSH GPU VM. Deploy-verifying one
-end-to-end probe on each backend (and the flash-attn image build) is the next step.
-
-Remaining: the production model (`Qwen3.5-0.8B` — a linear-attention model that needs the prod env's
-`flash-linear-attention`/`triton` pins) and a real re-baseline against the work dataset (`nn_ocr4`)
-under the work Modal workspace.
+utilization, and structured failure detail — on Modal or an SSH GPU VM. It runs for any model,
+dataset, and GPU named in `config.json`: modality (text vs vision) is auto-detected, the Modal
+image and GPU follow the config, and the loop searches the throughput knobs to the fastest config.
+Point it at your setup and drive the loop.
 
 ---
 

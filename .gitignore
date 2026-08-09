@@ -24,12 +24,15 @@ venv/
 env/
 ENV/
 
-# Autotune outputs / state
+# Autotune outputs / state (run artifacts + private data — not shared)
 output/
 completed_runs/
 *.log
 loop_state.json
 probe_result.json
+search_state*.json
+token_scan.json
+train.jsonl
 
 # Editor / IDE
 .idea/
