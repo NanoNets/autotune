@@ -7,8 +7,7 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from profiler.roofline import training_flops, step_time_floor_s, mfu
-from profiler.specs import GPU_SPECS
+from profiler.roofline import training_flops, step_time_floor_s, mfu, GPU_SPECS
 
 
 def test_training_flops_is_6ND():

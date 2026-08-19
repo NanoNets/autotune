@@ -1,11 +1,10 @@
 """Profile one config and print the diagnostic — the local tool.
 
-  python profile.py            # torch fixture runner on CPU (smoke)
+  python profile.py --device cpu     # torch fixture runner on CPU (smoke)
 
-Ties the pieces together: capture (clean time + profiled trace) → diagnose (roofline + trace
-→ Observation). Roofline/trace/diagnostic are torch-free; only capture + the runner need torch.
-`--gpu` is the roofline denominator (the hardware you're optimizing for); on a CPU smoke run
-MFU is meaningless, it just exercises the pipeline.
+capture (clean time + memory + profiled trace) -> diagnose (roofline + trace -> Observation).
+Diagnostic / roofline / trace are torch-free; only capture + the runner need torch. `--gpu` is
+the roofline denominator; on CPU MFU and memory are meaningless, it just exercises the pipeline.
 """
 import argparse
 import json
@@ -26,9 +25,10 @@ def main():
     runner = TorchRunner()
     config = {"device": args.device, "micro_batch": args.micro_batch, "seq": args.seq}
 
-    clean, trace_path = capture(runner, config)
-    obs = diagnose(clean, trace_path,
-                   params=runner.params, tokens=runner.tokens_per_step(), gpu=args.gpu)
+    cap = capture(runner, config)
+    params = getattr(runner, "params", 0)            # 0 if setup failed before params were set
+    tokens = runner.tokens_per_step() if params else 0
+    obs = diagnose(cap, params=params, tokens=tokens, gpu=args.gpu)
 
     print(obs.summary)
     print(json.dumps(obs.__dict__, indent=2, default=str))
