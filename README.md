@@ -1,138 +1,60 @@
-# auto_tune
+# autotune
 
-> The Auto-Research loop applied to GPU training throughput.
+> Find the fastest training config for your hardware — automatically, without touching model quality.
 
-auto_tune finds the GPU training config that runs fastest. A badly configured run can leave
-2–4x throughput on the table — from parameters like batch size, gradient accumulation, and
-dataloader workers. Tuning these by hand means hours of OOM crashes and log-reading. auto_tune
-does the search for you: it explores the config space and reports the settings that maximize
-throughput for a given model, dataset, and GPU.
+**Status: early. Rebuilding from scratch, profiler-first.** This is a working skeleton, not a finished tool.
 
-It uses the Auto-Research pattern — **propose → evaluate → update** — against one objective:
-maximize training throughput.
+autotune is a research loop that profiles a real training step, sees where the time is going against
+the hardware's roofline, and searches the configuration space for the settings that maximize throughput
+— for any model, GPU, and framework. It only ever changes settings that affect *speed*, never ones that
+change the model you get, so a faster config is never a worse model.
 
----
+The intelligence is an LLM agent following the markdown in `loop/`; the measurement is deterministic
+code in `profiler/`. **The agent decides; the code measures.**
 
-## The loop
+## Where it's at
 
-```
-read history → reason → propose next config → probe runs it → record → repeat
-```
+We build the measurement tools first, validate them by hand, then encode the agent. Today the roofline
+calculator, trace parser, and diagnostic assembler are built and TDD-tested; the capture engine and a
+raw-torch runner are in place. Next: memory/OOM capture, then a real profile on a GPU.
 
-Two jobs stay separate: deciding which config to try next, and measuring one config. An LLM
-decides; a probe measures. Each iteration the LLM reads the full history and picks the next move.
+## Getting started
 
-- `program.md` — the runbook for how the loop runs. It tells the agent which signals to read and
-  what they mean, then asks it to propose the single most useful next config, run it, and record
-  what it learned. Guidance, not a fixed script.
-- `search_space.md` — the rule for what the agent may change. A **lever** is any `swift sft`
-  argument that affects throughput or memory but not the trained model. Which lever to try is the
-  agent's call.
-- `probe_runner.py` — one short `swift sft` run that returns measured metrics as JSON. It runs on
-  the GPU backend you pick in `config.json`: Modal serverless or your own SSH GPU VM (Paperspace,
-  Lambda Labs, …). Same pipeline and metrics either way — only *where it runs* changes.
-
-```
- LOCAL (LLM drives the loop, holds state)       GPU BACKEND (ephemeral, pure compute)
- ┌──────────────────────────┐   config+levers   ┌─────────────────────────────────┐
- │ reads search_state.json  │ ────────────────▶ │ probe(config) → metrics JSON     │
- │ picks next config        │ ◀──────────────── │ swift sft (7 steps), self-parsed │
- └──────────────────────────┘   result JSON      └── Modal  ·  or  ·  SSH VM ───────┘
-```
-
-Each probe runs 7 optimizer steps — enough for a stable throughput reading (the first 2 are
-dropped as warmup), cheap enough to run dozens. There's no fixed recovery flowchart: the probe
-reports the regime signals (`gpu_util`, `peak_mem`, `cpu_util`) and the agent uses the throughput to decide the next action.
-
----
-
-## Inputs, levers, and state
-
-- **Inputs** (`config.json`, set by you, static) — `backend`, `model`, `dataset`, `max_length`,
-  `attn_impl`, `effective_batch`, `hardware`, `hardware_number`. The effective batch is fixed; the
-  loop only picks the `bs × ga` split that hits it (`ga` is derived and multi-GPU aware).
-- **Secrets** (`.env`) — `HF_TOKEN` and any SSH credentials. Nothing else.
-- **Levers** — passed per probe on the command line (`--levers '{...}'`): any `swift sft` argument
-  except the model-changing ones. `config.json` is never rewritten.
-- **State** (`search_state.json`, one per session) — an append-only `history` of
-  `{config, result, note}`, a running `best`, and cumulative `beliefs`. The agent reads this JSON
-  directly.
-
----
-
-## The metric
-
-Throughput is measured in **samples/second** — real dataset throughput, immune to padding
-inflation. The probe measures it live as `samples/s = effective_batch × Δsteps / Δelapsed` over
-the steady-state window (numerator is `bs × ga × world_size`, not `bs`), plus peak memory.
-
-> The loop ranks configs by samples/s.
-
----
-
-## Run it
-
-One-time setup — create a virtualenv, install deps, and add secrets:
+Requires [uv](https://docs.astral.sh/uv/).
 
 ```bash
-python -m venv venv && source venv/bin/activate
-pip install -r requirements.txt
-cp .env.example .env                  # then fill in HF_TOKEN and any SSH creds
-cp config.json.example config.json    # then set your fixed inputs (model, dataset, hardware, …)
+uv sync                                  # creates .venv (Python 3.12), installs torch + pytest
+uv run pytest                            # run the test suite
+uv run python profile.py --device cpu    # local profiler smoke run (CPU — MFU is meaningless here,
+                                         # it just proves the capture → trace → diagnose pipeline runs)
 ```
 
-`config.json` is gitignored (it holds your run inputs); `config.json.example` is the committed
-template — same pattern as `.env`/`.env.example`.
+The roofline / trace / diagnostic logic is pure-python; only the capture engine needs torch.
 
-Then configure your backend:
+## Layout
 
-- **Modal** (`"backend": "modal"`): run `modal setup` (writes `~/.modal.toml`) and store an HF
-  token as a Modal secret — `modal secret create hf-token HF_TOKEN=hf_...`. The GPU comes from
-  `hardware` + `hardware_number` in `config.json` (e.g. `"A100"` × `4` → `gpu="A100:4"`).
-- **SSH VM** (`"backend": "ssh"` — aliases `vm`/`paperspace`/`lambda`/`lambda_labs`/`lambdalabs`
-  also work): set `AUTOTUNE_SSH_HOST` and `AUTOTUNE_SSH_USER`, plus one of `AUTOTUNE_SSH_KEY`
-  (Lambda) or `AUTOTUNE_SSH_PASSWORD` (Paperspace), and `AUTOTUNE_SSH_ACTIVATE` — the command that
-  enters your swift env (e.g. `source ~/envs/swift-env/bin/activate`). The probe uploads and runs
-  itself on the VM and reads the result back — nothing to pre-install beyond ms-swift in that env.
+```
+loop/          the design — start here (contracts · loop spine · throughput objective)   [built]
+profiler/      the measurement instrument (roofline · trace · capture · diagnostic)       [built]
+frameworks/    runner adapters — torch now, swift/HF later                                [built: torch]
+tests/         TDD                                                                         [built]
+profile.py     CLI: profile one config → print the diagnostic                             [built]
 
-Set the fixed inputs in `config.json`, then run the loop one probe at a time (the backend is read
-from the config):
-
-```bash
-source venv/bin/activate
-python probe.py                                                   # seed probe (no levers)
-python probe.py --levers '{"per_device_train_batch_size": 2, "padding_free": true}'  # exploration probe
+frame/         profile the setup + build the search space                                 [scaffold]
+search/        surrogate · frontier · memory plumbing                                      [scaffold]
+backends/      where a probe runs — modal · ssh/neoclouds                                  [scaffold]
+knowledge/     cross-run memory — belief files + index                                     [scaffold]
+runs/          per-run outputs (gitignored)                                               [scaffold]
 ```
 
-Each run appends to `search_state.json`. The agent reads the history,
-picks the next config per `program.md`, and repeats. The dev setup uses a public vision model and
-synthetic image data, so no special access is needed — swap the model and dataset in `config.json`
-for a real run.
+Each `[scaffold]` dir has a short README describing what it will hold. The design lives in `loop/`:
+read `loop/loop.md` for how the loop works and `loop/contracts.md` for the data shapes.
 
----
+## The plan
 
-## Status
+1. **Profiler** *(now)* — single-step profile + roofline. Local, no GPU needed to build.
+2. **Frame** — profile model / hardware / env / dataset; construct the search space.
+3. **Intelligence** — surrogate + frontier + cross-run memory.
+4. **Distributed** — parallelism as a search space, multi-GPU.
 
-The v1 loop is defined by `program.md` (the runbook) and `search_space.md` (the lever rule), and
-driven against a backend-agnostic probe (`probe_runner.py`). The probe returns samples/s plus peak
-memory, GPU/CPU utilization, and structured failure detail — on Modal or an SSH GPU VM, single- or
-multi-GPU (DDP). Multi-GPU is verified end-to-end on Modal (A10G×2).
-
-Still to do: bring in the production model (`Qwen3.5-0.8B`, which needs the prod env's
-`flash-linear-attention`/`triton` pins) and re-baseline against the work dataset (`nn_ocr4`) in the
-work Modal workspace.
-
----
-
-## Files
-
-| File | Purpose |
-|---|---|
-| `program.md` | How the loop runs — the runbook |
-| `search_space.md` | The lever rule — what the agent may change (principles only) |
-| `config.json` | Fixed inputs: backend, model, dataset, max_length, attn_impl, effective_batch, hardware, hardware_number |
-| `probe.py` | Entrypoint — reads `config.json` + `--levers`, dispatches on `config.backend`, writes `search_state.json` |
-| `probe_runner.py` | The portable probe — runs `swift sft`, samples GPU/CPU, parses metrics (runs on whichever backend) |
-| `modal_probe.py` | Modal backend — ships `probe_runner` to a Modal serverless GPU |
-| `vm_probe.py` | SSH-VM backend — runs `probe_runner` on a Paperspace/Lambda/any SSH GPU box |
-| `search_state.json` | Per-session memory: history + best + beliefs (gitignored) |
+Read `loop/loop.md` for how the loop works and `loop/contracts.md` for the data shapes.

@@ -1,0 +1,16 @@
+[project]
+name = "autotune"
+version = "0.1.0"
+description = "A research loop that finds the fastest training config for given hardware."
+requires-python = ">=3.11,<3.14"
+dependencies = [
+    "torch>=2.2",          # only needed to CAPTURE a profile; roofline/trace/diagnostic are pure-python
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=8",
+]
+
+[tool.uv]
+# uv manages the venv (.venv) and the pinned Python (see .python-version).
