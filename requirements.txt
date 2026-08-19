@@ -1,7 +1,0 @@
-# Profiler deps.
-# The roofline / trace / diagnostic logic is pure-python and needs nothing.
-# torch is only needed to CAPTURE a profile (the runner + capture engine). Install when
-# you're ready to run live locally.
-torch>=2.2
-
-# (Modal / neocloud backends return at the GPU stage; not needed for local profiler work.)
