@@ -27,6 +27,7 @@ CLAUDE.md
 PLAN.md
 HANDOFF.md
 notes.md
+wip_docs/
 
 # Run outputs (keep the dir's README, ignore the run artifacts)
 runs/*
