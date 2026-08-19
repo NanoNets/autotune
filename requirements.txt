@@ -1,6 +1,7 @@
-# Local orchestration deps (what runs on YOUR machine to drive the loop).
-# The GPU-side deps (torch, ms-swift, psutil, pillow) live in the Modal image or the VM's
-# swift-env — they are NOT installed here.
+# Profiler deps.
+# The roofline / trace / diagnostic logic is pure-python and needs nothing.
+# torch is only needed to CAPTURE a profile (the runner + capture engine). Install when
+# you're ready to run live locally.
+torch>=2.2
 
-modal>=1.5        # Modal backend (AUTOTUNE_BACKEND=modal)
-paramiko>=3.0     # SSH backend  (AUTOTUNE_BACKEND=ssh — Paperspace / Lambda / any SSH GPU box)
+# (Modal / neocloud backends return at the GPU stage; not needed for local profiler work.)
