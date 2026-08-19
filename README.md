@@ -33,17 +33,22 @@ The roofline / trace / diagnostic logic is pure-python; only the capture engine 
 
 ## Layout
 
-- **`loop/`** — the design. Start here.
-  - `contracts.md` — the 5 data shapes everything plugs into (Profile, SearchSpace, Config, Observation, Belief)
-  - `loop.md` — the spine: frame → hypothesize → test → observe → learn
-  - `throughput.md` — the objective, the canonical levers, and what's safe vs off-limits
-- **`profiler/`** — the measurement instrument (roofline, trace parsing, capture, diagnostic).
-- **`frameworks/`** — runner adapters (`torch` now; `swift` / HF later).
-- **`tests/`** — TDD.
-- **`profile.py`** — CLI: profile one config, print the diagnostic.
+```
+loop/          the design — start here (contracts · loop spine · throughput objective)   [built]
+profiler/      the measurement instrument (roofline · trace · capture · diagnostic)       [built]
+frameworks/    runner adapters — torch now, swift/HF later                                [built: torch]
+tests/         TDD                                                                         [built]
+profile.py     CLI: profile one config → print the diagnostic                             [built]
 
-Planned dirs: `frame/` (profile the setup + build the search space), `search/` (surrogate + frontier +
-memory), `backends/` (Modal / neoclouds), `knowledge/` (cross-run memory).
+frame/         profile the setup + build the search space                                 [scaffold]
+search/        surrogate · frontier · memory plumbing                                      [scaffold]
+backends/      where a probe runs — modal · ssh/neoclouds                                  [scaffold]
+knowledge/     cross-run memory — belief files + index                                     [scaffold]
+runs/          per-run outputs (gitignored)                                               [scaffold]
+```
+
+Each `[scaffold]` dir has a short README describing what it will hold. The design lives in `loop/`:
+read `loop/loop.md` for how the loop works and `loop/contracts.md` for the data shapes.
 
 ## The plan
 
