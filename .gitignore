@@ -1,50 +1,39 @@
-# Process docs (local working state, not shared)
-PLAN.md
-HANDOFF.md
-notes.md
-CLAUDE.md
-
 # macOS
 .DS_Store
 
 # Python
 __pycache__/
 *.py[cod]
-*$py.class
+.pytest_cache/
 *.egg-info/
-.eggs/
 build/
 dist/
-.Python
 
-# Virtual environments
+# Virtual environments (uv manages .venv)
 .venv/
 venv/
 env/
-ENV/
-
-# Autotune outputs / state
-output/
-completed_runs/
-*.log
-loop_state.json
-probe_result.json
-search_state.json
-probes.md
-
-# Local datasets / customer data (never commit — may contain private images/paths)
-*.jsonl
-
-# Editor / IDE
-.idea/
-.vscode/
 
 # Env / secrets
 .env
 .env.*
 !.env.example
 
-# Run inputs
-config.json
-!config.json.example
+# Claude Code local state
+.claude/
 
+# Local working docs (not shared)
+CLAUDE.md
+PLAN.md
+HANDOFF.md
+notes.md
+
+# Run outputs (keep the dir's README, ignore the run artifacts)
+runs/*
+!runs/README.md
+*.trace.json
+*.log
+
+# Editor / IDE
+.idea/
+.vscode/
