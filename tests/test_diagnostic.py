@@ -12,14 +12,20 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from profiler.diagnostic import diagnose
 from profiler.roofline import training_flops, mfu
 
-TRACE = {"traceEvents": [
-    {"cat": "user_annotation", "name": "forward", "dur": 100.0},
-    {"cat": "user_annotation", "name": "backward", "dur": 200.0},
-    {"cat": "user_annotation", "name": "optimizer", "dur": 50.0},
-    {"cat": "user_annotation", "name": "dataloader", "dur": 300.0},
-    {"cat": "kernel", "name": "sm80_gemm_bf16", "dur": 80.0, "ts": 0.0},     # [0, 80]
-    {"cat": "kernel", "name": "flash_attention_fwd", "dur": 40.0, "ts": 100.0},  # [100,140] -> 20us gap
-]}
+TRACE = {
+    "deviceProperties": [{"name": "NVIDIA A10", "totalGlobalMem": 23684841472,
+                          "computeMajor": 8, "computeMinor": 6, "numSms": 72}],
+    "traceEvents": [
+        {"cat": "user_annotation", "name": "forward", "dur": 100.0},
+        {"cat": "user_annotation", "name": "backward", "dur": 200.0},
+        {"cat": "user_annotation", "name": "optimizer", "dur": 50.0},
+        {"cat": "user_annotation", "name": "dataloader", "dur": 300.0},
+        {"cat": "kernel", "name": "sm80_gemm_bf16", "dur": 80.0, "ts": 0.0,           # [0, 80]
+         "args": {"est. achieved occupancy %": 40, "occupancy": {"limitingFactors": "REGS"}}},
+        {"cat": "kernel", "name": "flash_attention_fwd", "dur": 40.0, "ts": 100.0,    # [100,140] 20us gap
+         "args": {"est. achieved occupancy %": 60, "occupancy": {"limitingFactors": "REGS"}}},
+    ],
+}
 
 PARAMS, TOKENS, GPU = 1_000_000, 1_000, "A100"
 STEP_TIMES = [1.0e-3, 1.1e-3, 0.9e-3]   # median 1.0 ms, with spread -> nonzero noise floor
@@ -67,6 +73,14 @@ def test_coverage_and_idle_shape():
     assert o.top8_coverage == 1.0                       # both kernels are in the top-8
     assert o.gap_count == 1                             # one idle gap on the timeline
     assert abs(o.max_gap_s - 20e-6) < 1e-12             # the 20 us gap
+
+
+def test_device_and_occupancy_flow_through():
+    o = _obs()
+    assert o.device["name"] == "NVIDIA A10"
+    assert o.device["num_sms"] == 72
+    assert o.achieved_occupancy_pct == 46.7             # (40*80 + 60*40) / 120, runtime-weighted
+    assert o.limiting_factor == "REGS"
 
 
 def test_oom_short_circuits_but_keeps_memory_and_trace_path():

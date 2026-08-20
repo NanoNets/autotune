@@ -11,7 +11,8 @@ import statistics
 from dataclasses import dataclass, field
 
 from profiler.roofline import training_flops, step_time_floor_s, mfu
-from profiler.trace import load_trace, phase_times_us, kernels, kernel_gaps, provenance
+from profiler.trace import (load_trace, phase_times_us, kernels, kernel_gaps, provenance,
+                            device_props, occupancy)
 
 PHASES = ["forward", "backward", "optimizer", "dataloader"]
 
@@ -42,6 +43,9 @@ class Observation:
     top8_coverage: float = None        # fraction of GPU-busy in the top-8 kernels
     gap_count: int = None              # idle-shape: number of gaps on the GPU-kernel timeline
     max_gap_s: float = None            #   largest single gap (one big stall vs many small)
+    achieved_occupancy_pct: float = None   # runtime-weighted; the "why is compute slow" signal
+    limiting_factor: str = None            # what caps occupancy (REGS / shared mem / warps)
+    device: dict = field(default_factory=dict)   # real hw from the trace: name, mem, sms, cc
     trace_path: str = None             # raw trace on disk, for on-demand drill-down
     error: str = None
     summary: str = ""
@@ -76,6 +80,7 @@ def diagnose(capture, params, tokens, gpu):
     top8 = ks[:8]
     top8_cov = round(sum(d for _, d in top8) / busy_us, 3) if busy_us else None
     gap_count, max_gap_us = kernel_gaps(trace)
+    occ = occupancy(trace)
 
     data_wait = ph_s.get("dataloader", 0.0)
     gap = max(wall - busy, 0.0)
@@ -84,8 +89,10 @@ def diagnose(capture, params, tokens, gpu):
         return x / wall if wall else 0.0
 
     mem_str = f" | mem {mem['peak_gb']}/{mem['total_gb']}GB" if mem else ""
+    occ_pct = occ.get("achieved_occupancy_pct")
+    occ_str = f" | occ {occ_pct:.0f}%" if occ_pct is not None else ""
     summary = (f"MFU {mfu_v:.0%} | GPU active {frac(busy):.0%} | data-wait {frac(data_wait):.0%} | "
-               f"idle {frac(gap):.0%} | noise +/-{cv:.0%}{mem_str}")
+               f"idle {frac(gap):.0%} | noise +/-{cv:.0%}{occ_str}{mem_str}")
 
     return Observation(
         step_time_s=wall, step_time_cv=cv, flops=flops, roofline_floor_s=floor, mfu=mfu_v,
@@ -94,5 +101,7 @@ def diagnose(capture, params, tokens, gpu):
         provenance=provenance(trace), top_kernels=top8,
         kernel_count=len(ks), top8_coverage=top8_cov,
         gap_count=gap_count, max_gap_s=max_gap_us / 1e6,
+        achieved_occupancy_pct=occ_pct, limiting_factor=occ.get("limiting_factor"),
+        device=device_props(trace),
         summary=summary, **base,
     )

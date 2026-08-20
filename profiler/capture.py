@@ -63,9 +63,9 @@ def capture(runner, config, warmup=3, clean_steps=10, trace_path="/tmp/autotune_
         activities = [ProfilerActivity.CPU]            # attribution, one profiled step
         if device == "cuda":
             activities.append(ProfilerActivity.CUDA)
-        # profile_memory -> per-op memory events; with_flops -> per-op FLOPs. Both enrich the trace
-        # so the first GPU run can show their real format (parsers written against it, not guessed).
-        with profile(activities=activities, profile_memory=True, with_flops=True) as prof:
+        # Occupancy + device-props come from standard CUDA profiling (no flags). profile_memory /
+        # with_flops were tried and dropped — their data isn't in the chrome-trace export.
+        with profile(activities=activities) as prof:
             with record_function("step"):
                 runner.step()
             _sync(device)

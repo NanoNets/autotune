@@ -78,3 +78,46 @@ def provenance(trace):
         "fused_kernels": any(k in names for k in ("fused", "cutlass", "liger")),
         "dtypes": sorted({d for d in ("bf16", "fp16", "tf32", "fp8") if d in names}),
     }
+
+
+def device_props(trace):
+    """Real hardware from the trace header — beats hardcoded specs. {} if absent (CPU trace)."""
+    devs = trace.get("deviceProperties") or []
+    if not devs:
+        return {}
+    d = devs[0]
+    total = d.get("totalGlobalMem")
+    return {
+        "name": d.get("name"),
+        "mem_gb": round(total / 1024 ** 3, 1) if total else None,
+        "compute_capability": (f"{d['computeMajor']}.{d['computeMinor']}"
+                               if "computeMajor" in d else None),
+        "num_sms": d.get("numSms"),
+    }
+
+
+def occupancy(trace):
+    """Runtime-weighted achieved occupancy across kernels + the dominant limiting factor.
+
+    Reads 'est. achieved occupancy %' and occupancy.limitingFactors from the kernel args (present
+    on real CUDA traces). This is the deep 'why is compute slow' signal — busy but under-fed, and
+    *why* (REGS / shared mem / warps). {} if absent (CPU / no kernels).
+    """
+    tot_dur, weighted, limiters = 0.0, 0.0, {}
+    for e in _events(trace):
+        if e.get("cat") not in _KERNEL_CATS:
+            continue
+        a = e.get("args") or {}
+        occ, dur = a.get("est. achieved occupancy %"), e.get("dur", 0.0)
+        if occ is not None and dur:
+            weighted += occ * dur
+            tot_dur += dur
+            lf = (a.get("occupancy") or {}).get("limitingFactors")
+            if lf:
+                limiters[lf] = limiters.get(lf, 0.0) + dur
+    if not tot_dur:
+        return {}
+    return {
+        "achieved_occupancy_pct": round(weighted / tot_dur, 1),
+        "limiting_factor": max(limiters, key=limiters.get) if limiters else None,
+    }
