@@ -33,6 +33,9 @@ class Observation:
     data_wait_frac: float = None
     gap_s: float = None                # GPU idle (wall - busy)
     gap_frac: float = None
+    cpu_util_mean: float = None        # over the clean window; GPU-idle + CPU pinned = preprocessing wall
+    cpu_util_max: float = None
+    nproc: int = None
     peak_mem_gb: float = None          # torch.cuda peak allocated
     reserved_mem_gb: float = None      # allocator reserved (reserved - peak = fragmentation)
     mem_total_gb: float = None
@@ -54,11 +57,13 @@ class Observation:
 def diagnose(capture, params, tokens, gpu):
     """capture: an object with .status, .step_times_s, .trace, .memory, .error."""
     mem = capture.memory or {}
+    cpu = getattr(capture, "cpu", None) or {}
     trace_path = capture.trace if isinstance(capture.trace, str) else None
     base = dict(
         status=capture.status, gpu=gpu, error=capture.error, trace_path=trace_path,
         peak_mem_gb=mem.get("peak_gb"), reserved_mem_gb=mem.get("reserved_gb"),
         mem_total_gb=mem.get("total_gb"), headroom_gb=mem.get("headroom_gb"),
+        cpu_util_mean=cpu.get("mean"), cpu_util_max=cpu.get("max"), nproc=cpu.get("nproc"),
     )
 
     times = capture.step_times_s or []
@@ -89,10 +94,11 @@ def diagnose(capture, params, tokens, gpu):
         return x / wall if wall else 0.0
 
     mem_str = f" | mem {mem['peak_gb']}/{mem['total_gb']}GB" if mem else ""
+    cpu_str = f" | cpu {cpu['mean']:.0f}%" if cpu else ""
     occ_pct = occ.get("achieved_occupancy_pct")
     occ_str = f" | occ {occ_pct:.0f}%" if occ_pct is not None else ""
     summary = (f"MFU {mfu_v:.0%} | GPU active {frac(busy):.0%} | data-wait {frac(data_wait):.0%} | "
-               f"idle {frac(gap):.0%} | noise +/-{cv:.0%}{occ_str}{mem_str}")
+               f"idle {frac(gap):.0%}{cpu_str} | noise +/-{cv:.0%}{occ_str}{mem_str}")
 
     return Observation(
         step_time_s=wall, step_time_cv=cv, flops=flops, roofline_floor_s=floor, mfu=mfu_v,

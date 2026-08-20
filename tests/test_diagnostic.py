@@ -30,11 +30,12 @@ TRACE = {
 PARAMS, TOKENS, GPU = 1_000_000, 1_000, "A100"
 STEP_TIMES = [1.0e-3, 1.1e-3, 0.9e-3]   # median 1.0 ms, with spread -> nonzero noise floor
 MEMORY = {"peak_gb": 12.0, "reserved_gb": 14.0, "total_gb": 80.0, "headroom_gb": 66.0}
+CPU = {"mean": 62.0, "max": 88.0, "nproc": 16}
 
 
-def _cap(status="ok", step_times=None, trace=TRACE, memory=MEMORY, error=None):
+def _cap(status="ok", step_times=None, trace=TRACE, memory=MEMORY, cpu=CPU, error=None):
     return SimpleNamespace(
-        status=status, trace=trace, memory=memory, error=error,
+        status=status, trace=trace, memory=memory, cpu=cpu, error=error,
         step_times_s=STEP_TIMES if step_times is None else step_times)
 
 
@@ -65,6 +66,13 @@ def test_memory_flows_through():
     assert o.peak_mem_gb == 12.0
     assert o.mem_total_gb == 80.0
     assert o.headroom_gb == 66.0
+
+
+def test_cpu_util_flows_through():
+    o = _obs()
+    assert o.cpu_util_mean == 62.0
+    assert o.cpu_util_max == 88.0
+    assert o.nproc == 16
 
 
 def test_coverage_and_idle_shape():

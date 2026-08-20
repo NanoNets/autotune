@@ -1,11 +1,13 @@
-"""Capture engine: clean step timing, memory, OOM handling, then one profiled step.
+"""Capture engine: clean step timing, CPU util, memory, OOM handling, then one profiled step.
 
 The profiler distorts timing, so the real wall-clock comes from a warm, profiler-OFF window —
-all clean step times are kept (for the noise floor). Attribution comes from ONE profiled step.
-Memory (peak / reserved / headroom) is read from the torch.cuda allocator — precise, no
-nvidia-smi. An OOM is CAUGHT and returned as a result (status="oom"), not a crash — the search
-lives at the OOM boundary, so the ceiling is a valid measurement. Returns a `Capture`.
+all clean step times are kept (for the noise floor), and CPU utilization is sampled over that
+same window (via psutil, lazily imported). Memory (peak / reserved / headroom) is read from the
+torch.cuda allocator. An OOM is CAUGHT and returned as a result (status="oom"), not a crash.
+Returns a `Capture`.
 """
+import os
+import threading
 import time
 from dataclasses import dataclass, field
 
@@ -18,7 +20,8 @@ class Capture:
     status: str                                       # ok / oom / error
     step_times_s: list = field(default_factory=list)  # clean per-step wall times (profiler off)
     trace: object = None                              # Chrome-trace path (or dict); None on failure
-    memory: dict = None                               # {peak_gb, reserved_gb, total_gb, headroom_gb} or None
+    memory: dict = None                               # {peak_gb, reserved_gb, total_gb, headroom_gb}
+    cpu: dict = None                                  # {mean, max, nproc} over the clean window
     error: str = None
 
 
@@ -43,8 +46,30 @@ def _read_memory(device):
     }
 
 
+def _cpu_stats(samples):
+    """Mean/max CPU % over the sampled window — disambiguates a data-bound GPU (workers help vs
+    preprocessing wall). None if psutil is unavailable."""
+    if not samples:
+        return None
+    return {"mean": round(sum(samples) / len(samples), 1),
+            "max": round(max(samples), 1), "nproc": os.cpu_count()}
+
+
 def capture(runner, config, warmup=3, clean_steps=10, trace_path="/tmp/autotune_trace.json"):
     device = config.get("device", "cpu")
+    cpu_samples, cpu_stop = [], threading.Event()
+
+    def _cpu_sampler():
+        try:
+            import psutil
+        except Exception:
+            return                                     # no psutil -> no cpu data, degrade gracefully
+        psutil.cpu_percent()                           # prime the first (throwaway) reading
+        while not cpu_stop.is_set():
+            cpu_samples.append(psutil.cpu_percent())
+            time.sleep(0.05)
+
+    sampler = threading.Thread(target=_cpu_sampler, daemon=True)
     try:
         runner.setup(config)
         for _ in range(warmup):                        # kernel/cache warmup, discarded
@@ -53,12 +78,14 @@ def capture(runner, config, warmup=3, clean_steps=10, trace_path="/tmp/autotune_
         if device == "cuda":
             torch.cuda.reset_peak_memory_stats()       # peak is measured over the timed window only
 
+        sampler.start()                                # sample CPU only over the clean window
         times = []                                     # clean wall-clock, profiler off (kept for noise)
         for _ in range(clean_steps):
             t0 = time.perf_counter()
             runner.step()
             _sync(device)
             times.append(time.perf_counter() - t0)
+        cpu_stop.set()
 
         activities = [ProfilerActivity.CPU]            # attribution, one profiled step
         if device == "cuda":
@@ -72,12 +99,14 @@ def capture(runner, config, warmup=3, clean_steps=10, trace_path="/tmp/autotune_
         prof.export_chrome_trace(trace_path)
 
         return Capture(status="ok", step_times_s=times, trace=trace_path,
-                       memory=_read_memory(device))
+                       memory=_read_memory(device), cpu=_cpu_stats(cpu_samples))
 
     except torch.cuda.OutOfMemoryError as e:           # OOM is a valid result — the memory ceiling
+        cpu_stop.set()
         mem = _read_memory(device)
         torch.cuda.empty_cache()
         first = str(e).strip().splitlines()[0] if str(e).strip() else "CUDA out of memory"
         return Capture(status="oom", memory=mem, error=first)
     except Exception as e:                             # any other failure, surfaced not swallowed
+        cpu_stop.set()
         return Capture(status="error", error=f"{type(e).__name__}: {e}")
