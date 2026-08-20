@@ -1,6 +1,9 @@
 """Profile one config and print the diagnostic — the local tool.
 
-  python profile.py --device cpu     # torch fixture runner on CPU (smoke)
+  python -m profiler --device cpu    # torch fixture runner on CPU (smoke)
+
+(Named __main__.py so it runs as `python -m profiler` — a top-level `profile.py` would shadow
+Python's stdlib `profile` module and break torch's imports.)
 
 capture (clean time + memory + profiled trace) -> diagnose (roofline + trace -> Observation).
 Diagnostic / roofline / trace are torch-free; only capture + the runner need torch. `--gpu` is

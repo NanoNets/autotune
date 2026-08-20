@@ -63,7 +63,9 @@ def capture(runner, config, warmup=3, clean_steps=10, trace_path="/tmp/autotune_
         activities = [ProfilerActivity.CPU]            # attribution, one profiled step
         if device == "cuda":
             activities.append(ProfilerActivity.CUDA)
-        with profile(activities=activities) as prof:
+        # profile_memory -> per-op memory events; with_flops -> per-op FLOPs. Both enrich the trace
+        # so the first GPU run can show their real format (parsers written against it, not guessed).
+        with profile(activities=activities, profile_memory=True, with_flops=True) as prof:
             with record_function("step"):
                 runner.step()
             _sync(device)
