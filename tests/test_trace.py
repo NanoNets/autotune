@@ -4,7 +4,7 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from profiler.trace import phase_times_us, kernels, gpu_busy_us, provenance
+from profiler.trace import phase_times_us, kernels, gpu_busy_us, provenance, kernel_gaps
 
 TRACE = {"traceEvents": [
     {"cat": "user_annotation", "name": "forward", "dur": 100.0},
@@ -34,6 +34,17 @@ def test_provenance_reads_kernel_names():
     p = provenance(TRACE)
     assert p["flash_attention"] is True
     assert "bf16" in p["dtypes"]
+
+
+def test_kernel_gaps():
+    # k1 [0,80], k2 [100,140] -> one 20us gap; k3 [130,160] overlaps k2 -> no gap
+    trace = {"traceEvents": [
+        {"cat": "kernel", "name": "k1", "ts": 0.0,   "dur": 80.0},
+        {"cat": "kernel", "name": "k2", "ts": 100.0, "dur": 40.0},
+        {"cat": "kernel", "name": "k3", "ts": 130.0, "dur": 30.0},
+    ]}
+    assert kernel_gaps(trace) == (1, 20.0)
+    assert kernel_gaps(TRACE) == (0, 0.0)          # fixture kernels have no ts -> no timeline
 
 
 if __name__ == "__main__":

@@ -17,8 +17,8 @@ TRACE = {"traceEvents": [
     {"cat": "user_annotation", "name": "backward", "dur": 200.0},
     {"cat": "user_annotation", "name": "optimizer", "dur": 50.0},
     {"cat": "user_annotation", "name": "dataloader", "dur": 300.0},
-    {"cat": "kernel", "name": "sm80_gemm_bf16", "dur": 80.0},
-    {"cat": "kernel", "name": "flash_attention_fwd", "dur": 40.0},
+    {"cat": "kernel", "name": "sm80_gemm_bf16", "dur": 80.0, "ts": 0.0},     # [0, 80]
+    {"cat": "kernel", "name": "flash_attention_fwd", "dur": 40.0, "ts": 100.0},  # [100,140] -> 20us gap
 ]}
 
 PARAMS, TOKENS, GPU = 1_000_000, 1_000, "A100"
@@ -61,12 +61,21 @@ def test_memory_flows_through():
     assert o.headroom_gb == 66.0
 
 
-def test_oom_short_circuits_but_keeps_memory():
-    o = diagnose(_cap(status="oom", step_times=[], trace=None, error="CUDA out of memory"),
+def test_coverage_and_idle_shape():
+    o = _obs()
+    assert o.kernel_count == 2
+    assert o.top8_coverage == 1.0                       # both kernels are in the top-8
+    assert o.gap_count == 1                             # one idle gap on the timeline
+    assert abs(o.max_gap_s - 20e-6) < 1e-12             # the 20 us gap
+
+
+def test_oom_short_circuits_but_keeps_memory_and_trace_path():
+    o = diagnose(_cap(status="oom", step_times=[], trace="/tmp/probe.json", error="CUDA out of memory"),
                  params=PARAMS, tokens=TOKENS, gpu=GPU)
     assert o.status == "oom"
     assert o.mfu is None                                # no throughput computed on OOM
     assert o.peak_mem_gb == 12.0                        # but memory is still surfaced
+    assert o.trace_path == "/tmp/probe.json"            # and the raw-trace pointer is kept
     assert "oom" in o.summary
 
 

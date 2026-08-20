@@ -48,6 +48,28 @@ def gpu_busy_us(trace):
     return sum(dur for _, dur in kernels(trace))
 
 
+def kernel_gaps(trace):
+    """Idle shape on the GPU-kernel timeline: (gap_count, max_gap_us).
+
+    One big gap (data-wait) and many small gaps (launch overhead) have the same TOTAL idle but
+    look different here — that's the signal the aggregate would otherwise hide. Sort kernels by
+    start, sum positive gaps between them (running max end handles async overlap → clamp to 0).
+    First-cut single-timeline view; needs `ts` on kernel events (present on real GPU traces).
+    """
+    spans = sorted((e["ts"], e["ts"] + e.get("dur", 0.0))
+                   for e in _events(trace)
+                   if e.get("cat") in _KERNEL_CATS and "ts" in e and "dur" in e)
+    gaps, running_end = [], None
+    for start, end in spans:
+        if running_end is not None:
+            if start - running_end > 0:
+                gaps.append(start - running_end)
+            running_end = max(running_end, end)
+        else:
+            running_end = end
+    return len(gaps), (max(gaps) if gaps else 0.0)
+
+
 def provenance(trace):
     """What actually ran, read off kernel names — the 'did it apply?' check."""
     names = " ".join(name.lower() for name, _ in kernels(trace))
