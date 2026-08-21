@@ -124,6 +124,19 @@ def measure_peak_bandwidth_gb_s(device, size_mb=256, iters=20):
     return _BW_CACHE[chip]
 
 
+def device_facts(device):
+    """Name / total memory / SM count straight off the card. {} off-GPU.
+
+    Shared so frame and the profiler don't each grow their own copy of this lookup.
+    """
+    if device != "cuda":
+        return {"device_name": device, "mem_gb": None, "num_sms": None}
+    props = torch.cuda.get_device_properties(device)
+    return {"device_name": props.name,
+            "mem_gb": round(props.total_memory / 1024 ** 3, 1),
+            "num_sms": props.multi_processor_count}
+
+
 def _read_memory(device):
     """Peak / reserved / headroom from the CUDA allocator. None off-GPU (CPU/MPS)."""
     if device != "cuda":
