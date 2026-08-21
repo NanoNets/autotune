@@ -1,13 +1,15 @@
 """Profile one config and print the diagnostic — the local tool.
 
-  python -m profiler --device cpu    # torch fixture runner on CPU (smoke)
+  python -m profiler --device cpu --gpu A10G    # torch fixture runner on CPU (smoke)
 
 (Named __main__.py so it runs as `python -m profiler` — a top-level `profile.py` would shadow
 Python's stdlib `profile` module and break torch's imports.)
 
 capture (clean time + memory + profiled trace) -> diagnose (roofline + trace -> Observation).
 Diagnostic / roofline / trace are torch-free; only capture + the runner need torch. `--gpu` is
-the roofline denominator; on CPU MFU and memory are meaningless, it just exercises the pipeline.
+a REQUIRED hardware label for the record; the MFU denominator is MEASURED on the device, so any
+hardware works and no table can misprice it. On CPU MFU and memory are meaningless; it just
+exercises the pipeline.
 """
 import argparse
 import json
@@ -19,7 +21,8 @@ from profiler.diagnostic import diagnose
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--device", default="cpu")       # cpu / cuda / mps
-    ap.add_argument("--gpu", default="A100")         # roofline denominator
+    ap.add_argument("--gpu", required=True,           # a LABEL for the record, e.g. A10G. The
+                    help="hardware label for the record, e.g. A10G")  # denominator is measured
     ap.add_argument("--micro-batch", type=int, default=8)
     ap.add_argument("--seq", type=int, default=128)
     args = ap.parse_args()
