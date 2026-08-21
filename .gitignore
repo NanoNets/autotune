@@ -19,6 +19,9 @@ env/
 .env.*
 !.env.example
 
+# Run config (fill run.toml from the committed run.toml.example template)
+run.toml
+
 # Claude Code local state
 .claude/
 
