@@ -124,6 +124,20 @@ def measure_peak_bandwidth_gb_s(device, size_mb=256, iters=20):
     return _BW_CACHE[chip]
 
 
+def device_facts(device):
+    """Static card facts read live off the device: total memory, name, SM count.
+
+    The pre-probe counterpart to `trace.device_props`, which reads the same fields from a trace
+    header *after* a probe. `frame` runs before any trace exists, so it reads them live here to
+    fill the Profile's hardware section. None-valued off-GPU (CPU/MPS).
+    """
+    if device != "cuda":
+        return {"mem_gb": None, "device_name": device, "num_sms": None}
+    p = torch.cuda.get_device_properties(device)
+    return {"mem_gb": round(p.total_memory / 1024 ** 3, 1),
+            "device_name": p.name, "num_sms": p.multi_processor_count}
+
+
 def _read_memory(device):
     """Peak / reserved / headroom from the CUDA allocator. None off-GPU (CPU/MPS)."""
     if device != "cuda":
