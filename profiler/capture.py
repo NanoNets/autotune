@@ -154,6 +154,30 @@ def _read_memory(device):
     }
 
 
+def _tree_cpu_seconds():
+    """Cumulative CPU seconds for this process AND its children (dataloader workers).
+
+    A counter, not a sample: differencing it over the window works at ANY window length, where
+    `cpu_percent` sampling quantizes to nothing below ~10ms. Falls back to this process only.
+    """
+    try:
+        import psutil
+    except Exception:
+        return time.process_time()
+    try:
+        proc = psutil.Process()
+        total = 0.0
+        for pr in [proc] + proc.children(recursive=True):
+            try:
+                t = pr.cpu_times()
+                total += t.user + t.system
+            except Exception:                          # a worker can exit mid-read
+                pass
+        return total
+    except Exception:
+        return time.process_time()
+
+
 def _cpu_stats(samples):
     """Mean/max CPU % over the sampled window — disambiguates a data-bound GPU (workers help vs
     preprocessing wall). None if psutil is unavailable."""
@@ -227,11 +251,14 @@ def capture(runner, config, warmup=3, clean_steps=10, trace_path=None, peak_flop
 
         sampler.start()                                # sample CPU only over the clean window...
         cpu_ready.wait(timeout=1.0)                    # ...but not before it has primed
+        cpu0, wall0 = _tree_cpu_seconds(), time.perf_counter()
         for _ in range(clean_steps):                   # clean wall-clock, profiler off (kept for noise)
             t0 = time.perf_counter()
             runner.step()
             _sync(device)
             times.append(time.perf_counter() - t0)
+        cpu_busy = _tree_cpu_seconds() - cpu0          # exact over the window, any length
+        window = time.perf_counter() - wall0
         _stop_sampler()
 
         activities = [ProfilerActivity.CPU]            # attribution, one profiled step
@@ -247,9 +274,12 @@ def capture(runner, config, warmup=3, clean_steps=10, trace_path=None, peak_flop
             profiled_s = time.perf_counter() - t0
         prof.export_chrome_trace(trace_path)
 
+        cpu = _cpu_stats(cpu_samples) or {"mean": None, "max": None, "nproc": os.cpu_count()}
+        cpu["cores_busy"] = round(cpu_busy / window, 3) if window > 0 else None
+
         return Capture(status="ok", step_times_s=times, trace=trace_path, profiled_step_s=profiled_s,
                        peak_flops=peak, peak_dtype=peak_dtype, peak_mem_bw_gb_s=peak_bw,
-                       memory=_read_memory(device), cpu=_cpu_stats(cpu_samples))
+                       memory=_read_memory(device), cpu=cpu)
 
     except torch.cuda.OutOfMemoryError as e:           # OOM is a valid result — the memory ceiling
         _stop_sampler()

@@ -40,6 +40,22 @@ def test_frozen_ceiling_flows_into_the_observation():
     assert o.peak_flops == 1.0e15 and o.peak_mem_bw_gb_s == 500.0
 
 
+def test_cpu_signal_survives_a_window_too_short_to_sample():
+    """psutil sampling quantizes to nothing under ~10ms; the counter delta still reports."""
+    import time
+
+    class Busy(_Runner):
+        def step(self):
+            t = time.perf_counter()
+            while time.perf_counter() - t < 0.002:      # 2ms of real CPU work
+                pass
+
+    cap = capture(Busy(), {"device": "cpu"}, warmup=1, clean_steps=3,
+                  peak_flops=1e12, peak_mem_bw_gb_s=1.0)
+    assert cap.cpu["cores_busy"] > 0.5                  # a busy core is visible...
+    assert cap.cpu["mean"] is None                      # ...even though sampling saw nothing
+
+
 if __name__ == "__main__":
     for _n, _f in list(globals().items()):
         if _n.startswith("test_") and callable(_f):

@@ -45,6 +45,9 @@ class Observation:
     gap_frac: float = None
     cpu_util_mean: float = None        # over the clean window; GPU-idle + CPU pinned = preprocessing wall
     cpu_util_max: float = None
+    cpu_cores_busy: float = None       # CPU-seconds burned per wall-second by this process tree
+                                       #   (dataloader workers included). A counter delta, so it
+                                       #   survives windows too short to sample. >1 = multi-core.
     nproc: int = None
     peak_mem_gb: float = None          # torch.cuda peak allocated
     reserved_mem_gb: float = None      # allocator reserved (reserved - peak = fragmentation)
@@ -86,6 +89,7 @@ def diagnose(capture, params, tokens, gpu):
         peak_mem_gb=mem.get("peak_gb"), reserved_mem_gb=mem.get("reserved_gb"),
         mem_total_gb=mem.get("total_gb"), headroom_gb=mem.get("headroom_gb"),
         cpu_util_mean=cpu.get("mean"), cpu_util_max=cpu.get("max"), nproc=cpu.get("nproc"),
+        cpu_cores_busy=cpu.get("cores_busy"),
     )
 
     times = capture.step_times_s or []
@@ -121,7 +125,12 @@ def diagnose(capture, params, tokens, gpu):
         return x / wall if wall and x is not None else None
 
     mem_str = f" | mem {mem['peak_gb']}/{mem['total_gb']}GB" if mem else ""
-    cpu_str = f" | cpu {cpu['mean']:.0f}%" if cpu else ""
+    if cpu.get("mean") is not None:
+        cpu_str = f" | cpu {cpu['mean']:.0f}%"
+    elif cpu.get("cores_busy") is not None:            # short window: the counter still has it
+        cpu_str = f" | cpu {cpu['cores_busy']:.2f} cores"
+    else:
+        cpu_str = ""
     occ_pct = occ.get("achieved_occupancy_pct")
     occ_str = f" | occ {occ_pct:.0f}%" if occ_pct is not None else ""
     idle_str = f"{frac(gap):.0%}" if gap is not None else "n/a"
