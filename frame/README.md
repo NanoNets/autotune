@@ -150,8 +150,14 @@ live path — Frame no longer imports anything static from the profiler.
 
 ## Status
 
-Built and **unit-tested** (24 tests, bare `python3`, no GPU). The model + dataset path was
-live-validated end to end. The **measured-peak path** is new and re-validates once frame rebases onto
-the updated profiler (it needs the profiler's `measure_peak_flops` / `measure_peak_bandwidth_gb_s` /
-`device_facts` helpers). **Single-GPU** for now; multi-GPU, the framework's tunable-knob list, and
-reading `run.toml` / writing `runs/<id>/profile.json` are deferred.
+Built and **unit-tested** (24 tests, bare `python3`, no GPU), and **live-validated end to end on an
+A10G** — real `Qwen/Qwen2.5-0.5B` config, real `wikitext` scan, measured card, then the Profile's
+frozen ceilings handed to a real probe, which reused them verbatim:
+
+```
+Qwen2ForCausalLM (gqa, bfloat16) | 0.5B params | A10G 22.1GB x1 | peak 89 TFLOP/s (measured)
+ | full-FT model-state 7.36GB -> model state fits (headroom 14.7GB) | 200 samples, p50 16/p99 317 tok
+```
+
+**Single-GPU** for now; multi-GPU, the framework's tunable-knob list, and reading `run.toml` /
+writing `runs/<id>/profile.json` are deferred.
