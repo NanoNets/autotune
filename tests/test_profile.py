@@ -60,10 +60,13 @@ def test_dataset_carried():
 
 def test_mismatched_peak_dtype_is_rejected():
     """A peak measured at another precision is not a ceiling for this run."""
-    import pytest
     hw = hardware("A10G", peak_flops=1.21e14, mem_gb=24.0, dtype="float32")   # peak at fp32...
-    with pytest.raises(ValueError, match="peak was measured at"):
+    try:
         build(internals(LLAMA3_8B), distribution([256]), hw, {}, dtype="bfloat16")   # ...run bf16
+    except ValueError as e:
+        assert "peak was measured at" in str(e)
+        return
+    assert False, "expected ValueError for a peak/run dtype mismatch"
 
 
 def test_bandwidth_is_carried_for_the_loop_to_freeze():
