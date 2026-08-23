@@ -1,7 +1,7 @@
 # profiler/
 
 The measurement instrument. Profiles a single training step and turns it into an **Observation** —
-the 39-field diagnostic the agent reads. Framework-agnostic (it's `torch.profiler` underneath),
+the 40-field diagnostic the agent reads. Framework-agnostic (it's `torch.profiler` underneath),
 and validated live on an A10G.
 
 ## Run it
@@ -46,7 +46,7 @@ The peak is measured, never read from a table: tables can't tell an A10 from an 
 sparse numbers, and fail on hardware they've never heard of. Measuring supports any chip and prices
 in real clocks and power caps.
 
-## The Observation (39 fields)
+## The Observation (40 fields)
 
 A **flat JSON object** — one level deep, except four container fields (`phase_times_s`,
 `provenance`, `device`, `top_kernels`). `python -m profiler` prints the one-line `summary`, then
@@ -78,22 +78,23 @@ so "unknown" can't be mistaken for "measured zero".
 | 21 | `cpu_util_mean` | mean CPU % over the clean window | no psutil, or window too short to sample |
 | 22 | `cpu_util_max` | max CPU % over the same window | ditto |
 | 23 | `nproc` | host CPU count (denominator for the above) | ditto |
-| 24 | `peak_mem_gb` | `torch.cuda` peak allocated | off-GPU (CPU/MPS) |
-| 25 | `reserved_mem_gb` | allocator reserved (`reserved - peak` = fragmentation) | off-GPU |
-| 26 | `mem_total_gb` | device total | off-GPU |
-| 27 | `headroom_gb` | `total - reserved` — distance to the OOM ceiling | off-GPU |
-| 28 | `provenance` | `{flash_attention, fused_kernels, dtypes}` — a **hint** from substring-matching kernel names, not a verdict; the raw names are in `top_kernels`. Booleans are `null` when no kernels ran (unknown ≠ False) | `{}` when not `ok` |
-| 29 | `top_kernels` | top 8 as `[[name, seconds], …]` | `[]` when not `ok` |
-| 30 | `kernel_count` | distinct kernels — with `top8_coverage`, exposes the long tail | not `ok` |
-| 31 | `top8_coverage` | fraction of GPU-busy inside the top 8 | not `ok`, or no kernels |
-| 32 | `gap_count` | number of gaps on the GPU-kernel timeline | kernel events carry no `ts` (CPU trace) |
-| 33 | `max_gap_s` | largest single gap — one big stall vs many small | ditto |
-| 34 | `achieved_occupancy_pct` | runtime-weighted; the "why is compute slow" signal | trace has no occupancy args (CPU / no kernels) |
-| 35 | `limiting_factor` | what caps occupancy (`REGS` / shared mem / warps) | ditto |
-| 36 | `device` | real hw from the trace: `{name, mem_gb, compute_capability, num_sms}` | `{}` on a CPU trace |
-| 37 | `trace_path` | raw Chrome trace on disk, for drill-down | no trace exported (e.g. OOM before the profiled step) |
-| 38 | `error` | failure cause, first line | `status == "ok"` |
-| 39 | `summary` | the one-line human/agent digest | never |
+| 24 | `cpu_cores_busy` | CPU-seconds burned per wall-second by this process **and its children** (dataloader workers included). A counter delta rather than a sampled rate, so unlike the two fields above it survives windows too short to sample. `1.0` = one core saturated; `>1` = genuinely parallel | psutil missing and `process_time` unavailable |
+| 25 | `peak_mem_gb` | `torch.cuda` peak allocated | off-GPU (CPU/MPS) |
+| 26 | `reserved_mem_gb` | allocator reserved (`reserved - peak` = fragmentation) | off-GPU |
+| 27 | `mem_total_gb` | device total | off-GPU |
+| 28 | `headroom_gb` | `total - reserved` — distance to the OOM ceiling | off-GPU |
+| 29 | `provenance` | `{flash_attention, fused_kernels, dtypes}` — a **hint** from substring-matching kernel names, not a verdict; the raw names are in `top_kernels`. Booleans are `null` when no kernels ran (unknown ≠ False) | `{}` when not `ok` |
+| 30 | `top_kernels` | top 8 as `[[name, seconds], …]` | `[]` when not `ok` |
+| 31 | `kernel_count` | distinct kernels — with `top8_coverage`, exposes the long tail | not `ok` |
+| 32 | `top8_coverage` | fraction of GPU-busy inside the top 8 | not `ok`, or no kernels |
+| 33 | `gap_count` | number of gaps on the GPU-kernel timeline | kernel events carry no `ts` (CPU trace) |
+| 34 | `max_gap_s` | largest single gap — one big stall vs many small | ditto |
+| 35 | `achieved_occupancy_pct` | runtime-weighted; the "why is compute slow" signal | trace has no occupancy args (CPU / no kernels) |
+| 36 | `limiting_factor` | what caps occupancy (`REGS` / shared mem / warps) | ditto |
+| 37 | `device` | real hw from the trace: `{name, mem_gb, compute_capability, num_sms}` | `{}` on a CPU trace |
+| 38 | `trace_path` | raw Chrome trace on disk, for drill-down | no trace exported (e.g. OOM before the profiled step) |
+| 39 | `error` | failure cause, first line | `status == "ok"` |
+| 40 | `summary` | the one-line human/agent digest | never |
 
 **Two steps, two sources.** `step_time_s` is the median of the clean steps (profiler **off**);
 everything read from the trace — `gpu_busy_s`, the phase maps, gaps, occupancy — comes from the one
