@@ -38,3 +38,6 @@ runs/*
 # Editor / IDE
 .idea/
 .vscode/
+
+# throwaway/dev scripts (live GPU validation harnesses, one-off probes)
+tmp_scripts/

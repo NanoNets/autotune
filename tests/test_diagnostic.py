@@ -1,50 +1,170 @@
-"""Diagnostic tests — assemble an Observation from a fixture trace (no torch, no GPU)."""
+"""Diagnostic tests — assemble an Observation from a fixture capture (no torch, no GPU).
+
+`diagnose` is duck-typed on the capture (any object with .status/.step_times_s/.trace/.memory/
+.error), so we hand it a SimpleNamespace and never import the torch-backed capture engine.
+"""
 import os
 import sys
+from types import SimpleNamespace
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from profiler.diagnostic import diagnose
 from profiler.roofline import training_flops, mfu
 
-TRACE = {"traceEvents": [
-    {"cat": "user_annotation", "name": "forward", "dur": 100.0},
-    {"cat": "user_annotation", "name": "backward", "dur": 200.0},
-    {"cat": "user_annotation", "name": "optimizer", "dur": 50.0},
-    {"cat": "user_annotation", "name": "dataloader", "dur": 300.0},
-    {"cat": "kernel", "name": "sm80_gemm_bf16", "dur": 80.0},
-    {"cat": "kernel", "name": "flash_attention_fwd", "dur": 40.0},
-]}
+TRACE = {
+    "deviceProperties": [{"name": "NVIDIA A10", "totalGlobalMem": 23684841472,
+                          "computeMajor": 8, "computeMinor": 6, "numSms": 72}],
+    "traceEvents": [
+        {"cat": "user_annotation", "name": "forward", "dur": 100.0},
+        {"cat": "user_annotation", "name": "backward", "dur": 200.0},
+        {"cat": "user_annotation", "name": "optimizer", "dur": 50.0},
+        {"cat": "user_annotation", "name": "dataloader", "dur": 300.0},
+        {"cat": "kernel", "name": "sm80_gemm_bf16", "dur": 80.0, "ts": 0.0,           # [0, 80]
+         "args": {"est. achieved occupancy %": 40, "occupancy": {"limitingFactors": "REGS"}}},
+        {"cat": "kernel", "name": "flash_attention_fwd", "dur": 40.0, "ts": 100.0,    # [100,140] 20us gap
+         "args": {"est. achieved occupancy %": 60, "occupancy": {"limitingFactors": "REGS"}}},
+    ],
+}
 
-PARAMS, TOKENS, GPU = 1_000_000, 1_000, "A100"
-STEP_TIME = 1e-3   # 1 ms clean wall-clock
+PARAMS, TOKENS, GPU = 1_000_000, 1_000, "A100"     # GPU is a label now, not a spec key
+PEAK = 3.12e14                                     # measured peak handed over by the capture
+STEP_TIMES = [1.0e-3, 1.1e-3, 0.9e-3]   # median 1.0 ms, with spread -> nonzero noise floor
+MEMORY = {"peak_gb": 12.0, "reserved_gb": 14.0, "total_gb": 80.0, "headroom_gb": 66.0}
+CPU = {"mean": 62.0, "max": 88.0, "nproc": 16}
+
+
+def _cap(status="ok", step_times=None, trace=TRACE, memory=MEMORY, cpu=CPU, error=None, peak=PEAK):
+    return SimpleNamespace(
+        status=status, trace=trace, memory=memory, cpu=cpu, error=error,
+        peak_flops=peak, peak_dtype="bfloat16", profiled_step_s=None,
+        step_times_s=STEP_TIMES if step_times is None else step_times)
 
 
 def _obs():
-    return diagnose(STEP_TIME, TRACE, params=PARAMS, tokens=TOKENS, gpu=GPU)
+    return diagnose(_cap(), params=PARAMS, tokens=TOKENS, gpu=GPU)
 
 
 def test_trace_fields_flow_through():
     o = _obs()
     assert o.gpu_busy_s == 120e-6                       # 80 + 40 us
-    assert o.data_wait_s == 300e-6                      # dataloader annotation
+    assert o.data_wait_s == 300e-6
     assert o.phase_times_s["backward"] == 200e-6
 
 
-def test_mfu_is_consistent_with_roofline():
+def test_mfu_uses_median_step_time():
     o = _obs()
-    assert abs(o.mfu - mfu(training_flops(PARAMS, TOKENS), STEP_TIME, GPU)) < 1e-12
+    assert abs(o.mfu - mfu(training_flops(PARAMS, TOKENS), 1.0e-3, PEAK)) < 1e-12  # median = 1.0 ms
+
+
+def test_noise_floor():
+    assert _obs().step_time_cv > 0                      # spread -> nonzero cv
+    o1 = diagnose(_cap(step_times=[1.0e-3]), params=PARAMS, tokens=TOKENS, gpu=GPU)
+    assert o1.step_time_cv == 0.0                       # single sample -> 0
+
+
+def test_memory_flows_through():
+    o = _obs()
+    assert o.peak_mem_gb == 12.0
+    assert o.mem_total_gb == 80.0
+    assert o.headroom_gb == 66.0
+
+
+def test_cpu_util_flows_through():
+    o = _obs()
+    assert o.cpu_util_mean == 62.0
+    assert o.cpu_util_max == 88.0
+    assert o.nproc == 16
 
 
 def test_fractions_use_wall_clock():
     o = _obs()
-    assert abs(o.gpu_active_frac - 120e-6 / STEP_TIME) < 1e-12
-    assert abs(o.data_wait_frac - 300e-6 / STEP_TIME) < 1e-12
-    assert abs(o.gap_s - (STEP_TIME - 120e-6)) < 1e-12
+    wall = 1.0e-3                                       # median of STEP_TIMES
+    assert abs(o.gpu_active_frac - 120e-6 / wall) < 1e-12
+    assert abs(o.data_wait_frac - 300e-6 / wall) < 1e-12
+    assert abs(o.gap_s - (wall - 120e-6)) < 1e-12
+
+
+def test_coverage_and_idle_shape():
+    o = _obs()
+    assert o.kernel_count == 2
+    assert o.top8_coverage == 1.0                       # both kernels are in the top-8
+    assert o.gap_count == 1                             # one idle gap on the timeline
+    assert abs(o.max_gap_s - 20e-6) < 1e-12             # the 20 us gap
+
+
+def test_top_kernels_are_seconds_like_every_other_duration():
+    o = _obs()
+    assert o.top_kernels[0] == ["sm80_gemm_bf16", 80e-6]      # 80 us, expressed in seconds
+    assert abs(sum(d for _, d in o.top_kernels) - o.gpu_busy_s) < 1e-12   # same unit as the totals
+
+
+def test_device_and_occupancy_flow_through():
+    o = _obs()
+    assert o.device["name"] == "NVIDIA A10"
+    assert o.device["num_sms"] == 72
+    assert o.achieved_occupancy_pct == 46.7             # (40*80 + 60*40) / 120, runtime-weighted
+    assert o.limiting_factor == "REGS"
+
+
+def test_oom_short_circuits_but_keeps_memory_and_trace_path():
+    o = diagnose(_cap(status="oom", step_times=[], trace="/tmp/probe.json", error="CUDA out of memory"),
+                 params=PARAMS, tokens=TOKENS, gpu=GPU)
+    assert o.status == "oom"
+    assert o.mfu is None                                # no throughput computed on OOM
+    assert o.peak_mem_gb == 12.0                        # but memory is still surfaced
+    assert o.trace_path == "/tmp/probe.json"            # and the raw-trace pointer is kept
+    assert "oom" in o.summary
+
+
+def test_idle_shape_is_null_without_a_kernel_timeline():
+    trace = {**TRACE, "traceEvents": [{"cat": "kernel", "name": "k", "dur": 80.0}]}   # no ts
+    o = diagnose(_cap(trace=trace), params=PARAMS, tokens=TOKENS, gpu=GPU)
+    assert o.gap_count is None and o.max_gap_s is None   # unknown, not a gapless GPU
+
+
+def test_oom_keeps_the_clean_steps_that_ran():
+    o = diagnose(_cap(status="oom", error="CUDA out of memory"),
+                 params=PARAMS, tokens=TOKENS, gpu=GPU)
+    assert o.status == "oom"
+    assert o.step_time_s == 1.0e-3                      # steps before the OOM are still evidence
+    assert o.mfu is None                                # but nothing is scored off them
+
+
+def test_negative_gap_is_null_not_zero():
+    """busy comes from the profiled step, wall from the clean ones — they can disagree."""
+    slow = {**TRACE, "traceEvents": [{"cat": "kernel", "name": "k", "dur": 5_000_000.0}]}  # 5s busy
+    o = diagnose(_cap(trace=slow), params=PARAMS, tokens=TOKENS, gpu=GPU)   # vs a 1ms wall
+    assert o.gap_s is None and o.gap_frac is None       # disagreement, not "zero idle"
+    assert "idle n/a" in o.summary
 
 
 def test_provenance_present():
     assert _obs().provenance["flash_attention"] is True
+
+
+def test_any_hardware_label_is_accepted():
+    """No table to validate against — the denominator is measured, so any chip is supported."""
+    o = diagnose(_cap(), params=PARAMS, tokens=TOKENS, gpu="GB200-that-shipped-yesterday")
+    assert o.gpu == "GB200-that-shipped-yesterday" and o.mfu is not None
+
+
+def test_no_measured_peak_means_no_mfu():
+    o = diagnose(_cap(peak=None), params=PARAMS, tokens=TOKENS, gpu="A100")
+    assert o.mfu is None and o.roofline_floor_s is None   # no denominator, no number
+    assert "MFU n/a" in o.summary
+
+
+def test_readme_documents_every_observation_field():
+    """The README's field table is the agent-facing contract — keep it from drifting."""
+    from dataclasses import fields
+    from profiler.diagnostic import Observation
+
+    doc = open(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                            "profiler", "README.md")).read()
+    names = [f.name for f in fields(Observation)]
+    assert f"{len(names)} fields" in doc                # the count claim matches reality
+    assert [n for n in names if f"`{n}`" not in doc] == []
 
 
 if __name__ == "__main__":

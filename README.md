@@ -25,8 +25,10 @@ Requires [uv](https://docs.astral.sh/uv/).
 ```bash
 uv sync                                  # creates .venv (Python 3.12), installs torch + pytest
 uv run pytest                            # run the test suite
-uv run python profile.py --device cpu    # local profiler smoke run (CPU — MFU is meaningless here,
-                                         # it just proves the capture → trace → diagnose pipeline runs)
+uv run python -m profiler --device cpu --gpu A10G   # local profiler smoke run (CPU — MFU is
+                                        # meaningless here, it just proves the capture → trace →
+                                        # diagnose pipeline runs). --gpu is required: it is the
+                                        # roofline denominator, normally supplied by frame/.
 ```
 
 The roofline / trace / diagnostic logic is pure-python; only the capture engine needs torch.
@@ -35,10 +37,9 @@ The roofline / trace / diagnostic logic is pure-python; only the capture engine 
 
 ```
 loop/          the design — start here (contracts · loop spine · throughput objective)   [built]
-profiler/      the measurement instrument (roofline · trace · capture · diagnostic)       [built]
+profiler/      the measurement instrument (roofline · trace · capture · diagnostic · CLI)  [built]
 frameworks/    runner adapters — torch now, swift/HF later                                [built: torch]
 tests/         TDD                                                                         [built]
-profile.py     CLI: profile one config → print the diagnostic                             [built]
 
 frame/         profile the setup + build the search space                                 [scaffold]
 search/        surrogate · frontier · memory plumbing                                      [scaffold]
