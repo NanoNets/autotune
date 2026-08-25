@@ -57,7 +57,9 @@ installed) is gated by frame's `versions()`.
 - **`grad_accum` is inside one `step()`** — grad_accum micro fwd/bwd passes (loss scaled by
   `1/grad_accum`), then one optimizer step. `tokens_per_step = micro_batch · seq_len · grad_accum`.
 - **Padding is masked** in the labels (`-100`) and attention, so a padded step is still a valid
-  training step.
+  training step. Fully blank/whitespace rows are **dropped** (an all-pad batch has all-`-100`
+  labels → `0/0` NaN loss, which would poison every later step); a run with too few usable rows
+  fails loudly in `setup` rather than mid-`step`.
 - **Pure vs live split**, like frame/profiler: `knobs()` + `_resolve()` (defaults + token math) import
   and test on bare `python3`; `setup`/`step` lazily import torch/transformers/datasets.
 

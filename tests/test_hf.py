@@ -8,7 +8,7 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from frameworks.hf import knobs, _resolve
+from frameworks.hf import knobs, _resolve, _usable_texts
 
 BASE = {"model": "Qwen/Qwen2.5-0.5B", "dataset": "Salesforce/wikitext"}
 
@@ -53,6 +53,15 @@ def test_sample_smaller_than_micro_batch_raises():
         assert "loader would be empty" in str(e)
         return
     assert False, "expected ValueError when sample < micro_batch"
+
+
+def test_usable_texts_skips_blanks_missing_fields_and_caps():
+    rows = [{"text": "hello"}, {"text": "  "}, {"text": ""}, {"other": "x"},
+            {"text": "world"}, {"text": "\n"}, {"text": "again"}]
+    # blank/whitespace-only rows and the missing-field row are skipped (all-pad batch -> NaN loss)
+    assert _usable_texts(rows, "text", sample=10) == ["hello", "world", "again"]
+    assert _usable_texts(rows, "text", sample=2) == ["hello", "world"]         # capped at sample
+    assert _usable_texts(rows, "text", sample=10) and _usable_texts([], "text", 10) == []
 
 
 if __name__ == "__main__":

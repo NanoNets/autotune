@@ -42,6 +42,23 @@ def knobs():
     }
 
 
+def _usable_texts(rows, text_field, sample):
+    """Non-empty texts from a row iterable, capped at `sample`.
+
+    Skips blank/whitespace rows: an all-padding row tokenizes to all pad tokens, whose labels are
+    all -100, whose causal-LM loss is 0/0 = NaN — which backprops into every param and silently
+    poisons every later step. A missing field reads as "" and is skipped too.
+    """
+    texts = []
+    for row in rows:
+        t = row.get(text_field, "")
+        if t and t.strip():
+            texts.append(t)
+            if len(texts) >= sample:
+                break
+    return texts
+
+
 def _resolve(config):
     """Fill defaults + derived values. Pure — no torch/transformers, so it's unit-testable."""
     c = {**_DEFAULTS, **config}
@@ -73,7 +90,7 @@ class HFRunner:
             tok.pad_token = tok.eos_token
 
         self.model = AutoModelForCausalLM.from_pretrained(
-            self.cfg["model"], torch_dtype=dtype,
+            self.cfg["model"], dtype=dtype,                 # transformers 5.x: torch_dtype is deprecated
             attn_implementation=self.cfg["attn_implementation"],
             trust_remote_code=True).to(self.device)
         self.params = sum(p.numel() for p in self.model.parameters())   # before compile wrapping
@@ -92,17 +109,15 @@ class HFRunner:
         from datasets import load_dataset
 
         c = self.cfg
-        ds = load_dataset(c["dataset"], c["name"], split=c["split"], streaming=True)
-        ids, mask = [], []
-        for i, row in enumerate(ds):
-            if i >= c["sample"]:
-                break
-            enc = tok(row[c["text_field"]], truncation=True, max_length=c["seq_len"],
-                      padding="max_length")
-            ids.append(enc["input_ids"])
-            mask.append(enc["attention_mask"])
-        input_ids = torch.tensor(ids)
-        attention = torch.tensor(mask)
+        rows = load_dataset(c["dataset"], c["name"], split=c["split"], streaming=True)
+        texts = _usable_texts(rows, c["text_field"], c["sample"])
+        if len(texts) < c["micro_batch"]:                  # else drop_last empties the loader ->
+            raise ValueError(                              # StopIteration out of step()
+                f"only {len(texts)} usable rows from {c['dataset']} (split={c['split']}, "
+                f"field={c['text_field']!r}); need at least micro_batch={c['micro_batch']}")
+        enc = tok(texts, truncation=True, max_length=c["seq_len"], padding="max_length")
+        input_ids = torch.tensor(enc["input_ids"])
+        attention = torch.tensor(enc["attention_mask"])
         labels = input_ids.masked_fill(attention == 0, -100)   # don't train on padding
         dset = torch.utils.data.TensorDataset(input_ids, attention, labels)
         return torch.utils.data.DataLoader(dset, batch_size=c["micro_batch"],
