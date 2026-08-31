@@ -19,6 +19,9 @@ env/
 .env.*
 !.env.example
 
+# Run config (fill run.toml from the committed run.toml.example template)
+run.toml
+
 # Claude Code local state
 .claude/
 
@@ -27,6 +30,7 @@ CLAUDE.md
 PLAN.md
 HANDOFF.md
 notes.md
+wip_docs/
 
 # Run outputs (keep the dir's README, ignore the run artifacts)
 runs/*
@@ -37,3 +41,6 @@ runs/*
 # Editor / IDE
 .idea/
 .vscode/
+
+# throwaway/dev scripts (live GPU validation harnesses, one-off probes)
+tmp_scripts/
