@@ -39,7 +39,7 @@ is scored against the same denominator (not a per-probe re-measure).
 | Backend | What | Status |
 |---|---|---|
 | **local** | in-process on this machine's device — dev, or a box you're already on | built; runs any runner (fixture on CPU, or a real GPU) |
-| **modal** | serverless GPU: ships the repo to Modal, runs on the requested GPU, returns the Observation. `config["gpu"]` is the GPU request | built (Modal 1.5); **needs a live run to validate** |
+| **modal** | serverless GPU: ships the repo to Modal, runs on the requested GPU, returns the Observation. `config["gpu"]` is the GPU request | built (Modal 1.5); **live-validated end-to-end on an A10G** |
 | **ssh** | any rented box / neocloud (Lambda, RunPod, …) or your own cluster | deferred |
 
 ## Adding a runner
