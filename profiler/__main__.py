@@ -29,6 +29,7 @@ def main():
                     help="hardware label for the record, e.g. A10G")  # denominator is measured
     ap.add_argument("--dtype", default=None, help="run dtype (hf); the peak is measured at this")
     ap.add_argument("--micro-batch", type=int, default=8)
+    ap.add_argument("--effective-batch", type=int, default=16, help="hf: target the loop factorizes")
     ap.add_argument("--seq", type=int, default=128)
     ap.add_argument("--model", help="HF hub id or local path (required for --framework hf)")
     ap.add_argument("--dataset", help="HF hub id or local path (required for --framework hf)")
@@ -45,7 +46,7 @@ def main():
         from frameworks.hf import HFRunner
         runner = HFRunner()
         config.update({"model": args.model, "dataset": args.dataset, "name": args.name,
-                       "seq_len": args.seq})
+                       "seq_len": args.seq, "effective_batch": args.effective_batch})
     else:
         from frameworks.torch import TorchRunner
         runner = TorchRunner()

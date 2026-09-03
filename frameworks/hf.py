@@ -12,13 +12,14 @@ module plus `knobs()` / `_resolve()` import on bare python3.
 
 _DEFAULTS = {
     "device": "cuda",
-    "dtype": "bfloat16",
-    "micro_batch": 1,
-    "grad_accum": 1,
-    "seq_len": 1024,
+    "dtype": "bfloat16",               # run PARAMETER (off-limits precision), not a searchable knob
+    "seq_len": 1024,                   # run PARAMETER (off-limits max_length), not a searchable knob
+    "effective_batch": 16,             # human-owned target; the loop factorizes it, never changes it
+    "micro_batch": 1,                  # the free batch knob; grad_accum is derived to hold effective_batch
     "gradient_checkpointing": False,
     "attn_implementation": "sdpa",     # always available in torch 2.x; flash_attention_2 needs the lib
     "torch_compile": False,
+    "tf32": False,                     # TF32 matmuls on Ampere+ (speeds matmul, doesn't change the model)
     "sample": 256,                     # rows pulled into the in-memory loader
     "name": None,                      # dataset config/subset
     "split": "train",
@@ -28,17 +29,17 @@ _DEFAULTS = {
 
 
 def knobs():
-    """The tunable surface this framework exposes — speed levers only (nothing that changes the
-    learned model). The loop turns these; availability (e.g. flash-attn installed) is gated by
-    frame's `versions()`."""
+    """The tunable surface this framework exposes — SAFE speed levers only (per loop/throughput.md:
+    change speed, not the learned model). Deliberately NOT here: `dtype` (precision) and `seq_len`
+    (max_length) are run PARAMETERS the human sets, off-limits to search; `grad_accum` isn't free
+    either — it's derived to hold `effective_batch`. Availability (e.g. flash-attn) is gated by
+    frame's `versions()`. Parallelism / offload / packing / fused kernels: deferred (see README)."""
     return {
-        "micro_batch":            {"type": "int",    "min": 1},
-        "grad_accum":             {"type": "int",    "min": 1},
-        "seq_len":                {"type": "int",    "min": 1},
-        "dtype":                  {"type": "choice", "options": ["bfloat16", "float16", "float32"]},
+        "micro_batch":            {"type": "int",    "min": 1},   # grad_accum = effective_batch // micro_batch
         "gradient_checkpointing": {"type": "bool"},
         "attn_implementation":    {"type": "choice", "options": ["eager", "sdpa", "flash_attention_2"]},
         "torch_compile":          {"type": "bool"},
+        "tf32":                   {"type": "bool"},
     }
 
 
@@ -65,10 +66,14 @@ def _resolve(config):
     for req in ("model", "dataset"):
         if not c.get(req):
             raise ValueError(f"config needs a {req!r} (HF hub id or local path)")
-    if c["sample"] < c["micro_batch"]:
-        raise ValueError(f"sample ({c['sample']}) < micro_batch ({c['micro_batch']}): loader would be empty")
-    # one optimizer step covers grad_accum micro-batches of micro_batch x seq_len tokens
-    c["tokens_per_step"] = c["micro_batch"] * c["seq_len"] * c["grad_accum"]
+    eb, mb = c["effective_batch"], c["micro_batch"]
+    if eb % mb != 0:                                    # the loop only factorizes effective_batch,
+        raise ValueError(                              # never changes it (it's the quality boundary)
+            f"effective_batch ({eb}) must be divisible by micro_batch ({mb})")
+    c["grad_accum"] = eb // mb                          # derived to hold the human's effective_batch
+    if c["sample"] < mb:
+        raise ValueError(f"sample ({c['sample']}) < micro_batch ({mb}): loader would be empty")
+    c["tokens_per_step"] = eb * c["seq_len"]            # = micro_batch * grad_accum * seq_len
     return c
 
 
@@ -84,6 +89,9 @@ class HFRunner:
         self.device = self.cfg["device"]
         self._rf = record_function
         dtype = getattr(torch, self.cfg["dtype"])
+        if self.cfg["tf32"]:                            # Ampere+ TF32 matmul path
+            torch.backends.cuda.matmul.allow_tf32 = True
+            torch.backends.cudnn.allow_tf32 = True
 
         tok = AutoTokenizer.from_pretrained(self.cfg["model"], trust_remote_code=True)
         if tok.pad_token is None:

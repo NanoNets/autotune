@@ -30,6 +30,8 @@ class Profile:
     versions: dict = field(default_factory=dict)       # library versions (gate which knobs exist)
     memory: dict = field(default_factory=dict)         # analytical model-state breakdown
     default_config: dict = field(default_factory=dict) # the (dtype, optimizer) the memory assumes
+    effective_batch: int = None                        # human-owned target; the loop factorizes it, never changes it
+    knobs: dict = field(default_factory=dict)          # the framework's SEARCHABLE surface (agent classifies at Frame)
     flops_per_token: float = None                      # 6N; loop multiplies by tokens/step for the floor
     activation_headroom_gb: float = None               # mem - model_state (room for activations)
     model_state_fits: bool = None                      # does MODEL STATE alone fit — says nothing
@@ -37,11 +39,14 @@ class Profile:
     summary: str = ""
 
 
-def build(model, dataset, hardware, versions, dtype="bfloat16", optimizer="adamw"):
+def build(model, dataset, hardware, versions, dtype="bfloat16", optimizer="adamw",
+          effective_batch=None, knobs=None):
     """model/dataset/hardware/versions: the extracted parts (see the sibling modules).
 
     dtype: the run compute dtype — drives the memory precision AND is the dtype the peak was
     measured at (carried in default_config so the loop passes the matching config["dtype"]).
+    effective_batch: the human's target (carried, not searched). knobs: the framework's searchable
+    surface, so the agent classifies safe/off-limits at Frame from what's actually tunable.
     """
     peak_dtype = hardware.get("peak_dtype")
     if peak_dtype is not None and peak_dtype != dtype:  # a peak measured at another precision is
@@ -66,20 +71,29 @@ def build(model, dataset, hardware, versions, dtype="bfloat16", optimizer="adamw
     ds = dataset
     ds_str = (f"{ds['n_samples']} samples, p50 {ds['p50']}/p99 {ds['p99']} tok"
               if ds.get("n_samples") else "no dataset")
-    summary = (f"{name} ({model['attention']}, {dtype}) | {params/1e9:.1f}B params | "
+    eb_str = f" | eff-batch {effective_batch}" if effective_batch else ""
+    summary = (f"{name} ({model['attention']}, {dtype}) | {params/1e9:.1f}B params{eb_str} | "
                f"{hardware.get('gpu')} {mem_str}{peak_str} | "
                f"full-FT model-state {mem['model_state_gb']}GB {fit_str} | {ds_str}")
 
     return Profile(
         model=model, dataset=dataset, hardware=hardware, versions=versions, memory=mem,
         default_config={"dtype": dtype, "param_bytes": param_bytes, "optimizer": optimizer},
+        effective_batch=effective_batch, knobs=knobs or {},
         flops_per_token=6.0 * params, activation_headroom_gb=headroom,
         model_state_fits=fits, summary=summary,
     )
 
 
-def frame(model, dataset, gpu, dtype="bfloat16", device="cuda",
-          text_field="text", split="train", sample=1000, name=None):
+def _framework_knobs(framework):
+    """The searchable surface the named framework exposes ({} if it declares none, e.g. the fixture)."""
+    import importlib
+    fn = getattr(importlib.import_module(f"frameworks.{framework}"), "knobs", None)
+    return fn() if callable(fn) else {}
+
+
+def frame(model, dataset, gpu, dtype="bfloat16", device="cuda", framework="hf",
+          effective_batch=16, text_field="text", split="train", sample=1000, name=None):
     """Live: measure the peak, load config + tokenizer, scan the dataset, assemble.
 
     Needs torch + a GPU (peak), transformers + datasets (model/tokenizer/dataset). `gpu` is a
@@ -97,4 +111,5 @@ def frame(model, dataset, gpu, dtype="bfloat16", device="cuda",
     hw = hardware(gpu, peak_flops=m["peak_flops"], mem_gb=m["mem_gb"], dtype=dtype,
                   device_name=m["device_name"], num_sms=m["num_sms"],
                   peak_mem_bw_gb_s=m["peak_mem_bw_gb_s"])
-    return build(mi, ds, hw, versions(), dtype=dtype)
+    return build(mi, ds, hw, versions(), dtype=dtype,
+                 effective_batch=effective_batch, knobs=_framework_knobs(framework))
