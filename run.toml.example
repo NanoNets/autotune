@@ -3,14 +3,24 @@
 # The declarative spec for one autotune run. Frame reads this to build the Profile (runs/<id>/profile.json);
 # the loop reads it for the run inputs. Secrets (HF_TOKEN, Modal/SSH auth) live in .env, not here.
 
-model   = "Qwen/Qwen2.5-0.5B"     # HF hub id or local path
-dataset = "Salesforce/wikitext"   # HF hub id or local path
-name    = "wikitext-2-raw-v1"     # dataset config/subset; omit if the dataset has none
-gpu     = "A10G"                  # a key in profiler/roofline.py GPU_SPECS (A100 / H100 / A10G / L4)
+model           = "Qwen/Qwen2.5-0.5B"     # HF hub id or local path
+dataset         = "Salesforce/wikitext"   # HF hub id or local path
+name            = "wikitext-2-raw-v1"     # dataset config/subset; omit if the dataset has none
+gpu             = "A10G"                  # a key in profiler/roofline.py GPU_SPECS (A100 / H100 / A10G / L4)
+                                           # single GPU only for now — frame/ has no multi-GPU support yet
+effective_batch = 16                      # human-owned target; off-limits, the loop only factorizes it (loop/throughput.md)
+
+backend = "local"   # "local" or "ssh" — see backends/README.md
 
 [scan]
 text_field = "text"    # which dataset column to tokenize
 split      = "train"   # dataset split to scan
 sample     = 1000      # rows to tokenize for the length distribution
+
+# only used when backend = "ssh" — the SSH credential itself (AUTOTUNE_SSH_PASSWORD /
+# AUTOTUNE_SSH_KEY) stays in .env, never here
+[ssh]
+host = ""
+user = ""
 
 # (later) the loop adds objective + budget here.

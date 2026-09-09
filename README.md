@@ -3,6 +3,7 @@
 > Find the fastest training config for your hardware — automatically, without touching model quality.
 
 **Status: early. Rebuilding from scratch, profiler-first.** This is a working skeleton, not a finished tool.
+**Single-GPU only for now** — multi-GPU/parallelism is planned (see "The plan," §4) but not yet built.
 
 autotune is a research loop that profiles a real training step, sees where the time is going against
 the hardware's roofline, and searches the configuration space for the settings that maximize throughput

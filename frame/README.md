@@ -10,6 +10,45 @@ about them.
 
 ---
 
+## Setup checklist (`program.md` Step 2)
+
+Get the model and dataset verified and understood before touching any knob — a thing you can't
+load is a setup failure, not an experiment result.
+
+**Model** (named in `run.toml`):
+
+- **Confirm it's retrievable.** If it's a HuggingFace repo id, confirm you can actually pull its
+  config/weights (valid `HF_TOKEN`, correct repo id/revision, gated access resolved). If it's a
+  local checkpoint path, confirm it exists and actually loads.
+- **Build a real architecture picture**, not just a name: layers, hidden size, attention heads vs.
+  kv_heads (GQA/MQA changes memory/parallelism math), intermediate size, vocab size, MoE
+  experts/top_k if applicable, attention type, param count, modality, dtype. This is the `model`
+  field of the `Profile` contract (`loop/contracts.md`) and it directly determines which levers in
+  `loop/throughput.md` even apply — e.g. `expert_parallel` is meaningless on a dense model, GQA
+  changes the memory/throughput tradeoff of recompute and batch knobs.
+- **Where to get it, in order:**
+  1. `knowledge.md` and `knowledge/beliefs.md` (see `knowledge/README.md`) — someone may have
+     already profiled this exact model (or its architecture family) on similar hardware. Don't
+     re-derive what's already known.
+  2. The model's own config (`config.json`/model card on the hub, or the local checkpoint's
+     config) — the ground truth for the numeric fields.
+  3. Websearch — the model card, paper, or announcement, especially for a newer or less
+     documented model. Don't guess at architecture details from the name alone.
+- Whatever websearch turns up, write it into `runs/<run_name>/research.md` as you find it (see
+  `runs/README.md`) — that's the landing zone, not `knowledge.md` directly. If this is a new model
+  this repo hasn't seen before, the architecture summary you build here is exactly the kind of
+  thing worth promoting into a durable `knowledge.md` entry (or belief) at Step 5's end-of-run
+  review, so the next run against it starts from an answer, not from scratch.
+
+**Dataset**:
+
+- **Local path** — confirm it exists, is readable, and matches the format the training script
+  expects (schema, modality, on-disk layout). Don't assume; open a sample and check.
+- **HuggingFace dataset** — confirm you can actually pull it (valid `HF_TOKEN` in `.env`, correct
+  repo id/revision, gated-access resolved).
+
+---
+
 ## The five questions it answers
 
 1. **What's the model?** Reads the model's config and works out its real shape: layers, hidden size,
