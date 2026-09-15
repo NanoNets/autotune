@@ -16,11 +16,40 @@ BASE = {"model": "Qwen/Qwen2.5-0.5B", "dataset": "Salesforce/wikitext"}
 def test_knobs_are_safe_levers_only():
     k = knobs()
     assert set(k) == {"micro_batch", "gradient_checkpointing",
-                      "attn_implementation", "torch_compile", "tf32"}
+                      "attn_implementation", "torch_compile", "tf32", "padding",
+                      "length_grouped"}
     # dtype (precision) and seq_len (max_length) are off-limits run params, NOT searchable knobs;
     # grad_accum is derived, not free.
     assert "dtype" not in k and "seq_len" not in k and "grad_accum" not in k
     assert k["attn_implementation"]["options"] == ["eager", "sdpa", "flash_attention_2"]
+    # compile is off/default/max-autotune in loop/throughput.md, so the knob is a choice, not a bool
+    assert k["torch_compile"]["options"] == [False, "default", "reduce-overhead",
+                                            "max-autotune", "max-autotune-no-cudagraphs"]
+
+
+def test_padding_is_a_speed_lever_not_a_model_change():
+    # pad-to-longest is masked out of attention and set to -100 in labels, so it changes only how
+    # much compute is spent, never the gradients. seq_len still truncates, so max_len is respected.
+    assert knobs()["padding"]["options"] == ["max_length", "longest"]
+    assert _resolve(BASE)["padding"] == "max_length"          # default = the shipped behaviour
+    assert _resolve({**BASE, "padding": "longest"})["pad_multiple"] == 64
+
+
+def test_length_grouping_reduces_padding_waste():
+    import torch
+    from frameworks.hf import _length_grouped
+    rows = [torch.arange(n) for n in [5, 400, 12, 380, 7, 410]]
+    lens = [r.numel() for r in _length_grouped(rows, micro_batch=2)]
+    # every pair should now be near-equal in length (one chunk boundary aside)
+    spreads = sorted(max(lens[i:i + 2]) - min(lens[i:i + 2]) for i in range(0, 6, 2))
+    assert spreads[0] <= 10 and spreads[1] <= 10           # two of three pairs are tight
+    assert sorted(lens) == [5, 7, 12, 380, 400, 410]       # no row lost or duplicated
+
+
+def test_torch_compile_accepts_bool_or_mode():
+    assert _resolve(BASE)["torch_compile"] is False                     # default: off
+    assert _resolve({**BASE, "torch_compile": True})["torch_compile"] is True
+    assert _resolve({**BASE, "torch_compile": "max-autotune"})["torch_compile"] == "max-autotune"
 
 
 def test_resolve_fills_defaults():

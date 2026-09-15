@@ -24,8 +24,13 @@ _DEFAULTS = {
     "micro_batch": 1,                  # the free batch knob; grad_accum is derived to hold effective_batch
     "gradient_checkpointing": False,
     "attn_implementation": "sdpa",     # always available in torch 2.x; flash_attention_2 needs the lib
-    "torch_compile": False,
+    "torch_compile": False,             # False | True (default mode) | a torch.compile mode string
     "tf32": False,                     # TF32 matmuls on Ampere+ (speeds matmul, doesn't change the model)
+    "padding": "max_length",           # "max_length" (every batch seq_len) | "longest" (pad to the
+                                       # batch's own longest, rounded up to pad_multiple)
+    "pad_multiple": 64,                # bucket dynamic lengths so torch.compile sees few shapes
+    "length_grouped": False,           # batch similar-length rows together, so pad-to-longest wastes
+                                       # less; only meaningful with padding="longest"
     "sample": 256,                     # rows pulled into the in-memory loader
     "name": None,                      # dataset config/subset
     "split": "train",
@@ -44,8 +49,12 @@ def knobs():
         "micro_batch":            {"type": "int",    "min": 1},   # grad_accum = effective_batch // micro_batch
         "gradient_checkpointing": {"type": "bool"},
         "attn_implementation":    {"type": "choice", "options": ["eager", "sdpa", "flash_attention_2"]},
-        "torch_compile":          {"type": "bool"},
+        "torch_compile":          {"type": "choice",
+                                   "options": [False, "default", "reduce-overhead",
+                                               "max-autotune", "max-autotune-no-cudagraphs"]},
         "tf32":                   {"type": "bool"},
+        "padding":                {"type": "choice", "options": ["max_length", "longest"]},
+        "length_grouped":         {"type": "bool"},   # pairs with padding="longest"
     }
 
 
@@ -64,6 +73,21 @@ def _usable_texts(rows, text_field, sample):
             if len(texts) >= sample:
                 break
     return texts
+
+
+def _length_grouped(rows, micro_batch, seed=0):
+    """Reorder rows so each consecutive `micro_batch` chunk holds similar lengths.
+
+    Pad-to-longest costs `micro_batch * max_len_in_batch`, so mixing a 10-token row with a
+    500-token one pads the short one to 500. Sorting by length collapses that waste; shuffling the
+    resulting CHUNKS (not the rows) keeps batch order random so training doesn't see all the short
+    sequences first.
+    """
+    import random
+    order = sorted(range(len(rows)), key=lambda i: rows[i].numel())
+    chunks = [order[i:i + micro_batch] for i in range(0, len(order), micro_batch)]
+    random.Random(seed).shuffle(chunks)
+    return [rows[i] for chunk in chunks for i in chunk]
 
 
 def _resolve(config):
@@ -115,8 +139,10 @@ class HFRunner:
         if self.cfg["gradient_checkpointing"]:
             self.model.gradient_checkpointing_enable()
         self.model.train()
-        if self.cfg["torch_compile"]:
-            self.model = torch.compile(self.model)
+        compile_mode = self.cfg["torch_compile"]
+        if compile_mode:                                # True -> inductor default; str -> that mode
+            self.model = torch.compile(
+                self.model, **({} if compile_mode is True else {"mode": compile_mode}))
 
         self.opt = torch.optim.AdamW(self.model.parameters(), lr=self.cfg["lr"])
         if self.cfg.get("data") == "synthetic":
@@ -138,6 +164,24 @@ class HFRunner:
             raise ValueError(                              # StopIteration out of step()
                 f"only {len(texts)} usable rows from {c['dataset']} (split={c['split']}, "
                 f"field={c['text_field']!r}); need at least micro_batch={c['micro_batch']}")
+        if c["padding"] == "longest":
+            # Pad each batch to its OWN longest row instead of to seq_len. Identical arithmetic --
+            # pad positions are masked out of attention and set to -100 in labels, so they
+            # contribute nothing to the loss or the gradients -- it just stops spending compute on
+            # them. seq_len still caps via truncation, so max_len is respected, not changed.
+            enc = tok(texts, truncation=True, max_length=c["seq_len"])
+            rows_ = [torch.tensor(i) for i in enc["input_ids"]]
+            if c["length_grouped"]:
+                # Sort by length so each batch's rows are near-equal and pad-to-longest wastes
+                # little. Batch ORDER is still shuffled, so the epoch is not length-ordered.
+                rows_ = _length_grouped(rows_, c["micro_batch"])
+                return torch.utils.data.DataLoader(
+                    rows_, batch_size=c["micro_batch"], shuffle=False, drop_last=True,
+                    collate_fn=lambda b: self._pad_batch(b, tok.pad_token_id))
+            return torch.utils.data.DataLoader(
+                rows_, batch_size=c["micro_batch"], shuffle=True, drop_last=True,
+                collate_fn=lambda b: self._pad_batch(b, tok.pad_token_id))
+
         enc = tok(texts, truncation=True, max_length=c["seq_len"], padding="max_length")
         input_ids = torch.tensor(enc["input_ids"])
         attention = torch.tensor(enc["attention_mask"])
@@ -145,6 +189,23 @@ class HFRunner:
         dset = torch.utils.data.TensorDataset(input_ids, attention, labels)
         return torch.utils.data.DataLoader(dset, batch_size=c["micro_batch"],
                                            shuffle=True, drop_last=True)
+
+    def _pad_batch(self, rows, pad_id):
+        """Pad a batch to its longest row, rounded up to `pad_multiple`.
+
+        The rounding is what keeps torch.compile viable: raw longest-lengths would present a new
+        shape almost every batch and trigger a recompile each time, so lengths are bucketed.
+        """
+        import torch
+        m = self.cfg["pad_multiple"]
+        longest = max(r.numel() for r in rows)
+        width = min(self.cfg["seq_len"], -(-longest // m) * m)      # round up, never past seq_len
+        ids = torch.full((len(rows), width), pad_id, dtype=torch.long)
+        att = torch.zeros((len(rows), width), dtype=torch.long)
+        for i, r in enumerate(rows):
+            n = min(r.numel(), width)
+            ids[i, :n], att[i, :n] = r[:n], 1
+        return ids, att, ids.masked_fill(att == 0, -100)
 
     def _synthetic_batch(self, tok):
         """One worst-case batch: every row exactly seq_len, zero padding, on the device.
@@ -174,10 +235,14 @@ class HFRunner:
 
     def step(self):
         c = self.cfg
+        self._tokens = 0                                   # measured, not assumed (see tokens_per_step)
+        self._steps = getattr(self, "_steps", 0) + 1
         self.opt.zero_grad(set_to_none=True)
         for _ in range(c["grad_accum"]):
             with self._rf("dataloader"):
                 input_ids, attention, labels = self._next()
+            self._tokens += input_ids.numel()
+            self._tokens_total = getattr(self, "_tokens_total", 0) + input_ids.numel()
             input_ids = input_ids.to(self.device)
             attention = attention.to(self.device)
             labels = labels.to(self.device)
@@ -195,4 +260,19 @@ class HFRunner:
         self.model = self.opt = self._loader = self._it = self._batch = None
 
     def tokens_per_step(self):
+        """Tokens actually pushed through the model per optimizer step.
+
+        MEASURED rather than assumed, because under `padding="longest"` the batch width varies and
+        `effective_batch * seq_len` would overstate it -- inflating both tokens/s and MFU exactly
+        where the lever is supposed to be judged. Under `padding="max_length"` the measured value
+        equals that product, so this is a no-op there.
+
+        It is the MEAN over every step run, not the last step's count. `step_time_s` is a median
+        over many steps, so pairing it with a single step's token count mismatches numerator and
+        denominator: two runs of an identical config measured 7490 vs 9449 tokens/s while their
+        samples/s agreed to 0.9%. The mean makes the ratio meaningful again.
+        """
+        steps = getattr(self, "_steps", 0)
+        if steps:
+            return getattr(self, "_tokens_total", 0) / steps
         return self.cfg["tokens_per_step"]
