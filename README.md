@@ -90,55 +90,37 @@ Different questions, different read cadence, **opposite** mutation rules — see
 - **`knowledge/`** — *what do we believe about this lever?* Read **every hypothesis**, filtered by
   `context` match. **Curated**: amended, superseded, deleted as evidence lands.
 
-### Why this compounds — the network effect
-
-Every run writes to both stores. Every new run reads back only what transfers.
+### Why the two memories matter
 
 ```
-   A: Qwen 0.5B / A10      B: Llama 8B / H100     C: Mistral 7B / L40S     ...N
-      wikitext · bf16         dolly · bf16           own corpus · bf16
-      23 experiments          41 experiments         15 experiments
-            └───────────────────────┴──────────────────────┘
-                                    │  each run writes BOTH
-                                    ▼
-  ┌──────────────────────────────────────────────────────────────────────┐
-  │  knowledge.md   append-only log · one dated entry per run            │
-  │                 "has anyone run THIS configuration?"                 │
-  │                                                                      │
-  │  knowledge/     curated beliefs · one claim per file, context-keyed  │
-  │                 "what do we believe about this lever?"               │
-  │                                                                      │
-  │      evidence:  probes 1 ─▶ 6 ─▶ 23 ...    as runs re-confirm        │
-  │      conflict:  SPLIT by context ─────┐    never overwrite           │
-  │                   holds on Ampere ────┤                              │
-  │                   fails on Hopper ────┘    two linked beliefs        │
-  │                                                                      │
-  │      every belief ──▶ links back to its dated run entry + numbers    │
-  │                       (this is what makes a stranger's prior         │
-  │                        inspectable instead of an assertion)          │
-  └──────────────────────────────────────────────────────────────────────┘
-                                    │
-                                    │  context match — only what transfers
-                                    ▼
-  ┌──────────────────────────────────────────────────────────────────────┐
-  │  NEW RUN:  Gemma 2B / A100 / short-tailed corpus                     │
-  │                                                                      │
-  │    fires    tf32-inert-under-bf16        bf16 · Ampere+              │
-  │    fires    cudagraphs-x-grad-accum      any · any · any             │
-  │    fires    static-padding-bottleneck    p50 << max_len              │
-  │    SILENT   ce-dominates-activation      vocab/params too low        │
-  │             └─ correctly: nobody prunes a stranger's memory by hand  │
-  │                                                                      │
-  │    starts from 3 priors + a replayable config — not from zero        │
-  └──────────────────────────────────────────────────────────────────────┘
-                                    │
-                                    └──▶ its results feed straight back in:
-                                         probes 1 ─▶ 2, or a contradiction
-                                         that splits a belief by context
+  ┌────────────────────────────────┐   ┌────────────────────────────────┐
+  │  knowledge/      BELIEFS       │   │  knowledge.md    EXPERIENCE    │
+  │                                │   │                                │
+  │  an engineer's opinion —       │   │  what actually happened —      │
+  │  what someone who has done     │   │  dated runs, real numbers,     │
+  │  this before would tell you    │   │  baseline → best, config by    │
+  │  before you start              │   │  config                        │
+  │                                │   │                                │
+  │  "tf32 is inert under bf16 —   │   │  "Qwen 0.5B on an A10:         │
+  │   don't spend the probe"       │   │   4.3 → 108.6 samples/s"       │
+  └───────────────┬────────────────┘   └───────────────┬────────────────┘
+                  │                                    │
+                  └────────────────┬───────────────────┘
+                                   ▼
+                 ┌───────────────────────────────────────┐
+                 │              THE AGENT                │
+                 │                                       │
+                 │   frames the job · hypothesizes ·     │
+                 │   probes · learns · writes back       │
+                 │                                       │
+                 │   starts from opinion + experience,   │
+                 │   never from zero                     │
+                 └───────────────────────────────────────┘
 ```
 
-Probe budgets don't add up across people. **Priors do.** And it's all markdown — contributing
-memory is a pull request, reviewed like code. No retraining, no embeddings, no service.
+Opinions sharpen as more runs confirm or contradict them; experience accumulates as more
+configurations get tried. **More contributors means more of both** — and because it's all markdown,
+contributing memory is a pull request, reviewed like code.
 
 ### The invariants a dev should know
 
