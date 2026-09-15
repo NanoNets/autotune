@@ -79,3 +79,23 @@ Confirmed twice (108.591 / 107.916, 0.6% apart).
 - **`max_len=2048` may be mis-declared** for this data (observed max 520 tok). If the application truly
   needs only ~512, the ceiling would rise sharply and the launch-bound wall would likely fall. This is
   the human's call, not the loop's — it was raised at Step 3 and they chose to keep 2048.
+
+### Addendum — 2026-09-15 (appended, findings above unedited)
+
+**The 25x is an upper bound, not a point estimate.** The comparison is between a
+distribution-*invariant* baseline (`padding="max_length"` — every batch 2048 wide regardless of the
+rows drawn) and a distribution-*sensitive* winner (`padding="longest"` — batch width *is* the rows
+drawn). Frame scanned 1000 rows; the loader trained on 256 (`sample`). Both are a small slice of the
+split, and neither saw the long rows up to the 2048 truncation cap that real training will hit —
+those widen batches and lower samples/s.
+
+Unaffected: everything measured on synthetic batches (the ceiling 2 → 4 → 8) or derived from
+mechanism (CE dominating activation memory, compile's 5.4GB, tf32 inert under bf16, cudagraphs x
+grad_accum). The padding finding's *direction* is arithmetic — p50 10 against `max_len` 2048 means
+~97% of static-padded compute is pad — only the magnitude is sample-bound.
+
+**Doctrine this produced:** under dynamic padding the probe's row sample must represent the
+dataset's length distribution, or throughput is measured on a workload the run will not train on.
+Static padding hid this — every batch was full width regardless. Now in `frameworks/README.md` and
+`program.md` Step 4; the deeper fix (draw the sample to match the distribution, don't just enlarge
+it) is `design_improvements.md`.

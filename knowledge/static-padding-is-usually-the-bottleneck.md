@@ -8,7 +8,9 @@ context:
   dataset_shape: p50 far below max_len (here p50 10 tok vs max_len 2048)
 evidence:
   probes: 5 (experiments 9, 15, 17, 18, 20)
-  confidence: high — reproduced across four configs, best confirmed twice to 0.6%
+  confidence: high on DIRECTION — reproduced across four configs, best confirmed twice to 0.6%.
+    MEDIUM on magnitude — measured on a 256-row loader sample, so the speedup is an upper bound
+    (see "Known gap" below).
 links: [[padding-regime-flips-attention-verdict]], [[micro-batch-interacts-with-dynamic-padding]]
 ---
 
@@ -30,6 +32,19 @@ lever combined was worth ~2x.
 **Check this first, before any kernel work.** The diagnostic is free — compare the dataset's p50/p99
 (frame reports both) against `max_len`. Frame already emits a note when `max_len` ≫ p99; treat it as
 the headline, not a footnote.
+
+**Known gap — the magnitude is an upper bound (added 2026-09-15).** The measurement compares a
+distribution-*invariant* baseline (`padding="max_length"`: every batch 2048 wide, whichever rows you
+draw) against a distribution-*sensitive* winner (`padding="longest"`: batch width **is** the rows you
+drew). And the rows were few — frame scanned 1000, the loader trained on 256 (`sample`), out of a far
+larger split. The full dataset holds rows up to the 2048 truncation cap that neither sample saw;
+more long rows means wider batches and lower samples/s. So the **direction is solid and the ~12x is
+a ceiling, not a point estimate.**
+
+The general lesson, which outlives this run: **under dynamic padding a probe's row sample must
+represent the dataset's length distribution, or throughput is measured on a workload the run will
+not train on.** Under static padding this never mattered — every batch was full width regardless.
+The padding lever creates the requirement.
 
 **Caveat on `pad_multiple`:** the interval (8, 64) is unexplored. 1 is unusable — it defeats shape
 bucketing and Inductor recompiles without end.

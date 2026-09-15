@@ -95,6 +95,10 @@ anything but the shipped defaults, "faster by X%" means nothing.
   hypothesize against the new bound. `compile` is in that list on measured evidence: fusing the
   cross-entropy cut peak memory 5.4GB and moved a measured ceiling from 2 to 4 (`knowledge.md`,
   test_a10G).
+- IF `padding="longest"` → **check the loader's `sample` is representative before trusting any
+  throughput number.** Batch width is the rows drawn, so compare the sample's length distribution
+  against frame's scan and raise `sample` until the tail agrees (`frameworks/README.md`). A speedup
+  measured on an unrepresentative sample is an upper bound — log it as one.
 - **NEVER** raise `micro_batch` above the ceiling because a probe reported spare `headroom_gb`.
   Under `padding="longest"` a probe's peak reflects the rows it drew, not the dataset's longest —
   the ceiling is the bound, the observed peak is not. Dynamic padding is safe *because*

@@ -49,6 +49,39 @@ of which rows were drawn.
 
 ---
 
+## 1b. The probe sample should be drawn to match the length distribution
+
+**Status: open. Raised by `test_a10G`; the stopgap (raise `sample` until the tail agrees) is
+doctrine, this is the real fix.**
+
+`HFRunner._build_loader` takes the **first** `sample` usable rows (`_usable_texts` breaks at the
+cap). Under `padding="max_length"` that was harmless — every batch was `seq_len` wide regardless.
+Under `padding="longest"` batch width *is* the rows drawn, so a head-of-file slice measures a
+workload the run won't train on. `test_a10G` measured its 25x on 256 rows whose max was ~520, while
+real training meets rows up to the 2048 truncation cap.
+
+Raising `sample` helps but is the blunt instrument: it costs memory and setup time linearly, and a
+head slice can still miss the tail entirely if the file is ordered.
+
+**Options, cheapest first:**
+
+| Approach | Cost | Catch |
+|---|---|---|
+| Raise `sample` until the loader's p50/p90/p99/max match frame's scan | linear memory/time | still a head slice; ordered files defeat it |
+| Reservoir-sample the stream instead of taking the head | ~free | needs a pass, but `scan()` already streams |
+| Stratify by length: keep the observed p50/p90/p99 proportions | cheap | the honest fix — reproduces the distribution, not just its size |
+
+**Experiment to settle it:** measure the winning config's samples/s at `sample` = 256, 1k, 4k, and
+against a stratified draw. If throughput falls monotonically and then flattens, the flat point is
+the sample size that represents the dataset — and the gap from 256 quantifies how overstated the
+25x is.
+
+**Related:** `frame/dataset.py scan()` already computes exactly the distribution the loader should
+be matched against, and `frame/profile.py` already flags `max_len` >> p99. The check is one
+comparison away from free.
+
+---
+
 ## 2. Replace the bisection with divisors + a memory curve
 
 **Status: open. Proposed, not implemented — `search()` still bisects.**
