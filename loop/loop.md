@@ -37,13 +37,26 @@ Understand the situation, then set up the search.
    worst-case batches, not on whatever the dataset happened to supply (`frame/README.md`). It
    bounds the `micro_batch` knob in step 3. IF `micro_batch=1` OOMs → memory regime: recompute /
    offload / sharding come first, batch knobs are not the lever.
-3. **Pull priors** — retrieve Beliefs matching this profile; research external priors (model card, tuning guides).
+3. **Pull priors** — two questions, two stores, both answered HERE and not again per hypothesis:
+   - **Has this configuration been run before?** Match this Profile against each `knowledge.md`
+     entry's `Context:` line (model · dataset · hardware · dtype · `effective_batch` · `max_len`).
+     A hit hands you that run's winning config, its dead levers, and its open hypotheses. A
+     near-miss is still a prior — name the dimension that differs and what it predicts (same model,
+     different card → the ceiling moves, the padding story doesn't).
+   - **What do we believe about the levers?** Retrieve Beliefs whose `context` matches
+     (`knowledge/beliefs.md`); research external priors (model card, tuning guides).
 4. **Build the SearchSpace** — project the canonical knobs onto what this framework/model/hardware supports. Classify each knob `safe`/`off_limits` (unsure → off_limits).
-5. **Seed** — the first Config is the training script's **default, as-is** settings, unmodified —
-   not a surrogate guess. It's the baseline every later Config is measured against (so the eventual
-   "faster by X%" claim is against real shipped defaults), and the surrogate has no calibration
-   data yet to seed anything with. The surrogate starts ranking candidates from the *second*
-   Config onward (Hypothesize).
+5. **Seed** — the first Config is the training script's **default, as-is** settings, unmodified.
+   Not a surrogate guess, and **not a prior's winning config**. It is the baseline every later
+   Config is measured against, so the eventual "faster by X%" claim is against real shipped
+   defaults; and the surrogate has no calibration data yet to seed anything with.
+   **ALWAYS run the baseline first, whatever step 3 found.** A prior that starts the run has
+   nothing to quantify itself against.
+6. **Replay the prior** — IF step 3 matched a previous run, run ITS winning config as experiment 2,
+   immediately after the baseline. That re-validates the prior on this hardware and banks the
+   biggest known jump before the search starts; if it does NOT reproduce, that contradiction is
+   itself the most valuable thing the run has learned so far (→ Learn). No match → skip.
+   The surrogate starts ranking from the first Config that is neither the baseline nor a replay.
 
 
 

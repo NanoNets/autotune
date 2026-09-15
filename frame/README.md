@@ -29,7 +29,9 @@ load is a setup failure, not an experiment result.
 - **Where to get it, in order:**
   1. `knowledge.md` and `knowledge/beliefs.md` (see `knowledge/README.md`) — someone may have
      already profiled this exact model (or its architecture family) on similar hardware. Don't
-     re-derive what's already known.
+     re-derive what's already known. This is the *architecture* lookup; the full-configuration
+     match (model · dataset · hardware · dtype · `effective_batch` · `max_len`) happens in the same
+     phase at `loop/loop.md` Frame §3, and a hit there is replayed as experiment 2.
   2. The model's own config (`config.json`/model card on the hub, or the local checkpoint's
      config) — the ground truth for the numeric fields.
   3. Websearch — the model card, paper, or announcement, especially for a newer or less

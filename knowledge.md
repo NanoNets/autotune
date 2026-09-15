@@ -1,8 +1,10 @@
 # knowledge.md — cross-run running log
 
-One dated entry per run. Read this (plus `knowledge/beliefs.md`) before every hypothesis — see
-`knowledge/README.md`. Keep entries short and empirical: claims backed by what's in that run's
-`results.tsv`, not vibes.
+One dated entry per run, across all runs. Read **at Frame** (`loop/loop.md` §3) to answer "has this
+configuration been run before" — match on the `Context:` line; a hit is replayed as that run's
+experiment 2, never as its baseline. Per-hypothesis priors come from `knowledge/beliefs.md`
+instead, which is context-filtered. See `knowledge/README.md`. Keep entries short and empirical:
+claims backed by what's in that run's `results.tsv`, not vibes.
 
 ---
 

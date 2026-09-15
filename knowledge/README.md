@@ -6,24 +6,37 @@ frontmatter, plus an always-loaded index (`beliefs.md`).
 Each belief is an evidence-backed claim keyed by context (`{arch_family, hardware_class, dataset_shape}`)
 so the next run retrieves what's relevant and starts smart. Authored and curated by the agent.
 
-See the `Belief` contract in `loop/contracts.md`. *(Convention defined; population begins at the intelligence stage.)*
+See the `Belief` contract in `loop/contracts.md`. **Live** — populated from the `test_a10G` run.
 
 ---
 
-## `knowledge.md` — the current running log
+## Two stores, two jobs
 
-Until the `Belief` system above is populated, `knowledge.md` at repo root is the whole memory: one
-lightweight, always-read, dated running log across *all* runs (not per-run). Read it — along with
-this folder's `beliefs.md` and any per-belief files — before every hypothesis in the loop (see
-`loop/loop.md`, Hypothesize): a matching entry is a strong prior to build on or deliberately test
-against, not background color.
+They are not two copies of the same memory. They answer different questions, are read at different
+times, and have **opposite** mutation rules.
+
+| | `knowledge.md` (repo root) | `knowledge/` (here) |
+|---|---|---|
+| Unit | one dated entry per **run** | one file per **claim** |
+| Answers | *has this configuration been run before?* | *what do we believe about this lever?* |
+| Read | **ONCE, at Frame** (`loop/loop.md` §3) | every hypothesis, filtered by `context` match |
+| Mutation | **append-only.** Never edit a past entry — it is dated evidence | **curated.** Amend, supersede, delete as evidence lands |
+
+**`knowledge.md` — the run log.** One dated entry per run, across *all* runs. Every entry opens
+with a `Context:` line (model · dataset · hardware · dtype · `effective_batch` · `max_len`); that
+line is the **match key** Frame searches. A hit hands the next run a winning config to replay as
+experiment 2 and a list of dead levers not to re-probe. Read it at Frame, not per hypothesis — it
+grows with every run and "have we run this before" is a framing question, asked once.
 
 It's also where a new model's architecture summary gets captured the first time this repo sees it
-(`program.md` Step 2 / `frame/README.md`) — worth a durable entry so the next run starts from an
-answer, not from scratch.
+(`program.md` Step 2 / `frame/README.md`) — so the next run starts from an answer, not from scratch.
 
-As the `Belief` system comes online, durable claims from `knowledge.md` should get promoted into
-proper `Belief` files here.
+**`knowledge/` — the belief store.** Context-keyed, so a new configuration retrieves only what
+transfers. This is what keeps memory from becoming noise as the log grows.
+
+**Promotion copies, it does not move.** A durable claim gets extracted from a run entry into a
+belief file; the run entry stays intact and cross-references it (`knowledge.md` test_a10G does
+this). Gutting a past entry would falsify the record of what was believed when.
 
 ## Setup checklist (`program.md` Step 5 — end-of-run review)
 
@@ -40,7 +53,9 @@ model/hardware/dataset:
 - **Working hypotheses** — things you didn't get to test, or tested inconclusively, that are worth
   trying first next time.
 
-Append (don't overwrite) a dated entry to `knowledge.md`. Suggested shape per entry:
+Append (don't overwrite) a dated entry to `knowledge.md`. The `Context:` line is not decoration —
+it is the key Frame matches the *next* run against (`loop/loop.md` §3), so write every field, and
+write the winning config in full: a match replays it as that run's experiment 2. Shape per entry:
 
 ```markdown
 ## <run_name> — <date>

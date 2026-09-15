@@ -65,5 +65,6 @@ This file is *not* durable memory on its own. At Step 5's end-of-run review, it 
 alongside `results.tsv` and anything net-new (not already covered by an existing `knowledge.md`
 entry or belief) gets promoted into `knowledge.md` — see `knowledge/README.md`. A finding that just
 re-confirms something already known stays here; it doesn't get re-added upstream. This keeps
-`knowledge.md` a curated, cross-run record instead of a transcript of every search made along the
-way.
+`knowledge.md` a signal-dense run log instead of a transcript of every search made along the way.
+(It is append-only — never edited once written. Curation happens in `knowledge/`, where beliefs are
+amended and superseded; see `knowledge/README.md`.)

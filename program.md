@@ -72,12 +72,20 @@ Do these in order. Don't start experimenting until Step 3 is confirmed back to t
 ### Step 4 — Run the experimental loop → `loop/loop.md`
 
 Cycle: `[ HYPOTHESIZE → TEST → OBSERVE → LEARN ] → repeat`. The first Config is the baseline —
-the training script as-is, unmodified (see `loop/loop.md` Frame §4) — log it as experiment 1
-before proposing any change.
+the training script as-is, unmodified (see `loop/loop.md` Frame §5) — log it as experiment 1
+before proposing any change. **NEVER** start from a prior's winning config: measured against
+anything but the shipped defaults, "faster by X%" means nothing.
 
-- **ALWAYS**, before proposing a hypothesis: read `knowledge.md` + `knowledge/beliefs.md`
-  (`knowledge/README.md`) and this run's full `results.tsv` (`runs/README.md`). A probe costs
-  ~5 min of real GPU time — think, don't guess.
+- IF Frame matched a previous run in `knowledge.md` (`loop/loop.md` Frame §3) → run that run's
+  winning config as **experiment 2**, right after the baseline. It re-validates the prior on this
+  hardware and banks the biggest known jump before searching. IF it fails to reproduce → that
+  contradiction outranks any hypothesis you had queued; chase it.
+- **ALWAYS**, before proposing a hypothesis: read `knowledge/beliefs.md` + the belief files whose
+  context matches (`knowledge/README.md`), and this run's full `results.tsv` (`runs/README.md`).
+  A probe costs ~5 min of real GPU time — think, don't guess.
+- `knowledge.md` is read ONCE, at Frame — "has this configuration been run before" is a framing
+  question, not a per-hypothesis one, and the file grows with every run. Re-open it only when a
+  result contradicts the prior Frame matched.
 - **ALWAYS** state the hypothesis's reasoning explicitly: what prior it's built on, what you
   expect, what would surprise you. Can't articulate why it should help → you're guessing → think
   more, don't spend the probe.
