@@ -90,6 +90,35 @@ Different questions, different read cadence, **opposite** mutation rules — see
 - **`knowledge/`** — *what do we believe about this lever?* Read **every hypothesis**, filtered by
   `context` match. **Curated**: amended, superseded, deleted as evidence lands.
 
+### Why this compounds — and why it wants contributors
+
+One person with one GPU gets a loop that starts smarter each run. The design pays off much harder
+across many.
+
+**Beliefs are context-keyed, so they transfer selectively.** `tf32-inert-under-bf16` is keyed to
+*any bf16 transformer on Ampere+* — it fires for everyone. `ce-dominates-activation-memory-large-vocab`
+is keyed to *large vocab relative to params* — it correctly stays silent on a 7B. Move to a new
+model and roughly 3 of today's 7 beliefs fire; the other 4 don't, which is the point. Nobody has to
+prune someone else's memory by hand.
+
+**Evidence accumulates in the schema.** Each belief carries `probes` and `confidence`. Today most
+read `probes: 1`. The same claim re-confirmed across twenty runs, six card types and a dozen models
+is a different object entirely — and the format already holds that, no migration needed.
+
+**Contradiction splits rather than overwrites.** A claim that holds on Ampere and fails on Hopper
+becomes two context-scoped beliefs, linked. That's what makes merging memory from strangers
+tractable instead of a fight.
+
+**And the run log is what makes contributed beliefs auditable.** A belief isn't an assertion — it
+points back to a dated `knowledge.md` entry with the `results.tsv` numbers behind it. This is why
+both halves are needed: an append-only log alone doesn't transfer, and curated beliefs alone can't
+be checked. Together, a contributed prior is *inspectable* — which is the bar for trusting one from
+someone you've never met.
+
+The search space is model × hardware × dataset shape × framework × lever. No single person covers
+it, and probe budgets don't add up across people — **priors do.** And because it's all markdown,
+contributing memory is a pull request, reviewed like code. No retraining, no embeddings, no service.
+
 ### The invariants a dev should know
 
 - **The agent decides; the code measures.** Every number comes from a real probe.
