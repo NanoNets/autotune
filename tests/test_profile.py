@@ -11,7 +11,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from frame.model import internals
 from frame.hardware import hardware
 from frame.dataset import distribution
-from frame.profile import build
+from frame.profile import build, _framework_knobs
 
 LLAMA3_8B = dict(model_type="llama", architectures=["LlamaForCausalLM"],
                  num_hidden_layers=32, hidden_size=4096, num_attention_heads=32,
@@ -74,6 +74,20 @@ def test_bandwidth_is_carried_for_the_loop_to_freeze():
                   peak_mem_bw_gb_s=428.0)
     p = build(internals(LLAMA3_8B), distribution([256]), hw, {}, dtype="bfloat16")
     assert p.hardware["peak_mem_bw_gb_s"] == 428.0    # probes must not re-measure this
+
+
+def test_effective_batch_and_knobs_carried():
+    hw = hardware("A10G", peak_flops=1.21e14, mem_gb=200.0, dtype="bfloat16")
+    p = build(internals(LLAMA3_8B), distribution([256]), hw, {}, dtype="bfloat16",
+              effective_batch=32, knobs={"micro_batch": {"type": "int"}})
+    assert p.effective_batch == 32 and "eff-batch 32" in p.summary
+    assert "micro_batch" in p.knobs                    # the framework's searchable surface, in the Profile
+
+
+def test_framework_knobs_reads_the_reconciled_surface():
+    k = _framework_knobs("hf")                          # safe levers only; run params excluded
+    assert "micro_batch" in k and "tf32" in k
+    assert "dtype" not in k and "seq_len" not in k and "grad_accum" not in k
 
 
 if __name__ == "__main__":

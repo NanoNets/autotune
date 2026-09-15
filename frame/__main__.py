@@ -16,14 +16,17 @@ def main():
     ap.add_argument("--gpu", required=True, help="a label for the record (any hardware; not validated)")
     ap.add_argument("--dtype", default="bfloat16", help="run compute dtype; the peak is measured at this")
     ap.add_argument("--device", default="cuda", help="device to measure the peak on")
+    ap.add_argument("--framework", default="hf", help="which runner's knob surface to report")
+    ap.add_argument("--effective-batch", type=int, default=16, help="human target the loop factorizes")
     ap.add_argument("--text-field", default="text")
     ap.add_argument("--split", default="train")
     ap.add_argument("--sample", type=int, default=1000)
     ap.add_argument("--name", default=None, help="dataset config, e.g. wikitext-2-raw-v1")
     a = ap.parse_args()
 
-    p = frame(a.model, a.dataset, a.gpu, dtype=a.dtype, device=a.device,
-              text_field=a.text_field, split=a.split, sample=a.sample, name=a.name)
+    p = frame(a.model, a.dataset, a.gpu, dtype=a.dtype, device=a.device, framework=a.framework,
+              effective_batch=a.effective_batch, text_field=a.text_field, split=a.split,
+              sample=a.sample, name=a.name)
     print(p.summary)
     print(json.dumps(dataclasses.asdict(p), indent=2, default=str))
 
