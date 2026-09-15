@@ -95,14 +95,11 @@ before proposing any change.
   cards) rather than treat it as a stopping condition. Websearch findings go to
   `runs/<run_name>/research.md` (`runs/README.md`).
 
-### Step 5 — End-of-run review → `knowledge/README.md`, `design_improvements.md`
+### Step 5 — End-of-run review → `knowledge/README.md`
 
 - Review the full `results.tsv` + `research.md`.
 - Append a dated entry to `knowledge.md`: findings, surprises, open hypotheses for next time.
 - Promote only what's **net-new** — re-confirmed facts stay in `research.md`.
-- IF a run settled an open question in `design_improvements.md` → record the finding in
-  `knowledge.md` and delete that entry. IF it raised a new one → add it there, with the experiment
-  that would settle it. That file is for questions evidence hasn't closed yet, never for decisions.
 
 ---
 

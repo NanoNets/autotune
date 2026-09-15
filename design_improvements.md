@@ -1,11 +1,16 @@
 # Design improvements
 
+> **Developer notes. Not part of the agent's prompt hierarchy.**
+> `program.md` does not route here and the loop never reads or writes this file. It's a scratchpad
+> for us to decide what to build next — the doctrine the agent follows lives in `program.md`,
+> `loop/`, and the per-directory READMEs.
+
 Open questions and proposed changes that are **not yet settled by evidence**. Each entry states the
 claim, why it might be wrong, and **what experiment would settle it** — so a future eval can close
 it rather than re-litigate it.
 
-Nothing here is a decision. Decisions live in the owning md (`program.md` routes to them). Move an
-entry out of this file once an experiment settles it, and record the finding in `knowledge.md`.
+Nothing here is a decision. Once an experiment settles an entry, make the change in the code and
+the owning md, then delete the entry from here.
 
 ---
 
@@ -185,5 +190,5 @@ Setup: `backend = "modal"`, `gpu = "A10G"`, `Qwen/Qwen2.5-0.5B`, `wikitext-2-raw
 and E3 shows no instability, the honest conclusion is that the ceiling is a determinism-and-cost
 win rather than a safety one, and `frame/README.md` should stop claiming otherwise.
 
-Record each finding in `knowledge.md` at the end (`knowledge/README.md`), and move the settled
-entries out of this file.
+These are dev experiments, run by hand to size up the current state — not a tuning session, so
+they don't follow `program.md`'s loop. Delete an entry above once its experiment has settled it.
