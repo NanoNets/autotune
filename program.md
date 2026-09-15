@@ -95,6 +95,12 @@ anything but the shipped defaults, "faster by X%" means nothing.
   hypothesize against the new bound. `compile` is in that list on measured evidence: fusing the
   cross-entropy cut peak memory 5.4GB and moved a measured ceiling from 2 to 4 (`knowledge.md`,
   test_a10G).
+- **NEVER** raise `micro_batch` above the ceiling because a probe reported spare `headroom_gb`.
+  Under `padding="longest"` a probe's peak reflects the rows it drew, not the dataset's longest —
+  the ceiling is the bound, the observed peak is not. Dynamic padding is safe *because*
+  `micro_batch <= ceiling(max_len)`, not despite it.
+- **NEVER** propose a `dtype` change to make something fit — precision changes the model. IF the
+  memory regime blocks the run, put it to the human with the measured numbers (`loop/throughput.md`).
 - **NEVER** log a ceiling trial as an experiment. Synthetic probes measure memory, not throughput
   — they go to `ceiling.tsv`, never `results.tsv` (`runs/README.md`).
 - IF the change works → keep it, commit it (the branch now reflects the new best config).

@@ -16,6 +16,25 @@ The agent classifies each knob at Frame (conservative: unsure → off_limits). G
 `max_len` is off-limits *and* load-bearing: it is the length the OOM ceiling is measured at
 (`frame/README.md`). Lowering it to make a config fit is changing the job, not tuning it.
 
+**Precision is the human's, not a memory lever.** IF nothing fits — `micro_batch=1` OOMs at
+`max_len` — the safe moves are recompute, offload, sharding, 8-bit optimizer *states*, fused/chunked
+CE. **NEVER** drop `dtype` to make a config fit: it changes the model you get, so it is a decision to
+put to the human with the measured numbers, not one the loop may take. (`dtype` appears in the
+ceiling's staleness list only because a human changing it invalidates the measurement.)
+
+## The dynamic-padding guarantee
+
+`padding="longest"` is safe **iff `micro_batch <= ceiling(max_len)`**. Every real batch is at most
+`max_len` wide, so a config that fits the synthetic worst case fits *every* batch the dataset can
+produce — including the long rows a short profiling sample never drew.
+
+**NEVER raise `micro_batch` above the ceiling on the strength of a probe's `headroom_gb`.** Under
+dynamic padding a probe's peak reflects the rows it happened to draw, not the dataset's longest, so
+the headroom it reports is an artifact of the sample. Measured on `test_a10G`: the scan saw max 520
+tok against `max_len=2048`, so no probe in 23 experiments ever ran the `[8, 2048]` batch the shipped
+config will meet in training — only the ceiling did (17.4GB alloc / 20.7GB reserved of 22.1GB; 9
+OOMs). The ceiling bounds `micro_batch`; an observed peak never does.
+
 ## Canonical levers
 Framework-agnostic. Frame projects these onto what the framework supports.
 

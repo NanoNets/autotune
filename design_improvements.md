@@ -14,35 +14,38 @@ the owning md, then delete the entry from here.
 
 ---
 
-## 1. The synthetic ceiling may be redundant under the current HF adapter
+## 1. ~~The synthetic ceiling may be redundant~~ — SETTLED: it is load-bearing
 
-**Status: open — highest priority, it reframes everything below.**
+**Status: closed by `test_a10G`.** Kept here until the finding is folded into a belief.
 
-The OOM ceiling (`frame/ceiling.py`, `frame/synthetic.py`) was built on the argument that real
-batches rarely contain a `max_len` sequence — on wikitext (p50 16 tok, p99 317) a batch drawn from
-real rows almost never holds a 2048-token row, so a memory reading from one is a random variable.
+The doubt was: the ceiling was argued for on the grounds that real batches rarely hold a `max_len`
+row, but `frameworks/hf.py` shipped `padding="max_length"`, so every real batch was *already*
+worst-case shaped. On that loader the ceiling was a determinism-and-cost win, not a safety one.
 
-**That argument does not hold for `frameworks/hf.py` as written.** Its loader uses
-`padding="max_length"` (`frameworks/hf.py:141`), so *every* real batch is already
-`[micro_batch, seq_len]` — worst-case shaped. Today the synthetic ceiling largely reproduces what
-real data would have given anyway.
+**The run removed that loader.** Static padding turned out to be the dominant bottleneck, and the
+winning config uses `padding="longest"` — which is exactly the condition this entry named as making
+the ceiling load-bearing. The evidence arrived in the same run that raised the doubt.
 
-What the synthetic path still buys, independent of that:
+The sharper form of the argument, which the original entry missed: it is not only that shapes vary,
+it is that **a probe sees a sample and the sample's maximum is not the population's maximum.**
 
-- **Determinism** — the ceiling doesn't move with whichever rows the loader drew.
-- **Cost** — no dataset download, no tokenization, no loader construction per trial.
-- **It becomes load-bearing the moment padding stops being static.** `packing`, `padding_free`, and
-  length-grouped batching are all safe levers in `loop/throughput.md`. Any of them lands and real
-  batch shapes start varying again, which is exactly the regime the ceiling was built for.
+| | |
+|---|---|
+| Rows scanned | 256 (`sample`), giving p50 10 · p99 374 · **max 520** |
+| Declared `max_len` | **2048** |
+| Widest batch any of 23 experiments ran | ~520 tok |
+| Widest batch the full dataset can produce | **2048** — one long row pads its whole batch |
 
-**Experiment to settle it:** measure the ceiling twice on the same config — once on synthetic
-batches, once on real rows — and compare `micro_batch_max`. If they agree, entry 1 is confirmed and
-the feature is currently a determinism/cost win, not a safety one. Then re-run with dynamic padding
-(pad-to-longest) to confirm the real ceiling becomes unstable, which is what justifies keeping it.
+So `[8, 2048]` — the batch the shipped config *will* meet in training — was never run by any probe.
+Only the ceiling ran it (`ceiling.tsv`, final block): 17.386 GB allocated / 20.721 GB reserved of
+22.1 GB, fits at `micro_batch=8`, **OOMs at 9**. The shipped config is safe, and safe by one.
 
-**If confirmed:** don't remove it — say plainly in `frame/README.md` that its safety value is
-latent until a padding lever lands, and stop claiming it prevents a mid-run OOM that this adapter
-cannot currently have.
+**Doctrine that came out of it** (now in `loop/throughput.md`, `frame/README.md`, `program.md`):
+`padding="longest"` is safe **iff `micro_batch <= ceiling(max_len)`**, and `micro_batch` must NEVER
+be raised on a probe's reported `headroom_gb` — under dynamic padding that headroom is an artifact
+of which rows were drawn.
+
+**Still to do:** promote this to a belief in `knowledge/` and delete the entry.
 
 ---
 

@@ -126,6 +126,17 @@ and `16` is eliminated *before* the loop spends a 5-minute probe watching it cra
 
 ### Rules
 
+- **Dynamic padding is safe IFF `micro_batch <= ceiling`.** Every real batch is at most `max_len`
+  wide, so a config that fits the synthetic worst case fits every batch the dataset can produce.
+  That is the whole guarantee — and it is what makes `padding="longest"` usable at all.
+- **NEVER raise `micro_batch` on a probe's `headroom_gb`.** Under dynamic padding a probe's peak
+  reflects the rows it happened to draw, not the dataset's longest, so its headroom is an artifact
+  of the sample. On `test_a10G` the scan saw max 520 tok against `max_len=2048`: no probe in 23
+  experiments ran the `[8, 2048]` batch the shipped config meets in training — only the ceiling did.
+  The ceiling bounds `micro_batch`; an observed peak never does.
+- **`dtype` is not a memory lever.** It is in the staleness list because a human changing precision
+  invalidates the measurement. IF nothing fits, escalate to the human with the numbers — recompute,
+  offload, sharding and 8-bit optimizer states are yours; precision is theirs.
 - **The ceiling is NOT a run constant.** `recompute`, `attn_kernel`, `optimizer`, `dtype`,
   sharding and **`compile`** all move it. `compile` is not an obvious member of that list but was
   measured moving a ceiling from 2 to 4: Inductor fuses the cross-entropy and never materializes

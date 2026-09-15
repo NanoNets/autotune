@@ -19,8 +19,20 @@ can be kept below the ceiling — how much margin is the agent's call, not a con
 
 # The knobs that move the ceiling. Whichever are present are stamped on the record, so a later
 # config can be compared against it and the ceiling retired when one of them has changed.
-_MEMORY_KNOBS = ("dtype", "optimizer", "recompute", "attn_kernel", "shard_degree",
-                 "offload", "packing")
+#
+# Canonical names (loop/throughput.md) AND the adapter spellings they project onto — an adapter is
+# free to name its own flags, and a name this list misses is a knob whose change goes UNDETECTED.
+# `frameworks/hf.py` cost us exactly that: only "dtype" was ever stamped, so switching sdpa->eager
+# (which takes attention memory from O(L) stored to O(L^2)) read as "not stale".
+#
+# `dtype` is here because a HUMAN changing precision invalidates the measurement — NOT because the
+# loop may turn it to buy memory. Precision is off-limits (loop/throughput.md).
+_MEMORY_KNOBS = (
+    "dtype", "optimizer", "shard_degree", "offload", "packing",
+    "recompute", "gradient_checkpointing",              # canonical, hf
+    "attn_kernel", "attn_implementation",               # canonical, hf
+    "compile", "torch_compile",                         # canonical, hf — compile fuses the CE and
+)                                                       #   moved a measured ceiling 2 -> 4
 
 
 def search(fits, cap=None):

@@ -119,6 +119,22 @@ def test_a_crash_is_not_read_as_a_memory_answer():
     assert False, "expected the error to surface, not be scored as an OOM"
 
 
+def test_an_adapter_config_stamps_more_than_dtype():
+    """Regression: _MEMORY_KNOBS held only canonical names, so an hf config stamped just dtype —
+    switching sdpa->eager (O(L) stored -> O(L^2)) read as 'not stale'. test_a10G shipped with
+    ceiling.config = {'dtype': 'bfloat16'} and survived on the agent tracking it by hand."""
+    hf = {"device": "cpu", "dtype": "bfloat16", "attn_implementation": "sdpa",
+          "gradient_checkpointing": True, "torch_compile": True, "micro_batch": 1}
+    r = _FakeRunner(4)
+    rec = find_ceiling(r, hf, seq_len=128, vocab=100, cap=4, warmup=1, clean_steps=1,
+                       peak_flops=1e12, peak_mem_bw_gb_s=1.0)
+    assert rec["config"] == {"dtype": "bfloat16", "gradient_checkpointing": True,
+                             "attn_implementation": "sdpa", "torch_compile": True}
+    assert is_stale(rec, {**hf, "attn_implementation": "eager"}) is True
+    assert is_stale(rec, {**hf, "gradient_checkpointing": False}) is True
+    assert is_stale(rec, {**hf, "micro_batch": 4}) is False      # not a memory knob
+
+
 def test_stale_when_a_memory_knob_moved():
     """The ceiling is not a run constant — recompute/attn/optimizer all move it."""
     _, rec = _find(11, cap=16)

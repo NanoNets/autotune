@@ -94,7 +94,9 @@ def _notes(dataset, max_len, ceiling):
         notes.append(
             f"micro_batch=1 OOMs at max_len {ceiling['seq_len']}: this job does not fit on this "
             f"card as configured. This is a MEMORY regime — start from recompute / offload / "
-            f"sharding, not from batch knobs.")
+            f"sharding / 8-bit optimizer states, not from batch knobs. NEVER drop dtype to make it "
+            f"fit: precision changes the model, so put it to the human with these numbers and let "
+            f"them decide.")
     if ceiling and ceiling.get("capped"):
         notes.append(
             f"the ceiling search hit its cap at micro_batch {ceiling['micro_batch_max']}; the "
