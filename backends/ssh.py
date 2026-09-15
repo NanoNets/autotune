@@ -1,0 +1,132 @@
+"""SSH backend — run the probe on a rented box / neocloud / your own cluster.
+
+Ships this repo to the box with `rsync`, runs the local flow (capture -> diagnose) there over
+`ssh`, and returns the Observation dict. Same contract as `local` and `modal`; the difference is
+only *where* the work happens.
+
+Built on the **system `ssh`/`rsync` binaries**, not paramiko — no new Python dependency, and the
+user's existing `~/.ssh/config`, agent, and known_hosts all keep working. Credential resolution,
+in order:
+
+1. `AUTOTUNE_SSH_KEY`      -> `ssh -i <key>`
+2. `AUTOTUNE_SSH_PASSWORD` -> `sshpass -p <pw> ssh ...` (needs the `sshpass` binary)
+3. neither                 -> plain `ssh`, letting its own config/agent resolve the credential
+
+Secrets come from the environment (`.env`), never from `run.toml` — see `backends/README.md`.
+`HF_TOKEN` is forwarded to the box so gated models/datasets resolve there.
+
+The remote's stdout is shared with whatever transformers/datasets decide to print, so the
+Observation is framed by sentinels and everything outside them is treated as log noise.
+"""
+import base64
+import json
+import os
+import shlex
+import subprocess
+
+_BEGIN = "---AUTOTUNE-OBSERVATION-BEGIN---"
+_END = "---AUTOTUNE-OBSERVATION-END---"
+
+_DEFAULT_REMOTE_DIR = "~/autotune"
+_DEFAULT_PYTHON = "~/autotune/.venv_at/bin/python"
+
+# rsync/ssh both get these: fail fast rather than hang a probe on a dead box or a host-key prompt.
+_SSH_OPTS = ["-o", "BatchMode=yes", "-o", "ConnectTimeout=15",
+             "-o", "StrictHostKeyChecking=accept-new"]
+
+
+def _settings(config):
+    """Pull the ssh block out of the config, with env overrides for the parts that are secret."""
+    ssh = config.get("ssh") or {}
+    host = ssh.get("host") or os.environ.get("AUTOTUNE_SSH_HOST")
+    user = ssh.get("user") or os.environ.get("AUTOTUNE_SSH_USER")
+    if not host:
+        raise ValueError("ssh backend needs a host: config['ssh']['host'] (from run.toml [ssh])")
+    return {
+        "target": f"{user}@{host}" if user else host,
+        "remote_dir": ssh.get("remote_dir", _DEFAULT_REMOTE_DIR),
+        "python": ssh.get("python", _DEFAULT_PYTHON),
+        "key": os.environ.get("AUTOTUNE_SSH_KEY") or None,
+        "password": os.environ.get("AUTOTUNE_SSH_PASSWORD") or None,
+        "sync": ssh.get("sync", True),
+    }
+
+
+def _sh_path(p):
+    """Quote a path for the remote shell, keeping a leading `~` expandable.
+
+    `shlex.quote("~/autotune")` yields `'~/autotune'`, which the remote shell takes literally --
+    so the default remote_dir would not exist. Route the tilde through `$HOME` instead.
+    """
+    if p == "~" or p.startswith("~/"):
+        return '"$HOME"' + shlex.quote(p[1:]) if len(p) > 1 else '"$HOME"'
+    return shlex.quote(p)
+
+
+def _ssh_cmd(s):
+    """The `ssh` invocation prefix, with whichever credential is configured."""
+    cmd = []
+    if s["password"]:
+        cmd += ["sshpass", "-p", s["password"]]
+    cmd += ["ssh", *_SSH_OPTS]
+    if s["key"]:
+        cmd += ["-i", os.path.expanduser(s["key"])]
+    return cmd
+
+
+def _sync(s):
+    """Mirror the repo onto the box. Excludes the venv, git, and run outputs — code only."""
+    repo = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    cmd = ["rsync", "-az", "--delete",
+           "--exclude", ".git/", "--exclude", ".venv/", "--exclude", ".venv_at/",
+           "--exclude", "__pycache__/", "--exclude", ".pytest_cache/", "--exclude", "runs/",
+           "--exclude", ".env", "--exclude", "*.pyc", "--exclude", ".DS_Store",
+           "-e", " ".join(shlex.quote(c) for c in _ssh_cmd(s)),
+           repo + "/", f"{s['target']}:{s['remote_dir']}/"]
+    r = subprocess.run(cmd, capture_output=True, text=True)
+    if r.returncode != 0:
+        raise RuntimeError(f"rsync to {s['target']} failed:\n{r.stderr.strip()}")
+
+
+# Runs on the box: read the config off argv, run the probe, frame the result in sentinels.
+_REMOTE = """
+import base64, json, os, sys
+sys.path.insert(0, os.path.expanduser({remote_dir!r}))
+cfg = json.loads(base64.b64decode(sys.argv[1]).decode())
+from backends.local import run as local_run
+obs = local_run(cfg)
+print({begin!r}); print(json.dumps(obs, default=str)); print({end!r})
+"""
+
+
+def payload_config(config):
+    """The config as the box sees it: connection details stripped, device pinned to cuda.
+
+    The `ssh` block never crosses the wire — the box has no use for its own address, and on
+    password auth it would otherwise carry the credential into a remote argv.
+    """
+    return {**{k: v for k, v in config.items() if k != "ssh"}, "device": "cuda"}
+
+
+def run(config):
+    """Run one probe on the remote box and return its Observation (a dict)."""
+    s = _settings(config)
+    if s["sync"]:
+        _sync(s)
+
+    payload = base64.b64encode(json.dumps(payload_config(config), default=str).encode()).decode()
+
+    script = _REMOTE.format(remote_dir=s["remote_dir"], begin=_BEGIN, end=_END)
+    env_prefix = ""
+    if os.environ.get("HF_TOKEN"):
+        env_prefix = f"HF_TOKEN={shlex.quote(os.environ['HF_TOKEN'])} "
+    remote = (f"cd {_sh_path(s['remote_dir'])} && {env_prefix}"
+              f"{_sh_path(s['python'])} -c {shlex.quote(script)} {payload}")
+
+    r = subprocess.run(_ssh_cmd(s) + [s["target"], remote],
+                       capture_output=True, text=True, timeout=config.get("timeout", 1800))
+    out = r.stdout
+    if _BEGIN not in out or _END not in out:
+        tail = (r.stderr or out)[-2000:]
+        raise RuntimeError(f"remote probe returned no Observation (exit {r.returncode}):\n{tail}")
+    return json.loads(out.split(_BEGIN, 1)[1].split(_END, 1)[0].strip())

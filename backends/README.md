@@ -8,7 +8,7 @@ training hardware, so measurements transfer by definition.
 ```
 loop ──▶ backends.run(config) ──▶ [ build runner → capture → diagnose ] ──▶ Observation
                  │
-   config["backend"] routes:  local (in-process)  ·  modal (cloud GPU)  ·  ssh (deferred)
+   config["backend"] routes:  local (in-process)  ·  modal (cloud GPU)  ·  ssh (your own box)
 ```
 
 **Single GPU only for now** — a box/cluster can host many, but `frame/` and the loop only profile
@@ -28,11 +28,17 @@ Ask the user where the experiments will actually run:
   (`modal setup`, or `MODAL_TOKEN_ID`/`MODAL_TOKEN_SECRET` in `.env`). The GPU is taken from
   `run.toml`'s `gpu` field (e.g. `A10G`, `A100`, `H100`), and the repo is shipped to the worker
   automatically — nothing to provision.
-- **VM / remote box over SSH** — *not yet implemented* (`ssh` is a planned backend). When it lands,
-  you'll need host/user, and the credential must come from the env file, never inline in chat or in
-  a tracked file:
-  - `AUTOTUNE_SSH_PASSWORD` (password auth) or `AUTOTUNE_SSH_KEY` (path to a private key), set in
-    `.env` (gitignored — see `.env.example` for the template).
+- **VM / remote box over SSH** (`backend = "ssh"`) — any rented box / neocloud / your own
+  cluster. Built on the system `ssh`/`rsync` binaries, so there's no new Python dependency and your
+  existing `~/.ssh/config`, agent and known_hosts keep working. You'll need host/user, and the
+  credential must come from the env file, never inline in chat or in a tracked file:
+  - `AUTOTUNE_SSH_KEY` (path to a private key) or `AUTOTUNE_SSH_PASSWORD` (password auth, needs
+    the `sshpass` binary), set in `.env` (gitignored — see `.env.example` for the template). Set
+    **neither** if the box is already reachable via your ssh agent/config — `ssh.py` falls through
+    to the system ssh's own credential resolution.
+  - The box needs a Python with `torch` + `transformers` + `datasets`; point `[ssh] python` at it
+    (default `~/autotune/.venv_at/bin/python`). The repo is rsynced to `[ssh] remote_dir`
+    (default `~/autotune`) on every probe — it's ~700KB, so the sync is not the cost.
   - Everything non-secret (backend, model, dataset, gpu, `effective_batch`, SSH host/user)
     belongs in `run.toml` (copy from the committed `run.toml.example`), not `.env`.
   - Confirm you can actually reach the box (e.g. a trivial `ssh` command succeeds) before moving on.
@@ -77,7 +83,7 @@ is scored against the same denominator (not a per-probe re-measure).
 |---|---|---|
 | **local** | in-process on this machine's device — dev, or a box you're already on | built; runs any runner (fixture on CPU, or a real GPU) |
 | **modal** | serverless GPU: ships the repo to Modal, runs on the requested GPU, returns the Observation. `config["gpu"]` is the GPU request | built (Modal 1.5); **live-validated end-to-end on an A10G** |
-| **ssh** | any rented box / neocloud (Lambda, RunPod, …) or your own cluster | deferred |
+| **ssh** | any rented box / neocloud (Lambda, RunPod, …) or your own cluster | built (system ssh/rsync, no new deps); **live-validated end-to-end on an A10** |
 
 ## Adding a runner
 
@@ -90,6 +96,8 @@ Add a line per adapter. A declared framework must implement the runner interface
 - `__init__.py` — the `run(config)` dispatch (routes by `config["backend"]`).
 - `local.py` — in-process `capture → diagnose`; the framework→runner registry.
 - `modal.py` — Modal execution (lazy `import modal`).
+- `ssh.py` — rsync the repo to a box, run `local.run` there over ssh, parse the Observation back
+  out of stdout (sentinel-framed, since transformers/datasets share that stream).
 
 Heavy imports (torch, modal) are lazy, so the modules import on bare `python3`; the dispatch +
 registry are unit-tested there. Real execution (local on a GPU box, modal on Modal) is validated live.
