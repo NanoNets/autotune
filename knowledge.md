@@ -10,7 +10,9 @@ One dated entry per run. Read this (plus `knowledge/beliefs.md`) before every hy
 Context: `Qwen/Qwen2.5-0.5B` · `wikitext-2-raw-v1` · 1x NVIDIA A10 22.1GB (CC 8.6), bf16,
 effective_batch 16, max_len 2048, ssh backend
 Baseline: 4.338 samples/s → Best: 108.59 samples/s (**+2403%, 25.0x**), MFU 28.7% → peak 58.6%
-23 experiments, 17 ok / 6 failed.
+23 experiments, 17 ok / 6 failed (2 crashes, 4 timeouts); 10 of the 17 set a new record.
+Plot: `runs/test_a10G/progress.png` (`python runs/progress.py`). Beliefs promoted to
+`knowledge/` — see `knowledge/beliefs.md`.
 
 **Winning config:** `micro_batch=8`, `gradient_checkpointing=True`, `torch_compile=True`,
 `attn_implementation=sdpa`, `padding=longest`, `length_grouped=True`, `pad_multiple=8`, `tf32=False`.
@@ -64,6 +66,11 @@ Confirmed twice (108.591 / 107.916, 0.6% apart).
   tokens instead of merely trimming padding. Not implemented in `frameworks/hf.py`.
 - **Chunked / fused linear-cross-entropy (Liger)** attacks the 70% memory term directly and was never
   reachable — not implemented in the adapter. Highest-value unbuilt lever for large-vocab small models.
+- **The attention verdict was never confirmed on the shipped config.** `sdpa` > `flash_attention_2`
+  by 34% rests on experiments 11/13, both measured at `pad_multiple=64`; the re-test on the final
+  `pad_multiple=8` config timed out. Narrower batches should only *reduce* what FA2's unpadding can
+  recover, so the ordering is very likely unchanged — but it is an assumption at the shipped setting,
+  not a measurement. One cheap probe would close it.
 - **The launch-bound wall is unbroken.** The final config leaves ~25% of the GPU idle with one CPU core
   saturated dispatching, and the two obvious fixes are both blocked: cudagraphs (incompatible with
   grad_accum) and a bigger micro_batch (bounded by the ceiling at the declared `max_len`).

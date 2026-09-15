@@ -83,8 +83,10 @@ before proposing any change.
   more, don't spend the probe.
 - **ALWAYS** check the ceiling before proposing a `micro_batch`: it is NOT a run constant. IF the
   Config moves a knob the ceiling was measured under (recompute, attn_kernel, optimizer, dtype,
-  sharding) → the ceiling is stale → re-measure it (`frame/README.md`), then hypothesize against
-  the new bound.
+  sharding, **compile**) → the ceiling is stale → re-measure it (`frame/README.md`), then
+  hypothesize against the new bound. `compile` is in that list on measured evidence: fusing the
+  cross-entropy cut peak memory 5.4GB and moved a measured ceiling from 2 to 4 (`knowledge.md`,
+  test_a10G).
 - **NEVER** log a ceiling trial as an experiment. Synthetic probes measure memory, not throughput
   — they go to `ceiling.tsv`, never `results.tsv` (`runs/README.md`).
 - IF the change works → keep it, commit it (the branch now reflects the new best config).

@@ -124,9 +124,13 @@ and `16` is eliminated *before* the loop spends a 5-minute probe watching it cra
 
 ### Rules
 
-- **The ceiling is NOT a run constant.** `recompute`, `attn_kernel`, `optimizer`, `dtype` and
-  sharding all move it. Before trusting it, compare the Config against the record's `config`
-  (`frame.ceiling.is_stale`). Moved → **re-measure**, don't extrapolate. Turning on `recompute`
+- **The ceiling is NOT a run constant.** `recompute`, `attn_kernel`, `optimizer`, `dtype`,
+  sharding and **`compile`** all move it. `compile` is not an obvious member of that list but was
+  measured moving a ceiling from 2 to 4: Inductor fuses the cross-entropy and never materializes
+  the fp32 logits copies, cutting peak memory 5.4GB
+  (`knowledge/compile-cuts-memory-not-just-time.md`). Before trusting a ceiling, compare the
+  Config against the record's `config` (`frame.ceiling.is_stale`). Moved → **re-measure**, don't
+  extrapolate. Turning on `recompute`
   can easily take a ceiling of 11 to 32; the search space is meant to widen on that evidence.
 - **Measure it with the REAL training step.** A ceiling measured on a different workload describes
   that workload, not this job. `--ceiling` uses `--framework`'s real runner (`frameworks/hf.py`
