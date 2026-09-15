@@ -41,6 +41,20 @@ seq_len	micro_batch	status	peak_gb	reserved_gb	config	note
 - Re-run the search when a memory knob moves; append the new trials, don't overwrite the old ones —
   the two ceilings side by side are the evidence for what that knob bought.
 
+## `progress.py` — the run's progress plot
+
+```bash
+python runs/progress.py [run_name]        # -> runs/<run_name>/progress.png
+```
+
+Reads `results.tsv` and draws every probe as a point with the monotone best-so-far as a staircase.
+The staircase is the point: it only steps on an experiment that beat everything before it, so the
+**flat stretches are where the search spent probes without buying anything** — which is the thing
+worth looking at when deciding whether a line of attack is exhausted. Crashes and timeouts are
+plotted too, below the baseline, so a run's failures stay visible rather than vanishing from the
+record. A second panel tracks peak memory against the card limit on the same x-axis (its own panel,
+never a second y-scale).
+
 ## `research.md` — the run's websearch landing zone
 
 Anything found via websearch during this run (model card details, papers, tuning guides — see
