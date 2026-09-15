@@ -12,6 +12,12 @@ floor is ~1%, so if each probe measured its own, probe-to-probe MFU would be mos
 `model_state_fits` covers the model state ONLY — weights/grads/optimizer. Activations are not in
 it, so a positive `activation_headroom_gb` is what actually decides whether a config runs.
 
+`max_len` is the human's declared application sequence length (off-limits, like effective_batch).
+It is the yardstick the OOM `ceiling` is measured at (`frame.ceiling`): memory is decided by the
+worst batch a run will ever see, so the ceiling is measured on manufactured max_len batches rather
+than hoping real data supplies one. build() only validates and carries it — measuring is the
+caller's job, because a real ceiling needs a real training step.
+
 The memory numbers assume a default full-fine-tune config (the run dtype + AdamW) — recorded in
 `default_config` so it's clear they move with the knobs, not a fixed truth.
 """
@@ -36,23 +42,95 @@ class Profile:
     activation_headroom_gb: float = None               # mem - model_state (room for activations)
     model_state_fits: bool = None                      # does MODEL STATE alone fit — says nothing
                                                        #   about activations; see the headroom
+    max_len: int = None                                # human-declared sequence length (off-limits)
+    ceiling: dict = None                               # MEASURED micro_batch ceiling at max_len;
+                                                       #   None when it wasn't measured
+    notes: list = field(default_factory=list)          # things the agent must see, not errors
     summary: str = ""
 
 
+# max_len this many times the dataset's p99 means most of every batch is padding — worth the
+# agent's attention (packing is likely a large win), never an error: it's the human's call.
+_PADDING_FLAG = 4
+
+
+def _ceiling_str(max_len, ceiling):
+    """The summary's memory-ceiling clause."""
+    if not ceiling:
+        return f"max_len {max_len} (ceiling NOT measured)" if max_len else "no max_len"
+    if not ceiling.get("fits"):
+        return f"ceiling @{ceiling['seq_len']}: does NOT fit at micro_batch 1"
+    plus = "+" if ceiling.get("capped") else ""        # capped: the real ceiling is >= this
+    return (f"ceiling @{ceiling['seq_len']}: micro_batch<={ceiling['micro_batch_max']}{plus} "
+            f"(measured)")
+
+
+def _bound_knobs(knobs, ceiling):
+    """Stamp the measured ceiling onto `micro_batch`'s range.
+
+    A framework's `knobs()` is a static declaration of what it SUPPORTS — it is called with no
+    arguments and cannot know a per-card, per-config measurement, so it can only say `min: 1`.
+    Left at that, the SearchSpace advertises an unbounded int and the bound holds only if the
+    agent remembers to cross-reference the ceiling itself. Putting `max` here is what actually
+    makes `micro_batch` a bounded dimension.
+    """
+    out = {k: dict(v) for k, v in (knobs or {}).items()}
+    if ceiling and ceiling.get("fits") and "micro_batch" in out:
+        out["micro_batch"]["max"] = ceiling["micro_batch_max"]
+        out["micro_batch"]["max_source"] = "measured ceiling at max_len"
+    return out
+
+
+def _notes(dataset, max_len, ceiling):
+    """Things the agent must see before it starts tuning. Facts + consequences, no labels."""
+    notes = []
+    p99 = dataset.get("p99")
+    if max_len and p99 and max_len >= _PADDING_FLAG * p99:
+        notes.append(
+            f"max_len {max_len} is {max_len // p99}x the dataset p99 ({p99} tok): most of every "
+            f"unpacked batch is padding. Expect packing to be a large win, or max_len is set "
+            f"higher than this data needs — confirm with the human.")
+    if ceiling and not ceiling.get("fits"):
+        notes.append(
+            f"micro_batch=1 OOMs at max_len {ceiling['seq_len']}: this job does not fit on this "
+            f"card as configured. This is a MEMORY regime — start from recompute / offload / "
+            f"sharding / 8-bit optimizer states, not from batch knobs. NEVER drop dtype to make it "
+            f"fit: precision changes the model, so put it to the human with these numbers and let "
+            f"them decide.")
+    if ceiling and ceiling.get("capped"):
+        notes.append(
+            f"the ceiling search hit its cap at micro_batch {ceiling['micro_batch_max']}; the "
+            f"real ceiling is higher. Memory is not the binding constraint here.")
+    if ceiling and ceiling.get("card_frac") and ceiling["card_frac"] > 0.97:
+        notes.append(
+            f"the ceiling sits at {ceiling['card_frac']:.0%} of the card. Fixed-shape probing "
+            f"does not reproduce the fragmentation real varying lengths cause — keep a margin "
+            f"below micro_batch {ceiling['micro_batch_max']} rather than running at it.")
+    return notes
+
+
 def build(model, dataset, hardware, versions, dtype="bfloat16", optimizer="adamw",
-          effective_batch=None, knobs=None):
+          effective_batch=None, knobs=None, max_len=None, ceiling=None):
     """model/dataset/hardware/versions: the extracted parts (see the sibling modules).
 
     dtype: the run compute dtype — drives the memory precision AND is the dtype the peak was
     measured at (carried in default_config so the loop passes the matching config["dtype"]).
     effective_batch: the human's target (carried, not searched). knobs: the framework's searchable
     surface, so the agent classifies safe/off-limits at Frame from what's actually tunable.
+    max_len: the human-declared sequence length. Validated against the architecture here.
+    ceiling: the record from `frame.ceiling.find_ceiling` at max_len, or None if not measured.
     """
     peak_dtype = hardware.get("peak_dtype")
     if peak_dtype is not None and peak_dtype != dtype:  # a peak measured at another precision is
         raise ValueError(                               # not a ceiling for THIS run
             f"peak was measured at {peak_dtype!r} but the run dtype is {dtype!r}; "
             "MFU against a mismatched peak is meaningless")
+
+    ctx = model.get("context_len")
+    if max_len is not None and ctx and max_len > ctx:    # caught here, not as a crash mid-run
+        raise ValueError(
+            f"max_len {max_len} exceeds the model's context length {ctx}; the architecture "
+            "cannot take sequences that long")
 
     params = model["params"]
     param_bytes = _DTYPE_BYTES.get(dtype, 2)
@@ -74,14 +152,16 @@ def build(model, dataset, hardware, versions, dtype="bfloat16", optimizer="adamw
     eb_str = f" | eff-batch {effective_batch}" if effective_batch else ""
     summary = (f"{name} ({model['attention']}, {dtype}) | {params/1e9:.1f}B params{eb_str} | "
                f"{hardware.get('gpu')} {mem_str}{peak_str} | "
-               f"full-FT model-state {mem['model_state_gb']}GB {fit_str} | {ds_str}")
+               f"full-FT model-state {mem['model_state_gb']}GB {fit_str} | "
+               f"{_ceiling_str(max_len, ceiling)} | {ds_str}")
 
     return Profile(
         model=model, dataset=dataset, hardware=hardware, versions=versions, memory=mem,
         default_config={"dtype": dtype, "param_bytes": param_bytes, "optimizer": optimizer},
-        effective_batch=effective_batch, knobs=knobs or {},
+        effective_batch=effective_batch, knobs=_bound_knobs(knobs, ceiling),
         flops_per_token=6.0 * params, activation_headroom_gb=headroom,
-        model_state_fits=fits, summary=summary,
+        model_state_fits=fits, max_len=max_len, ceiling=ceiling,
+        notes=_notes(dataset, max_len, ceiling), summary=summary,
     )
 
 
@@ -92,12 +172,36 @@ def _framework_knobs(framework):
     return fn() if callable(fn) else {}
 
 
-def frame(model, dataset, gpu, dtype="bfloat16", device="cuda", framework="hf",
-          effective_batch=16, text_field="text", split="train", sample=1000, name=None):
-    """Live: measure the peak, load config + tokenizer, scan the dataset, assemble.
+def framework_runner(framework):
+    """The named framework's runner class ({}.Runner convention: `HFRunner`, `TorchRunner`).
+
+    Kept separate from `frame()`'s `runner=` argument on purpose: constructing a runner loads real
+    weights, so measuring a ceiling stays something the caller asks for, never a side effect of
+    profiling.
+    """
+    import importlib
+    mod = importlib.import_module(f"frameworks.{framework}")
+    for name in (f"{framework.upper()}Runner", f"{framework.capitalize()}Runner"):
+        if hasattr(mod, name):
+            return getattr(mod, name)
+    raise ValueError(f"frameworks.{framework} exposes no runner class")
+
+
+def frame(model, dataset, gpu, max_len, dtype="bfloat16", device="cuda", framework="hf",
+          effective_batch=16, text_field="text", split="train", sample=1000, name=None,
+          runner=None, seed=0, on_trial=None):
+    """Live: measure the peak, load config + tokenizer, scan the dataset, measure the ceiling,
+    assemble.
 
     Needs torch + a GPU (peak), transformers + datasets (model/tokenizer/dataset). `gpu` is a
     free-form label. Measuring the peak first also fails fast if there's no usable device.
+
+    runner: supply one to MEASURE the OOM ceiling at max_len. It must be the run's REAL training
+    step — a ceiling measured on a different workload describes that workload, not this job. No
+    runner, or a non-cuda device, and the Profile carries `ceiling=None`, which the summary says
+    out loud rather than implying a ceiling was checked.
+    effective_batch: the human's target. Doubles as the ceiling search's cap — above it
+    grad_accum would be < 1, so a larger micro_batch is not a legal config to test.
     """
     from frame.hardware import hardware, versions, measure
     m = measure(device, dtype)                          # measure the peak ONCE, at the run dtype
@@ -111,5 +215,17 @@ def frame(model, dataset, gpu, dtype="bfloat16", device="cuda", framework="hf",
     hw = hardware(gpu, peak_flops=m["peak_flops"], mem_gb=m["mem_gb"], dtype=dtype,
                   device_name=m["device_name"], num_sms=m["num_sms"],
                   peak_mem_bw_gb_s=m["peak_mem_bw_gb_s"])
+
+    ceiling = None
+    if runner is not None and device == "cuda":
+        from frame.ceiling import find_ceiling
+        ceiling = find_ceiling(                         # reuses the peaks just measured, so no
+            runner,                                     # trial re-pays for them
+            {"device": device, "dtype": dtype, "model": model, "dataset": dataset},
+            seq_len=max_len, vocab=mi["vocab"], cap=effective_batch, seed=seed,
+            peak_flops=m["peak_flops"], peak_mem_bw_gb_s=m["peak_mem_bw_gb_s"],
+            on_trial=on_trial)
+
     return build(mi, ds, hw, versions(), dtype=dtype,
-                 effective_batch=effective_batch, knobs=_framework_knobs(framework))
+                 effective_batch=effective_batch, knobs=_framework_knobs(framework),
+                 max_len=max_len, ceiling=ceiling)

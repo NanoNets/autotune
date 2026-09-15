@@ -32,9 +32,10 @@ HANDOFF.md
 notes.md
 wip_docs/
 
-# Run outputs (keep the dir's README, ignore the run artifacts)
+# Run outputs (keep the dir's README and the plot tool, ignore the run artifacts)
 runs/*
 !runs/README.md
+!runs/progress.py
 *.trace.json
 *.log
 

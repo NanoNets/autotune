@@ -43,15 +43,18 @@ frame's `versions()`.
 | `micro_batch` | per-step batch; more = better GPU fill, more memory. `grad_accum` is **derived** (`effective_batch // micro_batch`) so the effective batch is held fixed |
 | `gradient_checkpointing` | recompute activations in bwd — less memory, more compute |
 | `attn_implementation` | `eager` / `sdpa` / `flash_attention_2` |
-| `torch_compile` | `torch.compile` the model |
-| `tf32` | TF32 matmuls on Ampere+ — faster matmul, model unchanged |
+| `torch_compile` | `False` / `"default"` / `"reduce-overhead"` / `"max-autotune"` / `"max-autotune-no-cudagraphs"`. **Both cudagraph-enabling modes are broken with `grad_accum`** — the backward's saved activations live in the graph pool and the next micro-batch overwrites them (`cudagraph_mark_step_begin()` does not fix it) |
+| `tf32` | TF32 matmuls on Ampere+ — faster matmul, model unchanged. **Inert on a pure-bf16 config**: no fp32 matmul exists to accelerate |
+| `padding` | `"max_length"` (every batch `seq_len` wide) or `"longest"` (pad to the batch's own longest, rounded to `pad_multiple`). Identical arithmetic — pad is masked in attention and `-100` in labels — so it only changes how much compute is spent. `seq_len` still truncates, so `max_len` is respected |
+| `length_grouped` | batch similar-length rows together so pad-to-longest wastes less. Only meaningful with `padding="longest"`, and it is what makes a **larger** `micro_batch` pay there |
 
 **Not knobs** (run *parameters*, set by the human, off-limits to search): `dtype` (precision) and
 `seq_len` (max_length) change the model, so they're config inputs, not searchable. `effective_batch`
 is the human's target — the loop only **factorizes** it into `micro_batch`×`grad_accum`, never changes it.
 
-**Deferred levers** (in `throughput.md`, not yet implemented here): packing, dataloader `workers`/
-`prefetch`, fused kernels, offload, and parallelism (multi-GPU). `knobs()` reports only what this
+**Deferred levers** (in `throughput.md`, not yet implemented here): packing / `padding_free`,
+dataloader `workers`/`prefetch`, fused kernels (incl. chunked cross-entropy), offload, and
+parallelism (multi-GPU). `knobs()` reports only what this
 adapter actually applies — a declared knob must really take effect.
 
 ## Design notes
@@ -71,8 +74,16 @@ adapter actually applies — a declared knob must really take effect.
 
 ## Limitations (deferred)
 
-- **Pre-tokenized in-memory loader** → the `dataloader` phase is ~0 (no real data-wait). On-the-fly
-  tokenization + `num_workers`/packing as knobs come later.
+- **Pre-tokenized in-memory loader** → the `dataloader` phase is ~0 (no real data-wait), so
+  `workers`/`prefetch` have nothing to recover. On-the-fly tokenization + packing come later.
+- **`sample` interacts with `padding`.** `_usable_texts` takes the FIRST `sample` usable rows, so
+  the loader sees a head slice. Under `padding="max_length"` that was invisible — every batch was
+  `seq_len` wide whichever rows you drew. Under `padding="longest"` batch width *is* the rows drawn,
+  so `sample` now influences what gets measured, not just how much data is resident.
+- **`tokens_per_step()` is measured, not assumed** — the mean over steps actually run. Under
+  `padding="longest"` the batch width varies, so `effective_batch * seq_len` overstates the work and
+  inflates both tokens/s and MFU. Under `padding="max_length"` the measured value equals that
+  product. **Compare padding modes on samples/s**, which counts the same work either way.
 - Single-GPU; `AdamW` only; the LR is a fixed placeholder (it doesn't affect step timing).
 
 ## Status

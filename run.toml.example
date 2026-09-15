@@ -9,6 +9,10 @@ name            = "wikitext-2-raw-v1"     # dataset config/subset; omit if the d
 gpu             = "A10G"                  # a key in profiler/roofline.py GPU_SPECS (A100 / H100 / A10G / L4)
                                            # single GPU only for now — frame/ has no multi-GPU support yet
 effective_batch = 16                      # human-owned target; off-limits, the loop only factorizes it (loop/throughput.md)
+max_len         = 2048                    # REQUIRED. the sequence length your application needs.
+                                           # human-owned and off-limits like effective_batch, and the
+                                           # length the OOM ceiling is measured at (frame/README.md).
+                                           # must be <= the model's context length, or Frame refuses.
 
 backend = "local"   # "local" or "ssh" — see backends/README.md
 
@@ -16,6 +20,9 @@ backend = "local"   # "local" or "ssh" — see backends/README.md
 text_field = "text"    # which dataset column to tokenize
 split      = "train"   # dataset split to scan
 sample     = 1000      # rows to tokenize for the length distribution
+
+[ceiling]
+seed = 0               # seed for the synthetic max_len batches, so a ceiling is reproducible
 
 # only used when backend = "ssh" — the SSH credential itself (AUTOTUNE_SSH_PASSWORD /
 # AUTOTUNE_SSH_KEY) stays in .env, never here
