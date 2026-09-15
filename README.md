@@ -111,16 +111,25 @@ Different questions, different read cadence, **opposite** mutation rules — see
                  │              THE AGENT                │
                  │                                       │
                  │   frames the job · hypothesizes ·     │
-                 │   probes · learns · writes back       │
+                 │   probes · learns                     │
                  │                                       │
                  │   starts from opinion + experience,   │
                  │   never from zero                     │
-                 └───────────────────────────────────────┘
+                 └───────────────────┬───────────────────┘
+                                     │
+      ┌──────────────────────────────┴──────────────────────────────┐
+      │              every run writes back to both                  │
+      ▼                                                             ▼
+  OPINIONS EVOLVE                              EXPERIENCE ACCUMULATES
+    re-confirmed  → probes 1 → 2 → 7             one more dated entry
+    contradicted  → split by context,            a past run is never
+                    never overwritten            edited — it is evidence
+    proven wrong  → deleted
 ```
 
-Opinions sharpen as more runs confirm or contradict them; experience accumulates as more
-configurations get tried. **More contributors means more of both** — and because it's all markdown,
-contributing memory is a pull request, reviewed like code.
+A belief behind seven runs on four card types is a different object from the same sentence behind
+one. **More contributors means sharper opinions and wider experience** — and because it's all
+markdown, contributing memory is a pull request, reviewed like code.
 
 ### The invariants a dev should know
 

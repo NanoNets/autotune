@@ -59,8 +59,9 @@ write the winning config in full: a match replays it as that run's experiment 2.
 
 ```markdown
 ## <run_name> — <date>
-Context: <model> · <dataset> · <hardware>
+Context: <model> · <dataset> · <hardware> · <dtype> · effective_batch <n> · max_len <n>
 Baseline: <tokens/s or samples/s>  →  Best: <tokens/s or samples/s>  (+X%)
+Winning config: <the knob assignments, in full — a match replays this as experiment 2>
 
 Findings:
 - ...
@@ -75,6 +76,26 @@ Open hypotheses for next run:
 Keep entries short and empirical — claims backed by what's actually in `results.tsv`, not vibes.
 This is what makes the *next* autonomous run start smarter instead of re-discovering the same dead
 ends.
+
+### Then curate the beliefs — they are supposed to change
+
+Writing the run entry is only half of Step 5. **Re-read every belief whose `context` matches this
+run** and update it, or beliefs only ever get created and `probes: 1` stays `probes: 1` forever.
+For each match:
+
+| What the run did to it | What to do |
+|---|---|
+| **Re-confirmed** it | bump `evidence.probes`, raise `confidence`, add this run to the evidence line. This is the whole point — a claim behind 7 runs on 4 card types is a different object from the same sentence behind 1 |
+| **Contradicted** it | **NEVER overwrite.** Narrow its `context` to where it still holds and write a second belief for the new regime, `links:` between them. "True on Ampere, false on Hopper" is two beliefs, not an argument |
+| **Superseded** it | keep it, mark it superseded, link forward — a reader needs to know the old claim existed and why it was replaced |
+| **Proved it wrong** outright | delete the file, drop its line from `beliefs.md`, and say so in the run entry. A wrong prior is worse than none: it spends probes in the wrong direction |
+| Didn't touch it | leave it alone |
+
+Only then write beliefs for what's genuinely new. A belief that merely restates an existing one is a
+duplicate — strengthen the original instead.
+
+This is the difference between memory and a log. `knowledge.md` accumulates and is never edited;
+`knowledge/` is *revised* — that's what makes an opinion worth holding.
 
 From `research.md`, promote only what's **net-new** — not already covered by an existing
 `knowledge.md` entry or belief. A websearch that just re-confirmed something already known isn't

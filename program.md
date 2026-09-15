@@ -116,6 +116,10 @@ anything but the shipped defaults, "faster by X%" means nothing.
 - Review the full `results.tsv` + `research.md`.
 - Append a dated entry to `knowledge.md`: findings, surprises, open hypotheses for next time.
 - Promote only what's **net-new** — re-confirmed facts stay in `research.md`.
+- **ALWAYS curate the existing beliefs, don't just write new ones** (`knowledge/README.md`). Re-read
+  every belief whose context matches this run: re-confirmed → bump its evidence; contradicted →
+  narrow its context and split, never overwrite; proven wrong → delete it and say so. Skipping this
+  is how `probes: 1` stays `probes: 1` forever and beliefs stop being opinions worth holding.
 
 ---
 
