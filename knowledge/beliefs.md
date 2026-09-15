@@ -27,6 +27,10 @@ the `Belief` contract in `loop/contracts.md`.
 - [micro-batch-interacts-with-dynamic-padding](micro-batch-interacts-with-dynamic-padding.md) — under
   pad-to-longest a larger `micro_batch` is cheaper per token but wastier per sample; length grouping
   is what makes it pay.
+- [probe-sample-must-match-length-distribution](probe-sample-must-match-length-distribution.md) —
+  under dynamic padding, batch width IS the rows drawn, so an unrepresentative probe sample measures
+  a workload the run won't train on. Static padding hides this. Mechanism argued, effect size not
+  yet measured.
 
 ## Dead levers & safety
 

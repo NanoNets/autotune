@@ -94,8 +94,10 @@ mechanism (CE dominating activation memory, compile's 5.4GB, tf32 inert under bf
 grad_accum). The padding finding's *direction* is arithmetic — p50 10 against `max_len` 2048 means
 ~97% of static-padded compute is pad — only the magnitude is sample-bound.
 
-**Doctrine this produced:** under dynamic padding the probe's row sample must represent the
-dataset's length distribution, or throughput is measured on a workload the run will not train on.
-Static padding hid this — every batch was full width regardless. Now in `frameworks/README.md` and
-`program.md` Step 4; the deeper fix (draw the sample to match the distribution, don't just enlarge
-it) is `design_improvements.md`.
+**What this produced:** a new belief —
+[[probe-sample-must-match-length-distribution]] (`type: invariant`): under dynamic padding the
+probe's row sample must represent the dataset's length distribution, or throughput is measured on a
+workload the run will not train on. Static padding hid this entirely. It is a mechanism argument
+with an unmeasured effect size, so it sits in `knowledge/` to be sharpened or retired by the next
+run that uses dynamic padding — not in the playbook. The deeper fix (draw the sample to match the
+distribution rather than enlarging a head slice) is `design_improvements.md` 1b.

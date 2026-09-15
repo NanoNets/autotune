@@ -41,10 +41,8 @@ larger split. The full dataset holds rows up to the 2048 truncation cap that nei
 more long rows means wider batches and lower samples/s. So the **direction is solid and the ~12x is
 a ceiling, not a point estimate.**
 
-The general lesson, which outlives this run: **under dynamic padding a probe's row sample must
-represent the dataset's length distribution, or throughput is measured on a workload the run will
-not train on.** Under static padding this never mattered — every batch was full width regardless.
-The padding lever creates the requirement.
+The general lesson, which outlives this run, is its own belief:
+[[probe-sample-must-match-length-distribution]].
 
 **Caveat on `pad_multiple`:** the interval (8, 64) is unexplored. 1 is unusable — it defeats shape
 bucketing and Inductor recompiles without end.

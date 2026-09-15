@@ -76,13 +76,10 @@ adapter actually applies — a declared knob must really take effect.
 
 - **Pre-tokenized in-memory loader** → the `dataloader` phase is ~0 (no real data-wait), so
   `workers`/`prefetch` have nothing to recover. On-the-fly tokenization + packing come later.
-- **Under `padding="longest"`, `sample` becomes a measurement-validity knob, not just a loader
-  size.** Batch width *is* the rows drawn, so a sample whose length distribution doesn't match the
-  dataset's measures a workload the run won't train on. Compare the loader's sample against frame's
-  scan (p50/p90/p99/max) and raise `sample` until they agree — especially the tail, which is what
-  widens batches. Under `padding="max_length"` this never mattered: every batch was `seq_len` wide
-  whichever rows you drew. `test_a10G` measured its 25x on 256 rows, which is why that number is
-  recorded as an upper bound (`knowledge.md` addendum).
+- **`sample` interacts with `padding`.** `_usable_texts` takes the FIRST `sample` usable rows, so
+  the loader sees a head slice. Under `padding="max_length"` that was invisible — every batch was
+  `seq_len` wide whichever rows you drew. Under `padding="longest"` batch width *is* the rows drawn,
+  so `sample` now influences what gets measured, not just how much data is resident.
 - **`tokens_per_step()` is measured, not assumed** — the mean over steps actually run. Under
   `padding="longest"` the batch width varies, so `effective_batch * seq_len` overstates the work and
   inflates both tokens/s and MFU. Under `padding="max_length"` the measured value equals that
