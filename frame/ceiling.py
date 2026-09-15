@@ -78,8 +78,9 @@ def find_ceiling(runner, config, seq_len, vocab, cap=None, seed=0, warmup=2, cle
 
     runner: a `setup(config)` / `step()` runner — the REAL training step, or the ceiling describes
       something other than the job. An optional `teardown()` is called between trials.
-    config: the runner's base config. `data="synthetic"`, `micro_batch`, `max_len`, `vocab` and
-      `seed` are injected per trial; everything else is passed through untouched.
+    config: the runner's base config (include whatever the runner needs to build itself — e.g.
+      `model` for `frameworks.hf`). `data="synthetic"`, `micro_batch`, `effective_batch`,
+      `max_len`, `vocab` and `seed` are injected per trial; everything else passes through.
     cap: largest micro_batch worth testing — pass `effective_batch` (above it grad_accum < 1).
     peak_flops / peak_mem_bw_gb_s: Frame's frozen roofline ceilings, threaded through so no trial
       re-measures them.
@@ -94,7 +95,11 @@ def find_ceiling(runner, config, seq_len, vocab, cap=None, seed=0, warmup=2, cle
     trials = []
 
     def fits(n):
-        cfg = {**config, "data": "synthetic", "micro_batch": n,
+        # effective_batch = n makes grad_accum 1. Peak memory is unchanged by accumulation —
+        # each micro-batch's activations are freed at its backward, and the .grad buffers are
+        # full-size either way — so a 16-way accumulation would cost 16x the time for exactly
+        # the same answer.
+        cfg = {**config, "data": "synthetic", "micro_batch": n, "effective_batch": n,
                "max_len": seq_len, "vocab": vocab, "seed": seed}
         cap_ = capture(runner, cfg, warmup=warmup, clean_steps=clean_steps,
                        peak_flops=peak_flops, peak_mem_bw_gb_s=peak_mem_bw_gb_s)

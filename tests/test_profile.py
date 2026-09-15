@@ -148,6 +148,34 @@ def test_a_capped_ceiling_says_memory_is_not_the_constraint():
     assert any("real ceiling is higher" in n for n in p.notes)
 
 
+def test_the_ceiling_bounds_the_micro_batch_knob():
+    """The bound has to land on the KNOB. A framework's knobs() can only declare min:1 — it is
+    called with no arguments and cannot know a per-card measurement."""
+    hw = hardware("A10G", peak_flops=1.21e14, mem_gb=200.0, dtype="bfloat16")
+    p = build(internals(LLAMA3_8B), distribution([256]), hw, {}, dtype="bfloat16",
+              knobs={"micro_batch": {"type": "int", "min": 1}, "tf32": {"type": "bool"}},
+              max_len=2048, ceiling=_ceiling(11))
+    assert p.knobs["micro_batch"]["max"] == 11
+    assert p.knobs["micro_batch"]["min"] == 1 and p.knobs["tf32"] == {"type": "bool"}
+
+
+def test_an_unmeasured_ceiling_leaves_the_knob_unbounded():
+    """Never invent a bound. No measurement -> the knob stays as the framework declared it."""
+    hw = hardware("A10G", peak_flops=1.21e14, mem_gb=200.0, dtype="bfloat16")
+    p = build(internals(LLAMA3_8B), distribution([256]), hw, {}, dtype="bfloat16",
+              knobs={"micro_batch": {"type": "int", "min": 1}}, max_len=2048)
+    assert "max" not in p.knobs["micro_batch"]
+
+
+def test_bounding_does_not_mutate_the_frameworks_declaration():
+    """knobs() is a shared module-level surface; stamping onto it would leak across runs."""
+    k = {"micro_batch": {"type": "int", "min": 1}}
+    hw = hardware("A10G", peak_flops=1.21e14, mem_gb=200.0, dtype="bfloat16")
+    build(internals(LLAMA3_8B), distribution([256]), hw, {}, dtype="bfloat16",
+          knobs=k, max_len=2048, ceiling=_ceiling(11))
+    assert k == {"micro_batch": {"type": "int", "min": 1}}
+
+
 def test_a_clean_profile_carries_no_notes():
     assert _profile(max_len=2048, ceiling=_ceiling(11)).notes == []
 

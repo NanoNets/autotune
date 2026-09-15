@@ -8,6 +8,12 @@ profiler can wrap each phase in `record_function` and time a genuine fwd/bwd/opt
 `knobs()` reports the tunable surface — the levers that change SPEED, not the learned model — so
 the loop knows what it may turn. Heavy imports (torch / transformers / datasets) are lazy, so this
 module plus `knobs()` / `_resolve()` import on bare python3.
+
+Two data sources. The default loads real rows and is what a throughput probe runs on.
+`data="synthetic"` takes a worst-case batch from `frame.synthetic` instead — every sequence exactly
+`seq_len`, no padding, no dataset touched — which is what an OOM ceiling search drives
+(`frame/ceiling.py`). Memory is decided by the longest batch a run will ever see, and real rows
+supply one only by luck. `teardown()` frees a trial's weights before the next one starts.
 """
 
 _DEFAULTS = {
@@ -63,7 +69,11 @@ def _usable_texts(rows, text_field, sample):
 def _resolve(config):
     """Fill defaults + derived values. Pure — no torch/transformers, so it's unit-testable."""
     c = {**_DEFAULTS, **config}
-    for req in ("model", "dataset"):
+    if c.get("max_len"):                                # canonical name (loop/throughput.md) ->
+        c["seq_len"] = c["max_len"]                     # this framework's local one
+    synthetic = c.get("data") == "synthetic"
+    required = ("model",) if synthetic else ("model", "dataset")   # synthetic reads no dataset
+    for req in required:
         if not c.get(req):
             raise ValueError(f"config needs a {req!r} (HF hub id or local path)")
     eb, mb = c["effective_batch"], c["micro_batch"]
@@ -71,7 +81,7 @@ def _resolve(config):
         raise ValueError(                              # never changes it (it's the quality boundary)
             f"effective_batch ({eb}) must be divisible by micro_batch ({mb})")
     c["grad_accum"] = eb // mb                          # derived to hold the human's effective_batch
-    if c["sample"] < mb:
+    if not synthetic and c["sample"] < mb:              # synthetic builds its batch, never loads rows
         raise ValueError(f"sample ({c['sample']}) < micro_batch ({mb}): loader would be empty")
     c["tokens_per_step"] = eb * c["seq_len"]            # = micro_batch * grad_accum * seq_len
     return c
@@ -109,8 +119,13 @@ class HFRunner:
             self.model = torch.compile(self.model)
 
         self.opt = torch.optim.AdamW(self.model.parameters(), lr=self.cfg["lr"])
-        self._loader = self._build_loader(tok)
-        self._it = iter(self._loader)
+        if self.cfg.get("data") == "synthetic":
+            self._loader = self._it = None
+            self._batch = self._synthetic_batch(tok)    # one worst-case batch, reused every step
+        else:
+            self._batch = None
+            self._loader = self._build_loader(tok)
+            self._it = iter(self._loader)
 
     def _build_loader(self, tok):
         import torch
@@ -131,7 +146,26 @@ class HFRunner:
         return torch.utils.data.DataLoader(dset, batch_size=c["micro_batch"],
                                            shuffle=True, drop_last=True)
 
+    def _synthetic_batch(self, tok):
+        """One worst-case batch: every row exactly seq_len, zero padding, on the device.
+
+        Labels are the ids themselves — nothing is masked to -100, because there IS no padding.
+        That is the worst case on purpose: loss runs over every position, so the [B, S, vocab]
+        logits and the cross-entropy over them are at full size, and those are usually where the
+        peak actually lands.
+
+        vocab: the model's embedding width (`frame`'s `model["vocab"]`), falling back to the
+        tokenizer's. An id past it is a device-side assert, not the OOM being measured.
+        """
+        from frame.synthetic import random_batch
+        c = self.cfg
+        b = random_batch(c.get("vocab") or len(tok), c["micro_batch"], c["seq_len"],
+                         self.device, seed=c.get("seed", 0))
+        return b["input_ids"], b["attention_mask"], b["input_ids"].clone()
+
     def _next(self):
+        if self._batch is not None:                        # synthetic: one fixed worst-case batch
+            return self._batch
         try:
             return next(self._it)
         except StopIteration:                              # cycle: the profiler runs more steps than one pass
@@ -154,6 +188,11 @@ class HFRunner:
                 loss.backward()
         with self._rf("optimizer"):
             self.opt.step()
+
+    def teardown(self):
+        """Free this trial's weights/optimizer/data, so a ceiling search's next trial starts on a
+        clean card. Without it each trial measures the previous trial's leftovers."""
+        self.model = self.opt = self._loader = self._it = self._batch = None
 
     def tokens_per_step(self):
         return self.cfg["tokens_per_step"]

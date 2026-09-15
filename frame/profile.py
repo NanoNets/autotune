@@ -65,6 +65,22 @@ def _ceiling_str(max_len, ceiling):
             f"(measured)")
 
 
+def _bound_knobs(knobs, ceiling):
+    """Stamp the measured ceiling onto `micro_batch`'s range.
+
+    A framework's `knobs()` is a static declaration of what it SUPPORTS — it is called with no
+    arguments and cannot know a per-card, per-config measurement, so it can only say `min: 1`.
+    Left at that, the SearchSpace advertises an unbounded int and the bound holds only if the
+    agent remembers to cross-reference the ceiling itself. Putting `max` here is what actually
+    makes `micro_batch` a bounded dimension.
+    """
+    out = {k: dict(v) for k, v in (knobs or {}).items()}
+    if ceiling and ceiling.get("fits") and "micro_batch" in out:
+        out["micro_batch"]["max"] = ceiling["micro_batch_max"]
+        out["micro_batch"]["max_source"] = "measured ceiling at max_len"
+    return out
+
+
 def _notes(dataset, max_len, ceiling):
     """Things the agent must see before it starts tuning. Facts + consequences, no labels."""
     notes = []
@@ -140,7 +156,7 @@ def build(model, dataset, hardware, versions, dtype="bfloat16", optimizer="adamw
     return Profile(
         model=model, dataset=dataset, hardware=hardware, versions=versions, memory=mem,
         default_config={"dtype": dtype, "param_bytes": param_bytes, "optimizer": optimizer},
-        effective_batch=effective_batch, knobs=knobs or {},
+        effective_batch=effective_batch, knobs=_bound_knobs(knobs, ceiling),
         flops_per_token=6.0 * params, activation_headroom_gb=headroom,
         model_state_fits=fits, max_len=max_len, ceiling=ceiling,
         notes=_notes(dataset, max_len, ceiling), summary=summary,
@@ -152,6 +168,21 @@ def _framework_knobs(framework):
     import importlib
     fn = getattr(importlib.import_module(f"frameworks.{framework}"), "knobs", None)
     return fn() if callable(fn) else {}
+
+
+def framework_runner(framework):
+    """The named framework's runner class ({}.Runner convention: `HFRunner`, `TorchRunner`).
+
+    Kept separate from `frame()`'s `runner=` argument on purpose: constructing a runner loads real
+    weights, so measuring a ceiling stays something the caller asks for, never a side effect of
+    profiling.
+    """
+    import importlib
+    mod = importlib.import_module(f"frameworks.{framework}")
+    for name in (f"{framework.upper()}Runner", f"{framework.capitalize()}Runner"):
+        if hasattr(mod, name):
+            return getattr(mod, name)
+    raise ValueError(f"frameworks.{framework} exposes no runner class")
 
 
 def frame(model, dataset, gpu, max_len, dtype="bfloat16", device="cuda", framework="hf",
@@ -187,7 +218,8 @@ def frame(model, dataset, gpu, max_len, dtype="bfloat16", device="cuda", framewo
     if runner is not None and device == "cuda":
         from frame.ceiling import find_ceiling
         ceiling = find_ceiling(                         # reuses the peaks just measured, so no
-            runner, {"device": device, "dtype": dtype}, # trial re-pays for them
+            runner,                                     # trial re-pays for them
+            {"device": device, "dtype": dtype, "model": model, "dataset": dataset},
             seq_len=max_len, vocab=mi["vocab"], cap=effective_batch, seed=seed,
             peak_flops=m["peak_flops"], peak_mem_bw_gb_s=m["peak_mem_bw_gb_s"],
             on_trial=on_trial)

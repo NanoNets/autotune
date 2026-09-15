@@ -5,9 +5,10 @@ Prints the one-line summary, any notes, and the full Profile JSON. Needs transfo
 `--max-len` is required: it is the human's declared application sequence length, and it is what
 the OOM ceiling is measured at. Without it there is no worst case to measure against.
 
-`--ceiling` measures that ceiling using the toy `frameworks.torch` runner — a SMOKE PATH that
-proves the search runs end to end, not a number to tune against. A ceiling that means anything
-needs the real training step: call `frame.profile.frame(..., runner=<real runner>)`.
+`--ceiling` measures that ceiling with `--framework`'s real runner — it loads real weights and
+runs a real fwd/bwd/opt on worst-case batches, so the number is one to tune against. It costs
+~2*log2(n) short trials. Without the flag the Profile carries `ceiling: null`, and the summary
+says so rather than implying a ceiling was checked.
 """
 import argparse
 import dataclasses
@@ -33,16 +34,16 @@ def main():
     ap.add_argument("--sample", type=int, default=1000)
     ap.add_argument("--name", default=None, help="dataset config, e.g. wikitext-2-raw-v1")
     ap.add_argument("--ceiling", action="store_true",
-                    help="measure the OOM ceiling with the TOY runner (smoke path, not a real number)")
+                    help="measure the OOM ceiling at --max-len using --framework's real runner")
     ap.add_argument("--seed", type=int, default=0, help="seed for the synthetic batches")
     a = ap.parse_args()
 
     runner = None
     if a.ceiling:
-        from frameworks.torch import TorchRunner
-        runner = TorchRunner()
+        from frame.profile import framework_runner
+        runner = framework_runner(a.framework)()
         print(f"frame: measuring the memory ceiling at max_len={a.max_len} "
-              f"(synthetic, seed {a.seed}, TOY runner)")
+              f"(synthetic, seed {a.seed}, framework={a.framework})")
 
     def on_trial(t):
         peak = f"peak {t['peak_gb']}GB" if t["peak_gb"] is not None else "peak n/a"

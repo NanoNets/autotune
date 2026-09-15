@@ -129,8 +129,13 @@ and `16` is eliminated *before* the loop spends a 5-minute probe watching it cra
   (`frame.ceiling.is_stale`). Moved → **re-measure**, don't extrapolate. Turning on `recompute`
   can easily take a ceiling of 11 to 32; the search space is meant to widen on that evidence.
 - **Measure it with the REAL training step.** A ceiling measured on a different workload describes
-  that workload. `frame.profile.frame(..., runner=...)` takes the runner; the `--ceiling` CLI flag
-  uses the toy `frameworks/torch.py` runner and is a **smoke path only**.
+  that workload, not this job. `--ceiling` uses `--framework`'s real runner (`frameworks/hf.py`
+  loads real weights and runs a real fwd/bwd/opt); `frame.profile.frame(..., runner=...)` takes one
+  directly. Constructing a runner is never implicit — no `runner`, no ceiling.
+- **The bound lands on the knob.** `build()` stamps `micro_batch.max` from the measured ceiling
+  (`_bound_knobs`). A framework's `knobs()` can only declare `min: 1` — it takes no arguments and
+  cannot know a per-card measurement — so without this the SearchSpace would advertise an unbounded
+  int and the bound would hold only if the agent remembered to cross-reference.
 - **`micro_batch=1` OOMs → stop and say so.** That is a memory regime, not a throughput one: the
   first moves are recompute / offload / sharding, never batch knobs. Frame puts it in `notes`.
 - **Synthetic probes NEVER enter `results.tsv`.** Memory feasibility is measured on the worst case;
@@ -158,8 +163,8 @@ Qwen2ForCausalLM (gqa, bfloat16) | 0.5B params | A10G 24.0GB x1 | peak 121 TFLOP
 ```
 
 `--max-len` is **required** — without it there is no worst case to measure against. `--ceiling`
-runs the search with the **toy** runner: a smoke path that proves the search works end to end, not
-a number to tune against. For a real ceiling, call `frame.profile.frame(..., runner=<real runner>)`.
+runs the search with `--framework`'s real runner, so the number is one to tune against; it costs
+~2·log₂(n) short trials. Omit it and the Profile carries `ceiling: null`.
 
 **Inputs.** `model` and `dataset` are each an **HF hub id or a local path**. `gpu` is just a **label**
 for the record — any hardware works, because the peak is measured, not looked up. `dtype` is the
@@ -268,6 +273,7 @@ needed, a **shell** that hits the hub or the card.
 | `hardware.py` | assemble hardware facts; `measure()` runs the on-device peak/bandwidth benchmark |
 | `memory.py` | analytical weights/grads/optimizer breakdown |
 | `synthetic.py` | worst-case batch at `max_len` — every sequence full length, seeded |
+| | *consumed by `frameworks/hf.py` (`data="synthetic"`) and `frameworks/torch.py`* |
 | `ceiling.py` | `search` = the pure double-then-bisect ladder; `find_ceiling` = the live search |
 | `profile.py` | assemble the `Profile` (`build` = pure; `frame` = live end-to-end) |
 | `__main__.py` | the `python -m frame` CLI |
@@ -288,8 +294,9 @@ Qwen2ForCausalLM (gqa, bfloat16) | 0.5B params | A10G 22.1GB x1 | peak 89 TFLOP/
  | full-FT model-state 7.36GB -> model state fits (headroom 14.7GB) | 200 samples, p50 16/p99 317 tok
 ```
 
-**Single-GPU** for now; multi-GPU, the framework's tunable-knob list, and reading `run.toml` /
-writing `runs/<id>/profile.json` are deferred. The ceiling is built and unit-tested; it still wants
-a GPU validation run and a real (non-toy) runner to measure against. A second ceiling at the
-dataset's `p99` — whose gap from the `max_len` ceiling estimates what `packing` is worth — is one
-extra `find_ceiling(..., seq_len=p99)` call, not yet wired into `frame()`.
+**Single-GPU** for now; multi-GPU and reading `run.toml` / writing `runs/<id>/profile.json` are
+deferred. The ceiling is built, unit-tested, and wired to the real `frameworks/hf.py` runner; it
+still wants a **GPU validation run** — every trial's memory field is `None` off-GPU, so only a real
+card exercises the bisection against actual OOMs. A second ceiling at the dataset's `p99` — whose
+gap from the `max_len` ceiling estimates what `packing` is worth — is one extra
+`find_ceiling(..., seq_len=p99)` call, not yet wired into `frame()`.

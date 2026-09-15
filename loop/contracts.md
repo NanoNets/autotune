@@ -33,7 +33,7 @@ What the loop may vary, and the safety bounds. Built by Frame.
 
 | Field | Meaning |
 |---|---|
-| `knobs` | searchable dims in **canonical** names; each: type, range/values, dependencies, cost-hint. `micro_batch`'s upper bound comes from the Profile's measured `ceiling`, not from a guess |
+| `knobs` | searchable dims in **canonical** names; each: type, range/values, dependencies, cost-hint. `micro_batch` carries a `max` stamped from the measured `ceiling` (a framework's `knobs()` can only declare `min`, so the bound is added at Frame) |
 | `safety` | per knob: `safe` / `off_limits` / `unknown`. Model-decided at Frame. Default `unknown → off_limits` |
 | `capability` | canonical ∩ this framework's supported knobs (the projection) |
 | `fixed` | human-owned constants: model, dataset, hardware, effective_batch, max_len |

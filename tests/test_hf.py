@@ -77,6 +77,43 @@ def test_usable_texts_skips_blanks_missing_fields_and_caps():
     assert _usable_texts(rows, "text", sample=10) and _usable_texts([], "text", 10) == []
 
 
+# --- the synthetic data source (what a ceiling search drives) --------------------------------
+
+def test_max_len_is_translated_to_this_frameworks_seq_len():
+    """`max_len` is the canonical name (loop/throughput.md); `seq_len` is this adapter's local one."""
+    c = _resolve({**BASE, "max_len": 2048})
+    assert c["seq_len"] == 2048 and c["tokens_per_step"] == 16 * 2048
+
+
+def test_synthetic_needs_no_dataset():
+    """It builds its batch — reading rows would defeat the point of a worst case."""
+    c = _resolve({"model": BASE["model"], "data": "synthetic", "max_len": 2048})
+    assert c["seq_len"] == 2048 and c["data"] == "synthetic"
+
+
+def test_real_probes_still_require_a_dataset():
+    try:
+        _resolve({"model": BASE["model"]})
+    except ValueError as e:
+        assert "dataset" in str(e)
+        return
+    assert False, "expected ValueError: a throughput probe needs real rows"
+
+
+def test_synthetic_skips_the_row_count_check():
+    """`sample` bounds the loader, and synthetic has no loader — the check would be a false OOM."""
+    c = _resolve({"model": BASE["model"], "data": "synthetic", "micro_batch": 512,
+                  "effective_batch": 512, "sample": 8})
+    assert c["micro_batch"] == 512 and c["grad_accum"] == 1
+
+
+def test_a_ceiling_trial_accumulates_once():
+    """find_ceiling sets effective_batch = micro_batch: same peak memory, 1/grad_accum the time."""
+    c = _resolve({"model": BASE["model"], "data": "synthetic",
+                  "micro_batch": 4, "effective_batch": 4})
+    assert c["grad_accum"] == 1
+
+
 if __name__ == "__main__":
     for _n, _f in list(globals().items()):
         if _n.startswith("test_") and callable(_f):
