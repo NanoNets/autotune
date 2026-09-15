@@ -45,7 +45,7 @@ Do these in order. Don't start experimenting until Step 3 is confirmed back to t
 ### Step 1 — Environment & access → `backends/README.md`
 
 - Identify local vs. remote (SSH). Credentials go in `.env`; non-secret config (model, dataset,
-  gpu, `effective_batch`, backend, SSH host/user) goes in `run.toml` (copy from
+  gpu, `effective_batch`, `max_len`, backend, SSH host/user) goes in `run.toml` (copy from
   `run.toml.example`).
 - Confirm the box is reachable before moving on.
 - Determine the run name — ask the user; IF they decline → default to `<model_name>_<dataset>`
@@ -57,11 +57,16 @@ Do these in order. Don't start experimenting until Step 3 is confirmed back to t
 
 - Confirm the model is retrievable; build a real architecture picture.
 - Confirm the dataset loads and matches the expected schema.
+- **Measure the OOM ceiling at `max_len`** before any tuning — `micro_batch` is bounded by
+  measurement, never by guesswork. Procedure: `frame/README.md`.
 
 ### Step 3 — Initialize run tracking, then confirm → `runs/README.md`
 
 - Create `runs/<run_name>/results.tsv` (the directory already exists from Step 1).
-- Summarize environment, model, dataset, `effective_batch`, and run name back to the user.
+- Summarize environment, model, dataset, `effective_batch`, `max_len` + the measured ceiling,
+  every Profile `note`, and the run name back to the user.
+- IF the ceiling says `micro_batch=1` OOMs → say so here: it's a memory regime, and Step 4 starts
+  from recompute/offload/sharding, not from batch knobs.
 - Once confirmed → proceed to Step 4. **"NEVER stop" (Global rules) applies from here on.**
 
 ### Step 4 — Run the experimental loop → `loop/loop.md`
@@ -76,6 +81,12 @@ before proposing any change.
 - **ALWAYS** state the hypothesis's reasoning explicitly: what prior it's built on, what you
   expect, what would surprise you. Can't articulate why it should help → you're guessing → think
   more, don't spend the probe.
+- **ALWAYS** check the ceiling before proposing a `micro_batch`: it is NOT a run constant. IF the
+  Config moves a knob the ceiling was measured under (recompute, attn_kernel, optimizer, dtype,
+  sharding) → the ceiling is stale → re-measure it (`frame/README.md`), then hypothesize against
+  the new bound.
+- **NEVER** log a ceiling trial as an experiment. Synthetic probes measure memory, not throughput
+  — they go to `ceiling.tsv`, never `results.tsv` (`runs/README.md`).
 - IF the change works → keep it, commit it (the branch now reflects the new best config).
   IF it doesn't → discard, move on.
 - Rewind to an earlier point only very sparingly, if ever — prefer branching your thinking over

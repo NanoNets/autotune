@@ -17,7 +17,10 @@ code in `profiler/`. **The agent decides; the code measures.**
 
 We build the measurement tools first, validate them by hand, then encode the agent. Today the roofline
 calculator, trace parser, and diagnostic assembler are built and TDD-tested; the capture engine and a
-raw-torch runner are in place. Next: memory/OOM capture, then a real profile on a GPU.
+raw-torch runner are in place. Frame now **measures** the OOM ceiling — the largest `micro_batch`
+that runs at the `max_len` you declare — on manufactured worst-case batches rather than hoping the
+dataset supplies one, so `micro_batch` is bounded by evidence before the search starts. Next: a real
+profile on a GPU.
 
 ## Getting started
 
@@ -42,7 +45,7 @@ profiler/      the measurement instrument (roofline · trace · capture · diagn
 frameworks/    runner adapters — torch now, swift/HF later                                [built: torch]
 tests/         TDD                                                                         [built]
 
-frame/         profile the setup + build the search space                                 [scaffold]
+frame/         profile the setup · measure the OOM ceiling · build the search space       [built]
 search/        surrogate · frontier · memory plumbing                                      [scaffold]
 backends/      where a probe runs — modal · ssh/neoclouds                                  [scaffold]
 knowledge/     cross-run memory — belief files + index                                     [scaffold]

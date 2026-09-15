@@ -26,6 +26,21 @@ as-is baseline, logged first, before any change is proposed) gets a row.
 just the last row (e.g. "everything with recompute=full has been worse") — this is what keeps the
 loop from re-running something already tried.
 
+## `ceiling.tsv` — the memory ledger, kept apart from the throughput one
+
+Ceiling trials (`frame/README.md`) run on **synthetic** max_len batches and answer *does it fit*,
+never *how fast*. Scoring them as experiments would rank throughput on fake data. They get their
+own file:
+
+```
+seq_len	micro_batch	status	peak_gb	reserved_gb	config	note
+```
+
+- One row per trial, written as the search runs. `config` — the memory knobs it was measured under.
+- **NEVER** put a ceiling trial in `results.tsv`, and never on the frontier.
+- Re-run the search when a memory knob moves; append the new trials, don't overwrite the old ones —
+  the two ceilings side by side are the evidence for what that knob bought.
+
 ## `research.md` — the run's websearch landing zone
 
 Anything found via websearch during this run (model card details, papers, tuning guides — see
