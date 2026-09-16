@@ -20,7 +20,8 @@ Anything the profiler drives implements:
 | `tokens_per_step()` | tokens processed per optimizer step (the D in the roofline) |
 | `.params` | parameter count (the N in the roofline) |
 
-The profiler is unchanged across runners — it just calls these.
+The profiler is unchanged across runners — it just calls these. Which runner produced a reading is
+recorded automatically in the Observation's `provenance.runner`.
 
 ## Run the real adapter
 

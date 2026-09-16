@@ -81,7 +81,10 @@ class Observation:
     reserved_mem_gb: float = None      # allocator reserved (reserved - peak = fragmentation)
     mem_total_gb: float = None
     headroom_gb: float = None          # total - reserved (how close to the OOM ceiling)
-    provenance: dict = field(default_factory=dict)
+    provenance: dict = field(default_factory=dict)   # + `runner`: WHICH adapter produced this
+                                       #   reading. A belief learned from one runner does not
+                                       #   transfer to another — different loop, different
+                                       #   bottlenecks (see frameworks/README.md)
     top_kernels: list = field(default_factory=list)   # [[name, seconds], ...] top 8 by total time
     kernel_count: int = None           # distinct kernels; with top8_coverage exposes the long tail
     top8_coverage: float = None        # share of summed kernel time in the top-8 kernels
@@ -147,7 +150,9 @@ def diagnose(capture, params, tokens, gpu):
     timing = _clean_timing(times, getattr(capture, "step_tokens", None))   # kept even on oom/error:
     if capture.status != "ok" or not times:            # steps that DID run / nothing measured
         note = f"status={capture.status}" + (f": {capture.error}" if capture.error else "")
-        return Observation(summary=dev_str + note, **timing, **base)
+        return Observation(summary=dev_str + note,
+                           provenance={"runner": getattr(capture, "runner", None)},
+                           **timing, **base)
 
     cv, mean_wall = timing["step_time_cv"], timing["step_time_mean_s"]
     step_tok = timing.setdefault("tokens_per_step", tokens)   # per-step counts, else the caller's
@@ -219,7 +224,8 @@ def diagnose(capture, params, tokens, gpu):
         reference_step_s=ref_wall, profiled_step_s=profiled,
         gpu_phase_times_s=gpu_ph_s, gpu_phase_coverage=gpu_ph_cov,
         data_wait_s=data_wait, data_wait_frac=wait, gap_s=gap, gap_frac=frac(gap, ref_wall),
-        provenance=provenance(trace), top_kernels=top8,
+        provenance={**provenance(trace), "runner": getattr(capture, "runner", None)},
+        top_kernels=top8,
         kernel_count=len(ks), top8_coverage=top8_cov,
         gap_count=gap_count, max_gap_s=None if max_gap_us is None else max_gap_us / 1e6,
         achieved_occupancy_pct=occ_pct, limiting_factor=occ.get("limiting_factor"),

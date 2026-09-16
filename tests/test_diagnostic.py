@@ -38,9 +38,10 @@ REF_WALL, PROFILED = 0.5e-3, 0.8e-3    # the reference batch: profiler off, then
 
 
 def _cap(status="ok", step_times=None, trace=TRACE, memory=MEMORY, cpu=CPU, error=None, peak=PEAK,
-         ref=REF_WALL, profiled=PROFILED, step_tokens=None, device="cuda"):
+         ref=REF_WALL, profiled=PROFILED, step_tokens=None, device="cuda",
+         runner="HFRunner"):
     return SimpleNamespace(
-        status=status, trace=trace, memory=memory, cpu=cpu, error=error, device=device,
+        status=status, trace=trace, memory=memory, cpu=cpu, error=error, device=device, runner=runner,
         peak_flops=peak, peak_dtype="bfloat16", reference_step_s=ref, profiled_step_s=profiled,
         step_tokens=step_tokens or [],
         step_times_s=STEP_TIMES if step_times is None else step_times)
@@ -209,6 +210,21 @@ def test_negative_gap_is_null_not_zero():
     o = diagnose(_cap(ref=118e-6), params=PARAMS, tokens=TOKENS, gpu=GPU)  # 120us busy, 118us wall
     assert o.gap_s is None and o.gap_frac is None       # disagreement, not "zero idle"
     assert "idle n/a" in o.summary
+
+
+def test_provenance_records_the_runner():
+    # a belief learned from one adapter must not be silently reused for another: different loop,
+    # different bottlenecks (hf.py's loader makes data-wait structurally zero, for one)
+    assert _obs().provenance["runner"] == "HFRunner"
+    o = diagnose(_cap(runner="TorchRunner"), params=PARAMS, tokens=TOKENS, gpu=GPU)
+    assert o.provenance["runner"] == "TorchRunner"
+
+
+def test_runner_survives_a_failed_capture():
+    # an error Observation with no runner is uninterpretable when read back later
+    o = diagnose(_cap(status="oom", error="CUDA out of memory"),
+                 params=PARAMS, tokens=TOKENS, gpu=GPU)
+    assert o.status == "oom" and o.provenance["runner"] == "HFRunner"
 
 
 def test_provenance_present():

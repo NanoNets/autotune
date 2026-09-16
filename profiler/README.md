@@ -104,7 +104,7 @@ so "unknown" can't be mistaken for "measured zero".
 | 34 | `reserved_mem_gb` | allocator reserved (`reserved - peak` = fragmentation) | off-GPU |
 | 35 | `mem_total_gb` | device total | off-GPU |
 | 36 | `headroom_gb` | `total - reserved` — distance to the OOM ceiling | off-GPU |
-| 37 | `provenance` | `{flash_attention, fused_kernels, dtypes}` — a **hint** from substring-matching kernel names, not a verdict; the raw names are in `top_kernels`. Booleans are `null` when no kernels ran (unknown ≠ False) | `{}` when not `ok` |
+| 37 | `provenance` | `{flash_attention, fused_kernels, dtypes, runner}` — a **hint** from substring-matching kernel names, not a verdict; the raw names are in `top_kernels`. Booleans are `null` when no kernels ran (unknown ≠ False). `runner` is the adapter class that produced the reading, so a belief from one runner isn't reused for another | only `runner` when not `ok` |
 | 38 | `top_kernels` | top 8 as `[[name, seconds], …]` | `[]` when not `ok` |
 | 39 | `kernel_count` | distinct kernels — with `top8_coverage`, exposes the long tail | not `ok` |
 | 40 | `top8_coverage` | share of **summed** kernel time inside the top 8 (a share of kernel time, not of `gpu_busy_s`) | not `ok`, or no kernels |
@@ -191,7 +191,8 @@ Real output, A10G, 8×2048 MLP at micro-batch 32 / seq 512 (kernel names truncat
     "fused_kernels": true,
     "dtypes": [
       "fp32"
-    ]
+    ],
+    "runner": "HFRunner"
   },
   "top_kernels": [
     [

@@ -51,6 +51,7 @@ class Capture:
     peak_dtype: str = None                            # the dtype that peak was measured at
     peak_mem_bw_gb_s: float = None                    # measured achievable bandwidth (roofline)
     device: str = None                                # the device this actually ran on (cuda/cpu/mps)
+    runner: str = None                                # which adapter produced this reading
     error: str = None
 
 
@@ -224,6 +225,7 @@ def capture(runner, config, warmup=3, clean_steps=10, trace_path=None, peak_flop
     into a comparison whose real signal is ~1%. A shared constant cancels out of every ranking.
     """
     device = config.get("device", "cpu")
+    runner_name = type(runner).__name__                # what produced the reading (-> provenance)
     if trace_path is None:                             # unique per capture — the Observation keeps
         trace_path = _default_trace_path()             # this pointer, so runs must not overwrite
     times = []                                         # hoisted: kept even if a later step OOMs
@@ -336,7 +338,7 @@ def capture(runner, config, warmup=3, clean_steps=10, trace_path=None, peak_flop
                        reference_step_s=reference_s, profiled_step_s=profiled_s,
                        population=population,
                        peak_flops=peak, peak_dtype=peak_dtype, peak_mem_bw_gb_s=peak_bw,
-                       memory=memory, cpu=cpu, device=device)
+                       memory=memory, cpu=cpu, device=device, runner=runner_name)
 
     except torch.cuda.OutOfMemoryError as e:           # OOM is a valid result — the memory ceiling
         _stop_sampler()
@@ -347,7 +349,8 @@ def capture(runner, config, warmup=3, clean_steps=10, trace_path=None, peak_flop
                        step_tokens=step_tokens, clean_passes=passes(),  # evidence, not noise
                        clean_steps_requested=requested,
                        cpu=_cpu_stats(cpu_samples), peak_flops=peak,
-                       peak_dtype=peak_dtype, peak_mem_bw_gb_s=peak_bw, device=device, error=first)
+                       peak_dtype=peak_dtype, peak_mem_bw_gb_s=peak_bw, device=device,
+                       runner=runner_name, error=first)
     except Exception as e:                             # any other failure, surfaced not swallowed
         _stop_sampler()
-        return Capture(status="error", device=device, error=f"{type(e).__name__}: {e}")
+        return Capture(status="error", device=device, runner=runner_name, error=f"{type(e).__name__}: {e}")
