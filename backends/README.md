@@ -22,8 +22,8 @@ Do this before anything else in a session — nothing downstream works without a
 
 Ask the user where the experiments will actually run:
 
-- **Local** (`backend = "local"`) — the probe runs in-process on this machine's device. Fine for a
-  CPU smoke test, or when you're already on the GPU box.
+- **Local** (`backend = "local"`, `device = "cuda"`) — the probe runs in-process on this machine's
+  device. What you use when you're already on the GPU box, including a rented one.
 - **Modal** (`backend = "modal"`) — serverless cloud GPU. Needs the `modal` package and auth
   (`modal setup`, or `MODAL_TOKEN_ID`/`MODAL_TOKEN_SECRET` in `.env`). The GPU is taken from
   `run.toml`'s `gpu` field (e.g. `A10G`, `A100`, `H100`), and the repo is shipped to the worker
@@ -42,6 +42,13 @@ Ask the user where the experiments will actually run:
   - Everything non-secret (backend, model, dataset, gpu, `effective_batch`, SSH host/user)
     belongs in `run.toml` (copy from the committed `run.toml.example`), not `.env`.
   - Confirm you can actually reach the box (e.g. a trivial `ssh` command succeeds) before moving on.
+
+Then confirm the device. `device` is a decision, not a detail: with `backend = "local"` it defaults
+to `cuda` and falls back to `cpu` only when torch reports no CUDA — loudly, on stderr and in the
+Observation's `device_type`. A `cpu` probe returns a complete, well-formed Observation whose MFU and
+GPU signals are meaningless, so it is a smoke test you ask for deliberately. Never rank a `cpu` row
+against a `cuda` row, and never promote a belief from one. Single-GPU only, so `cuda:0` is refused:
+pick the GPU with `CUDA_VISIBLE_DEVICES`.
 
 Determine the run name — ask the user for one. IF they decline, default to
 `<model_name>_<dataset>` (from `run.toml`'s `model`/`dataset` fields, `/` sanitized to `-`, e.g.

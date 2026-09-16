@@ -13,7 +13,7 @@ import backends
 import backends.local
 import backends.modal
 import backends.ssh
-from backends.local import _make_runner
+from backends.local import _make_runner, _resolve_device
 from backends.ssh import _settings, _ssh_cmd, payload_config
 
 
@@ -85,6 +85,57 @@ def test_ssh_never_ships_connection_details_to_the_box():
 def test_ssh_probes_on_cuda_regardless_of_local_device():
     # The launcher is a laptop (mps/cpu); the box is the GPU. The remote device is not negotiable.
     assert payload_config({"ssh": {"host": "box"}, "device": "mps"})["device"] == "cuda"
+
+
+class _FakeTorch:
+    """Stands in for torch so the device tests stay bare-python3 (no real torch import)."""
+    def __init__(self, available):
+        self.cuda = type("cuda", (), {"is_available": staticmethod(lambda: available)})
+
+
+def _with_torch(available, config):
+    saved = sys.modules.get("torch")
+    sys.modules["torch"] = _FakeTorch(available)
+    try:
+        return _resolve_device(config)
+    finally:
+        sys.modules.pop("torch", None)
+        if saved is not None:
+            sys.modules["torch"] = saved
+
+
+def test_device_defaults_to_cuda_on_a_gpu_box():
+    # the real case: an agent fills in run.toml without thinking about `device`
+    assert _with_torch(True, {}) == "cuda"
+
+
+def test_explicit_device_always_wins():
+    # including "cpu" — a smoke test you asked for is not a mistake
+    assert _with_torch(True, {"device": "cpu"}) == "cpu"
+    assert _with_torch(False, {"device": "cuda"}) == "cuda"
+    assert _with_torch(True, {"device": "mps"}) == "mps"
+
+
+def test_indexed_cuda_device_is_refused():
+    # capture compares `device == "cuda"` exactly, so "cuda:0" would skip synchronisation and
+    # memory stats and still return a well-formed Observation — the silent bad probe again
+    try:
+        _with_torch(True, {"device": "cuda:0"})
+    except ValueError as e:
+        assert "CUDA_VISIBLE_DEVICES" in str(e)
+        return
+    assert False, "expected ValueError for an indexed cuda device"
+
+
+def test_cpu_fallback_announces_itself():
+    # no CUDA -> cpu, but never silently: a silent fall-through logs CPU numbers to results.tsv
+    # as if they were a real probe
+    import contextlib
+    import io
+    err = io.StringIO()
+    with contextlib.redirect_stderr(err):
+        assert _with_torch(False, {}) == "cpu"
+    assert "CPU" in err.getvalue() and "meaningless" in err.getvalue()
 
 
 if __name__ == "__main__":

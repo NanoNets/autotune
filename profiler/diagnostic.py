@@ -62,6 +62,9 @@ class Observation:
     achieved_occupancy_pct: float = None   # runtime-weighted; the "why is compute slow" signal
     limiting_factor: str = None            # what caps occupancy (REGS / shared mem / warps)
     device: dict = field(default_factory=dict)   # real hw from the trace: name, mem, sms, cc
+    device_type: str = None            # what it RAN on (cuda/cpu/mps). A cpu probe is a smoke test:
+                                       #   MFU and every GPU signal are meaningless — never compare
+                                       #   it against a cuda probe, and never learn a belief from it
     trace_path: str = None             # raw trace on disk, for on-demand drill-down
     error: str = None
     summary: str = ""
@@ -86,17 +89,21 @@ def diagnose(capture, params, tokens, gpu):
         status=capture.status, gpu=gpu, error=capture.error, trace_path=trace_path,
         peak_flops=peak, peak_dtype=getattr(capture, "peak_dtype", None),
         peak_mem_bw_gb_s=getattr(capture, "peak_mem_bw_gb_s", None),
+        device_type=getattr(capture, "device", None),
         peak_mem_gb=mem.get("peak_gb"), reserved_mem_gb=mem.get("reserved_gb"),
         mem_total_gb=mem.get("total_gb"), headroom_gb=mem.get("headroom_gb"),
         cpu_util_mean=cpu.get("mean"), cpu_util_max=cpu.get("max"), nproc=cpu.get("nproc"),
         cpu_cores_busy=cpu.get("cores_busy"),
     )
 
+    dev = getattr(capture, "device", None)              # a cpu probe must never read as a real one
+    dev_str = f"[{dev.upper()} — not a GPU probe] " if dev and dev != "cuda" else ""
+
     times = capture.step_times_s or []
     timing = _clean_timing(times)                      # kept even on oom/error: steps that DID run
     if capture.status != "ok" or not times:            # oom / error / nothing measured
         note = f"status={capture.status}" + (f": {capture.error}" if capture.error else "")
-        return Observation(summary=note, **timing, **base)
+        return Observation(summary=dev_str + note, **timing, **base)
 
     wall, cv = timing["step_time_s"], timing["step_time_cv"]
     trace = load_trace(capture.trace)
@@ -135,7 +142,8 @@ def diagnose(capture, params, tokens, gpu):
     occ_str = f" | occ {occ_pct:.0f}%" if occ_pct is not None else ""
     idle_str = f"{frac(gap):.0%}" if gap is not None else "n/a"
     mfu_str = f"{mfu_v:.0%}" if mfu_v is not None else "n/a"
-    summary = (f"MFU {mfu_str} | GPU active {frac(busy):.0%} | data-wait {frac(data_wait):.0%} | "
+    summary = (f"{dev_str}MFU {mfu_str} | GPU active {frac(busy):.0%} | "
+               f"data-wait {frac(data_wait):.0%} | "
                f"idle {idle_str}{cpu_str} | noise +/-{cv:.0%}{occ_str}{mem_str}")
 
     return Observation(
