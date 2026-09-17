@@ -31,6 +31,7 @@ class Capture:
     peak_flops: float = None                          # measured dense-GEMM peak (MFU denominator)
     peak_dtype: str = None                            # the dtype that peak was measured at
     peak_mem_bw_gb_s: float = None                    # measured achievable bandwidth (roofline)
+    device: str = None                                # the device this actually ran on (cuda/cpu/mps)
     error: str = None
 
 
@@ -279,7 +280,7 @@ def capture(runner, config, warmup=3, clean_steps=10, trace_path=None, peak_flop
 
         return Capture(status="ok", step_times_s=times, trace=trace_path, profiled_step_s=profiled_s,
                        peak_flops=peak, peak_dtype=peak_dtype, peak_mem_bw_gb_s=peak_bw,
-                       memory=_read_memory(device), cpu=cpu)
+                       memory=_read_memory(device), cpu=cpu, device=device)
 
     except torch.cuda.OutOfMemoryError as e:           # OOM is a valid result — the memory ceiling
         _stop_sampler()
@@ -288,7 +289,7 @@ def capture(runner, config, warmup=3, clean_steps=10, trace_path=None, peak_flop
         first = str(e).strip().splitlines()[0] if str(e).strip() else "CUDA out of memory"
         return Capture(status="oom", step_times_s=times, memory=mem,    # steps that DID run are
                        cpu=_cpu_stats(cpu_samples), peak_flops=peak,    # evidence, not noise
-                       peak_dtype=peak_dtype, peak_mem_bw_gb_s=peak_bw, error=first)
+                       peak_dtype=peak_dtype, peak_mem_bw_gb_s=peak_bw, device=device, error=first)
     except Exception as e:                             # any other failure, surfaced not swallowed
         _stop_sampler()
-        return Capture(status="error", error=f"{type(e).__name__}: {e}")
+        return Capture(status="error", device=device, error=f"{type(e).__name__}: {e}")

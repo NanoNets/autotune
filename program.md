@@ -45,9 +45,11 @@ Do these in order. Don't start experimenting until Step 3 is confirmed back to t
 ### Step 1 — Environment & access → `backends/README.md`
 
 - Identify local vs. remote (SSH). Credentials go in `.env`; non-secret config (model, dataset,
-  gpu, `effective_batch`, `max_len`, backend, SSH host/user) goes in `run.toml` (copy from
+  gpu, `effective_batch`, `max_len`, backend, `device`, SSH host/user) goes in `run.toml` (copy from
   `run.toml.example`).
-- Confirm the box is reachable before moving on.
+- Set `device` deliberately. `cpu` is a smoke test whose MFU is meaningless, never a result — a
+  probe that falls back to it says so on stderr and in the Observation's `device_type`.
+- Confirm the box is reachable AND that `torch.cuda.is_available()` is True before moving on.
 - Determine the run name — ask the user; IF they decline → default to `<model_name>_<dataset>`
   (from `run.toml`, `/` sanitized to `-`). Create `runs/<run_name>/` now, so Step 2's research
   notes have somewhere to land.
