@@ -14,7 +14,7 @@ max_len         = 2048                    # REQUIRED. the sequence length your a
                                            # length the OOM ceiling is measured at (frame/README.md).
                                            # must be <= the model's context length, or Frame refuses.
 
-backend = "local"   # "local" or "ssh" — see backends/README.md
+backend = "local"   # "local", "modal" or "ssh" — see backends/README.md
 
 [scan]
 text_field = "text"    # which dataset column to tokenize
