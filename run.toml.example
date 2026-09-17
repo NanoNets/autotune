@@ -15,6 +15,10 @@ max_len         = 2048                    # REQUIRED. the sequence length your a
                                            # must be <= the model's context length, or Frame refuses.
 
 backend = "local"   # "local" or "ssh" — see backends/README.md
+device  = "cuda"    # what the probe runs ON. "cuda" for any GPU box; single-GPU only, so no
+                    # "cuda:0". "cpu" is a smoke test — a well-formed Observation whose MFU is
+                    # meaningless — so ask for it deliberately. Delete this line to auto-detect
+                    # (cuda when present, else cpu with a warning); set it to fail loudly instead.
 
 [scan]
 text_field = "text"    # which dataset column to tokenize
