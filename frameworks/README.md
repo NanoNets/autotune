@@ -72,6 +72,34 @@ adapter actually applies — a declared knob must really take effect.
 - **Pure vs live split**, like frame/profiler: `knobs()` + `_resolve()` (defaults + token math) import
   and test on bare `python3`; `setup`/`step` lazily import torch/transformers/datasets.
 
+## Bring your own training script
+
+`hf.py` **reconstructs** a training loop from a spec (model id, dataset, `text_field`, `split`)
+plus its own defaults. For a standard fine-tune that is a fair stand-in. For anyone with a real
+training script — their own collator, fused optimizer, packing, dataloader — it is not: the probe
+still returns a well-formed Observation, but it measures **our** loop, not theirs.
+
+That quietly voids the premise in `backends/README.md` ("probe hardware = training hardware, so
+measurements transfer by definition"). Same hardware, different code, no transfer. The sharpest
+case is the first limitation below: this adapter's loader is pre-tokenized and in-memory, so
+`data_wait` is **structurally** zero. No probe against it can observe input-boundedness, and a loop
+that trusts it will pick a `micro_batch` that is wrong for anyone whose real pipeline is input-bound.
+
+So there is a third path alongside the fixture and the reconstructed loop: **profile the user's own
+script.** The profiler needs no changes for it. The interface is the four members above,
+`phase_times_us` accepts any annotation vocabulary rather than a fixed four, and
+`gpu_phase_coverage` reports how much GPU time the markers actually caught.
+
+What it costs: deciding where the markers go in unfamiliar code is a judgment call, so the agent
+reads the script, finds the iteration boundary, wraps forward / backward / optimizer / data fetch in
+`record_function`, and then **checks `gpu_phase_coverage` before trusting a single probe** — a low
+value means the markers missed most of the GPU time and the phase breakdown isn't describing the
+step.
+
+**Status:** the path is open and the interface is stable, but no BYO adapter ships here and the
+instrumentation step is unaided. Which runner produced a reading is recorded in
+`provenance.runner`, so a belief learned from `hf` is not silently reused for a custom runner.
+
 ## Limitations (deferred)
 
 - **Pre-tokenized in-memory loader** → the `dataloader` phase is ~0 (no real data-wait), so
