@@ -66,6 +66,11 @@ the `Belief` contract in `loop/contracts.md`.
 
 ## Dead levers & safety
 
+- [packing-leaks-across-documents-on-hybrid-models](packing-leaks-across-documents-on-hybrid-models.md)
+  — naive packing silently changes the model on a gated-delta hybrid (documents attend AND recur
+  across boundaries); position_id resets make it worse, not better. Prove isolation with a
+  logit-equivalence test before building it. The recurrence, not the attention mask, is the hard part.
+
 - [compile-unusable-on-hybrid-linear-attention](compile-unusable-on-hybrid-linear-attention.md) —
   `torch.compile` never reaches a timed step on a gated-delta-rule hybrid; shape count was ruled
   out explicitly (timed out at 128 widths AND at 4). Don't spend early probes on it there.

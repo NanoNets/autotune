@@ -314,3 +314,39 @@ needed `_flatten()` (committed).
   from a discarded, never-safety-proven probe. Second run in a row. It should read the kept config.
 - **A `frame`-level fix for the ceiling gap**: either measure the ceiling through the real
   dataloader path, or have `frame` report a margin-adjusted bound. Two champions died on this.
+
+### Addendum — 2026-09-21 (experiments 26-28 + a packing investigation)
+
+Three of the open hypotheses above are now **closed**, and the run's binding constraint has moved.
+
+- **`flash_attn` is NOT hard to install, and three runs recorded it as untestable.** The prebuilt
+  wheel `flash_attn-2.8.0.post2+cu12torch2.7cxx11abiTRUE-cp310` installs in **5 seconds**. Read
+  `torch.version.cuda` and `torch._C._GLIBCXX_USE_CXX11_ABI`, fetch the matching wheel, don't build
+  from source. With it: **FA2 is -1.0% vs sdpa** on the final config (inside noise), and `gap_count`
+  rose 5.6% — it *adds* launches for an unpad/repad that has nothing left to recover. Together with
+  eager at -1.7%, all three attention kernels sit within ~2% here. **CLOSED.**
+- **The champion's heavy tail is explained, and is not a defect.** Twice disconfirmed the
+  Triton-autotune-variant theory (`pad_multiple` 8→4 at ga=2: cv unchanged at 0.60; 8→32 at ga=1:
+  cv 1.340→1.287). The real cause is structural: at grad_accum=1 a step *is* one batch, so step
+  time tracks batch width, and `length_grouped` **sorts by length**, spanning ~64 to ~8300 tokens.
+  Corroborated by exp 26 — grouping OFF gives cv 0.550, because unsorted batches all pad to the max
+  of 16 random draws and are therefore more *uniform*. Grouping buys throughput by making widths
+  unequal; the variance is the mechanism working. **CLOSED.**
+- **Packing would have silently changed the model** — see
+  [[packing-leaks-across-documents-on-hybrid-models]]. Logit-equivalence tests against standalone
+  forwards, with a determinism control (0.0000), show a packed document reading its neighbour by
+  12.94 / 15.17 / 16.97 max|Δ| under naive packing, position_id resets, and explicit `cu_seq_lens`
+  respectively — against 0.2891 of shape-dependent numerical variation. **Position resets made it
+  worse.** The linear-attention half is the hard part: a gated-delta *recurrence* needs state reset
+  at boundaries, which no attention mask expresses. Both prior runs listed this as the top unbuilt
+  lever; it is not the free win it looked like. **Re-scoped, not closed.**
+
+**The binding constraint is now `effective_batch`, and it is the human's.** Peak memory on the
+champion is 15.735GB of 39.494 (worst case 16.805GB) — memory is no longer binding at all. The
+ceiling search terminates `capped: true`. `grad_accum` is 1, its floor. Every safe lever in
+`loop/throughput.md` has been probed on this stack: batch knobs are at the cap, kernels are
+installed and measured, compile is dead, tf32 is inert, recompute and chunked CE are kept,
+packing is blocked on correctness, and 8-bit optimizer states would buy nothing because memory is
+abundant. **Raising `effective_batch` is the only remaining direction, and it is a quality decision,
+not a knob** — at `effective_batch=32` the card has room for `micro_batch=32` at roughly 21GB by
+the flat-peak evidence, which would keep grad_accum=1 while doubling the work per launch.
