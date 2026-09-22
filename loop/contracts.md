@@ -61,11 +61,12 @@ Everything measured from running a Config. Raw and rich.
 
 | Field | Meaning |
 |---|---|
-| `status` | ok / oom / error |
-| `objective` | tokens/s + MFU (% of roofline) |
+| `status` | ok / oom / error / invalid (a physically impossible reading — never scored) |
+| `objective` | tokens/s + MFU (% of roofline), from clean-window totals |
 | `memory` | peak, headroom; on OOM: breakdown (what/how much overshot) |
 | `signals` | raw gpu/cpu util, comm, data-wait. **No derived labels** — the model interprets |
 | `provenance` | did the config apply? which kernels engaged vs silently fell back? `probe_kind`: `real` (throughput, real data) or `synthetic_ceiling` (memory only — NEVER scored for throughput) |
+| `population` | which rows the clean window timed (and over how many whole passes), and which fixed reference batch the trace describes |
 | `cost` | gpu-seconds, $ |
 | `reliability` | measured noise/variance, steps measured, steady-state reached? |
 | `context` | framework hints/warnings, log tail |
@@ -73,6 +74,49 @@ Everything measured from running a Config. Raw and rich.
 
 Invariant: raw, not pre-digested. The model reads and interprets; code does not label.
 Consumed by: Learn, the surrogate, Hypothesize.
+
+### Measurement axiom: one number, one population
+
+**A measured quantity may only be compared with, or divided by, another quantity measured on the
+same population of work under the same instrument.**
+
+A *population* is a specific set of rows, in specific batches, processed a specific number of
+times. An *instrument* is either the **clean window** (profiler off) or the **trace** (profiler on).
+
+1. **Two populations, two jobs.** The clean window measures *the run*: throughput, step time,
+   variance, MFU. The trace measures *the reference batch*: what a step looks like inside (phases,
+   kernels, launches, dtypes, busy time). Neither stands in for the other; a trace number
+   describes one batch, never the run's average.
+2. **No mixed ratios.** A ratio never takes its numerator from one population and its denominator
+   from another. GPU-active is the reference batch's busy time over *that same batch's*
+   profiler-off wall; MFU is the clean window's total FLOPs over its total time.
+3. **Rates come from totals.** Throughput is total work over total time across the clean window.
+   A median, or any single-step statistic, is never the denominator of a rate.
+4. **The population is fixed by rule, not by position.** The clean window covers whole passes over
+   the sample, starting at a pass boundary, so every config times exactly the same rows the same
+   number of times. The reference batch is a fixed set of rows chosen once by rule, so changing
+   `clean_steps`, warmup or loader order cannot change which batch is traced.
+5. **Recorded populations decide what is comparable.** Every Observation records its population.
+   Two probes' **throughput** compares when they timed the same rows (`sample_hash` matches,
+   whole passes) — different batches are fine, because re-batching the same rows is what a loader
+   knob does. Their **trace durations** (busy time, phase times, kernel times) compare only when
+   the reference batch matches (`batch_key`). **Counts and provenance** (kernel count, gap count,
+   which kernels ran, dtypes) compare across any batch: they are set by layers x micro-steps, not
+   by batch width.
+6. **An impossible value is a population error until proven otherwise.** A fraction above 1 or a
+   negative remainder (e.g. `wall - busy`) means two populations were mixed or the instrument
+   failed. The Observation is marked `invalid` and is not scored.
+7. **A belief is promoted only on evidence that satisfies this axiom.** Each comparison behind it
+   must be *same-rows* (clean window, whole passes), *same-reference-batch* (trace durations), or
+   *width-invariant* (counts and provenance), and every rate must come from totals. Anything else
+   is recorded in the run's `knowledge.md` entry as an observation, never as belief evidence, and
+   the belief's `evidence` names which basis it rests on.
+
+Why: every impossible reading in the smollm2 and qwen3.5 A100 runs broke this — one profiled
+batch's busy time over the median clean step (GPU-active 126-560%), mean tokens over median time
+(MFU up to 144%), and partial passes that let loader order decide which rows got timed. Under
+static padding the axiom holds by accident, because every batch is identical; dynamic padding and
+length grouping are what make it necessary.
 
 ---
 
@@ -83,7 +127,7 @@ One durable thing learned. A markdown file in `knowledge/`, one claim each.
 |---|---|
 | `claim` | the empirical statement, e.g. "shard_degree=2 fits micro_batch=4 on this profile" |
 | `context` | key for retrieval/transfer: `{arch_family, hardware_class, dataset_shape}` |
-| `evidence` | supporting observations, confidence, probe count |
+| `evidence` | supporting observations, confidence, probe count, and the **basis** each comparison rests on: `same-rows` / `same-reference-batch` / `width-invariant` (Measurement axiom, corollary 7) |
 | `type` | regime / ceiling / calibration / dead-lever / safety / invariant |
 | `links` | related beliefs |
 

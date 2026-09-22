@@ -9,7 +9,19 @@ all clean step times are kept (for the noise floor), and CPU utilization is samp
 same window (via psutil, lazily imported). Memory (peak / reserved / headroom) is read from the
 torch.cuda allocator. An OOM is CAUGHT and returned as a result (status="oom"), not a crash.
 Returns a `Capture`.
+
+Two populations, never mixed (the Measurement axiom, `loop/contracts.md`):
+- the CLEAN WINDOW measures the run. When the runner reports `steps_per_pass`, the window is
+  rounded up to whole passes over the sample and started at a pass boundary, so every config
+  times exactly the same rows the same number of times;
+- the REFERENCE BATCH is what the trace describes. When the runner offers `reference_step()`, it
+  is a fixed set of rows chosen by rule, not whichever batch the loader happened to be on. It is
+  run once profiler-OFF (its own clean wall, `reference_step_s`) and once profiler-ON (the trace),
+  so busy time is only ever divided by the wall of the same batch.
+Runners without these hooks (the torch fixture, synthetic ceiling trials) reuse one fixed batch,
+so `step()` already is the reference and nothing changes for them.
 """
+import math
 import os
 import tempfile
 import threading
@@ -27,7 +39,11 @@ class Capture:
     trace: object = None                              # Chrome-trace path (or dict); None on failure
     memory: dict = None                               # {peak_gb, reserved_gb, total_gb, headroom_gb}
     cpu: dict = None                                  # {mean, max, nproc} over the clean window
-    profiled_step_s: float = None                     # wall of the ONE profiled step (distorted)
+    step_tokens: list = field(default_factory=list)   # tokens per clean step, when the runner counts
+    clean_passes: float = None                        # clean window / steps_per_pass (None: unknown)
+    reference_step_s: float = None                    # wall of the reference batch, profiler OFF
+    profiled_step_s: float = None                     # wall of the same batch, profiler ON (distorted)
+    population: dict = None                           # runner.population(): which rows, which batch
     peak_flops: float = None                          # measured dense-GEMM peak (MFU denominator)
     peak_dtype: str = None                            # the dtype that peak was measured at
     peak_mem_bw_gb_s: float = None                    # measured achievable bandwidth (roofline)
@@ -242,10 +258,21 @@ def capture(runner, config, warmup=3, clean_steps=10, trace_path=None, peak_flop
     peak_bw = peak_mem_bw_gb_s or measure_peak_bandwidth_gb_s(device)
     peak_dtype = str(dtype).replace("torch.", "")
 
+    step_tokens, passes = [], None
     try:
         runner.setup(config)
+        reference = getattr(runner, "reference_step", None) or runner.step
+        count_tokens = getattr(runner, "last_step_tokens", None)
+        per_pass = getattr(runner, "steps_per_pass", None)
+        if per_pass:                                   # whole passes, so every config times the
+            clean_steps = max(1, math.ceil(clean_steps / per_pass)) * per_pass   # same rows
+            passes = clean_steps / per_pass
+
         for _ in range(warmup):                        # kernel/cache warmup, discarded
             runner.step()
+        reference()                                    # warm the reference batch's shapes too, or
+        if hasattr(runner, "start_pass"):              # its first run pays compile/autotune
+            runner.start_pass()                        # the window starts at a pass boundary
         _sync(device)
         if device == "cuda":
             torch.cuda.reset_peak_memory_stats()       # peak is measured over the timed window only
@@ -258,29 +285,41 @@ def capture(runner, config, warmup=3, clean_steps=10, trace_path=None, peak_flop
             runner.step()
             _sync(device)
             times.append(time.perf_counter() - t0)
+            if count_tokens:
+                step_tokens.append(count_tokens())
         cpu_busy = _tree_cpu_seconds() - cpu0          # exact over the window, any length
         window = time.perf_counter() - wall0
         _stop_sampler()
+        memory = _read_memory(device)                  # the window's peak, before the reference runs
 
-        activities = [ProfilerActivity.CPU]            # attribution, one profiled step
+        t0 = time.perf_counter()                       # the reference batch, profiler OFF: the
+        reference()                                    # denominator for everything the trace says
+        _sync(device)
+        reference_s = time.perf_counter() - t0
+
+        activities = [ProfilerActivity.CPU]            # attribution: the same batch, profiled
         if device == "cuda":
             activities.append(ProfilerActivity.CUDA)
         # Occupancy + device-props come from standard CUDA profiling (no flags). profile_memory /
         # with_flops were tried and dropped — their data isn't in the chrome-trace export.
         with profile(activities=activities) as prof:
-            t0 = time.perf_counter()                   # the profiled step's OWN wall: the clean
-            with record_function("step"):              # median can't stand in for it, and the
-                runner.step()                          # `step` annotation is host-dispatch only
+            t0 = time.perf_counter()                   # its profiled wall, kept only to expose the
+            with record_function("step"):              # profiler's overhead (/ reference_step_s);
+                reference()                            # `step` annotation is host-dispatch only
             _sync(device)
             profiled_s = time.perf_counter() - t0
         prof.export_chrome_trace(trace_path)
 
         cpu = _cpu_stats(cpu_samples) or {"mean": None, "max": None, "nproc": os.cpu_count()}
         cpu["cores_busy"] = round(cpu_busy / window, 3) if window > 0 else None
+        population = runner.population() if hasattr(runner, "population") else None
 
-        return Capture(status="ok", step_times_s=times, trace=trace_path, profiled_step_s=profiled_s,
+        return Capture(status="ok", step_times_s=times, trace=trace_path,
+                       step_tokens=step_tokens, clean_passes=passes,
+                       reference_step_s=reference_s, profiled_step_s=profiled_s,
+                       population=population,
                        peak_flops=peak, peak_dtype=peak_dtype, peak_mem_bw_gb_s=peak_bw,
-                       memory=_read_memory(device), cpu=cpu, device=device)
+                       memory=memory, cpu=cpu, device=device)
 
     except torch.cuda.OutOfMemoryError as e:           # OOM is a valid result — the memory ceiling
         _stop_sampler()
@@ -288,7 +327,8 @@ def capture(runner, config, warmup=3, clean_steps=10, trace_path=None, peak_flop
         torch.cuda.empty_cache()
         first = str(e).strip().splitlines()[0] if str(e).strip() else "CUDA out of memory"
         return Capture(status="oom", step_times_s=times, memory=mem,    # steps that DID run are
-                       cpu=_cpu_stats(cpu_samples), peak_flops=peak,    # evidence, not noise
+                       step_tokens=step_tokens, clean_passes=passes,    # evidence, not noise
+                       cpu=_cpu_stats(cpu_samples), peak_flops=peak,
                        peak_dtype=peak_dtype, peak_mem_bw_gb_s=peak_bw, device=device, error=first)
     except Exception as e:                             # any other failure, surfaced not swallowed
         _stop_sampler()

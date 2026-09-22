@@ -23,8 +23,18 @@ def test_phase_times():
         "forward": 100.0, "backward": 200.0, "optimizer": 50.0, "dataloader": 300.0}
 
 
-def test_gpu_busy_sums_kernels():
-    assert gpu_busy_us(TRACE) == 140.0
+def test_gpu_busy_sums_kernels_without_a_timeline():
+    assert gpu_busy_us(TRACE) == 140.0             # no ts -> plain sum is all there is
+
+
+def test_gpu_busy_is_the_union_of_kernel_intervals():
+    """Concurrent streams must not count twice, or busy time can exceed the step's wall."""
+    trace = {"traceEvents": [
+        {"cat": "kernel", "name": "k1", "ts": 0.0,   "dur": 80.0},    # [0, 80]
+        {"cat": "kernel", "name": "k2", "ts": 100.0, "dur": 40.0},    # [100, 140]
+        {"cat": "kernel", "name": "k3", "ts": 130.0, "dur": 30.0},    # [130, 160] overlaps k2
+    ]}
+    assert gpu_busy_us(trace) == 140.0             # 80 + 60, not the 150 a sum would give
 
 
 def test_kernels_ranked_top():

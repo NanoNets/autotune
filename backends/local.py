@@ -67,14 +67,6 @@ def run(config):
     params = getattr(runner, "params", 0)              # 0 if setup failed before params were set
     tokens = runner.tokens_per_step() if params else 0
     obs = diagnose(cap, params=params, tokens=tokens, gpu=config.get("gpu", "local"))
-    out = dataclasses.asdict(obs)
-    # The Observation's step_time_s is the MEDIAN, which is the right statistic for a stable
-    # workload and the wrong one for a right-skewed one: under length-grouped dynamic padding a
-    # few chunks are far wider than the rest, so median < mean and every rate computed from it is
-    # biased UP. Throughput is total work over total time, so carry the mean alongside rather
-    # than replacing the contract's field. Additive, backend-level, nothing downstream changes.
-    if cap.step_times_s:
-        n = len(cap.step_times_s)
-        out["step_time_mean_s"] = sum(cap.step_times_s) / n
-        out["clean_steps_measured"] = n
-    return out
+    # step_time_mean_s / clean_steps_measured used to be bolted on here. They are Observation
+    # fields now, next to the population the window timed (profiler/diagnostic.py).
+    return dataclasses.asdict(obs)

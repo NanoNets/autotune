@@ -34,11 +34,15 @@ MEMORY = {"peak_gb": 12.0, "reserved_gb": 14.0, "total_gb": 80.0, "headroom_gb":
 CPU = {"mean": 62.0, "max": 88.0, "nproc": 16}
 
 
+REF_WALL, PROFILED = 0.5e-3, 0.8e-3    # the reference batch: profiler off, then on
+
+
 def _cap(status="ok", step_times=None, trace=TRACE, memory=MEMORY, cpu=CPU, error=None, peak=PEAK,
-         device="cuda"):
+         ref=REF_WALL, profiled=PROFILED, step_tokens=None, device="cuda"):
     return SimpleNamespace(
         status=status, trace=trace, memory=memory, cpu=cpu, error=error, device=device,
-        peak_flops=peak, peak_dtype="bfloat16", profiled_step_s=None,
+        peak_flops=peak, peak_dtype="bfloat16", reference_step_s=ref, profiled_step_s=profiled,
+        step_tokens=step_tokens or [],
         step_times_s=STEP_TIMES if step_times is None else step_times)
 
 
@@ -73,9 +77,22 @@ def test_trace_fields_flow_through():
     assert o.phase_times_s["backward"] == 200e-6
 
 
-def test_mfu_uses_median_step_time():
-    o = _obs()
-    assert abs(o.mfu - mfu(training_flops(PARAMS, TOKENS), 1.0e-3, PEAK)) < 1e-12  # median = 1.0 ms
+def test_rates_come_from_clean_window_totals_not_the_median():
+    """Right-skewed steps: the median understates the time, so a median-based rate reads high."""
+    times, toks = [1.0e-3, 1.0e-3, 4.0e-3], [100, 100, 700]      # one wide step; median 1ms
+    o = diagnose(_cap(step_times=times, step_tokens=toks), params=PARAMS, tokens=TOKENS, gpu=GPU)
+    assert o.step_time_s == 1.0e-3                               # median kept, as a statistic
+    assert abs(o.step_time_mean_s - 2.0e-3) < 1e-15
+    assert o.tokens_per_step == 300.0                            # mean over the clean steps
+    assert abs(o.tokens_per_s - 900 / 6.0e-3) < 1e-6             # total tokens / total time
+    assert abs(o.mfu - mfu(training_flops(PARAMS, 300.0), 2.0e-3, PEAK)) < 1e-12
+    assert o.clean_steps_measured == 3
+
+
+def test_caller_tokens_are_the_fallback_when_steps_are_uncounted():
+    o = _obs()                                                   # no per-step counts
+    assert o.tokens_per_step == TOKENS
+    assert abs(o.mfu - mfu(training_flops(PARAMS, TOKENS), 1.0e-3, PEAK)) < 1e-12   # mean = 1ms
 
 
 def test_noise_floor():
@@ -98,12 +115,32 @@ def test_cpu_util_flows_through():
     assert o.nproc == 16
 
 
-def test_fractions_use_wall_clock():
+def test_trace_fractions_stay_inside_the_reference_batch():
+    """Busy time is divided by the SAME batch's profiler-off wall — never the clean median."""
     o = _obs()
-    wall = 1.0e-3                                       # median of STEP_TIMES
-    assert abs(o.gpu_active_frac - 120e-6 / wall) < 1e-12
-    assert abs(o.data_wait_frac - 300e-6 / wall) < 1e-12
-    assert abs(o.gap_s - (wall - 120e-6)) < 1e-12
+    assert abs(o.gpu_active_frac - 120e-6 / REF_WALL) < 1e-12
+    assert abs(o.gap_s - (REF_WALL - 120e-6)) < 1e-12
+    assert abs(o.data_wait_frac - 300e-6 / PROFILED) < 1e-12   # host annotation: its own wall
+    assert o.reference_step_s == REF_WALL and o.profiled_step_s == PROFILED
+
+
+def test_no_reference_wall_means_no_trace_fractions():
+    o = diagnose(_cap(ref=None, profiled=None), params=PARAMS, tokens=TOKENS, gpu=GPU)
+    assert o.gpu_active_frac is None and o.gap_s is None and o.data_wait_frac is None
+    assert o.gpu_busy_s == 120e-6                       # the trace itself still reports
+
+
+def test_an_impossible_reading_is_invalid_not_scored():
+    """smollm2 exp 28: one wide batch's busy over a narrow median read 560%. Never score it."""
+    o = diagnose(_cap(ref=40e-6), params=PARAMS, tokens=TOKENS, gpu=GPU)   # 120us busy / 40us
+    assert o.status == "invalid"
+    assert "gpu_active_frac" in o.error and o.summary.startswith("INVALID")
+    assert abs(o.gpu_active_frac - 3.0) < 1e-12         # the value is kept, so it can be read
+
+
+def test_jitter_inside_tolerance_is_not_invalid():
+    o = diagnose(_cap(ref=118e-6), params=PARAMS, tokens=TOKENS, gpu=GPU)  # 120/118 = 1.017
+    assert o.status == "ok"
 
 
 def test_coverage_and_idle_shape():
@@ -153,9 +190,8 @@ def test_oom_keeps_the_clean_steps_that_ran():
 
 
 def test_negative_gap_is_null_not_zero():
-    """busy comes from the profiled step, wall from the clean ones — they can disagree."""
-    slow = {**TRACE, "traceEvents": [{"cat": "kernel", "name": "k", "dur": 5_000_000.0}]}  # 5s busy
-    o = diagnose(_cap(trace=slow), params=PARAMS, tokens=TOKENS, gpu=GPU)   # vs a 1ms wall
+    """busy is read from the profiled run, wall from the unprofiled one — they can disagree."""
+    o = diagnose(_cap(ref=118e-6), params=PARAMS, tokens=TOKENS, gpu=GPU)  # 120us busy, 118us wall
     assert o.gap_s is None and o.gap_frac is None       # disagreement, not "zero idle"
     assert "idle n/a" in o.summary
 

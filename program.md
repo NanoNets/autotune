@@ -28,6 +28,13 @@ Apply these for the whole session, not just one step below.
   discard the change, move on.
 - **Crashes:** IF easy fix (typo, missing import, off-by-one) → fix and re-run. IF the idea itself
   is fundamentally broken → don't try to rescue it — log `crash` as the status and move on.
+- **One number, one population:** compare or divide two numbers only when they were measured on
+  the same work by the same instrument (Measurement axiom, `loop/contracts.md`). Throughput
+  compares across probes that timed the same rows (`population.sample_hash`, whole
+  `clean_passes`). Trace durations compare only on the same reference batch
+  (`population.reference.batch_key`). Kernel/gap counts and provenance compare across any batch.
+  An Observation with `status: invalid` is a physically impossible reading: never score it,
+  never explain it away. Stop and find the mixed population or the broken instrument first.
 
 > All else being equal, simpler is better. A small improvement that adds ugly complexity is not
 > worth it. Conversely, removing something and getting equal or better results is a great

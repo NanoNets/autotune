@@ -94,6 +94,23 @@ For each match:
 Only then write beliefs for what's genuinely new. A belief that merely restates an existing one is a
 duplicate — strengthen the original instead.
 
+**Gate every promotion, new beliefs and re-confirmations alike, on the evidence basis**
+(Measurement axiom, `loop/contracts.md` corollary 7). Each comparison behind the claim must be one
+of:
+
+| Basis | Valid for | Check in the Observations |
+|---|---|---|
+| `same-rows` | throughput, step time | `population.sample_hash` matches and `clean_passes` is whole |
+| `same-reference-batch` | trace durations: busy time, phase times, kernel times | `population.reference.batch_key` matches |
+| `width-invariant` | counts and provenance: kernel/gap count, which kernels ran, dtypes | any batch |
+
+Rates must come from totals (mean tokens over mean step time), never from a median. A comparison
+that meets none of these stays in the run's `knowledge.md` entry as an observation. It does not
+become belief evidence and does not bump `probes`. Write the basis into the belief's `evidence`
+line. If a run changed its measurement method partway through, every claim measured under the old
+method is re-probed or flagged before it is promoted: a result reached with a biased instrument is
+not a result.
+
 This is the difference between memory and a log. `knowledge.md` accumulates and is never edited;
 `knowledge/` is *revised* — that's what makes an opinion worth holding.
 

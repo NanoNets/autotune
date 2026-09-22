@@ -47,7 +47,9 @@ _DEFAULTS = {
     "pad_multiple": 64,                # bucket dynamic lengths so torch.compile sees few shapes
     "length_grouped": False,           # batch similar-length rows together, so pad-to-longest wastes
                                        # less; only meaningful with padding="longest"
-    "sample": 256,                     # rows pulled into the in-memory loader
+    "sample": 256,                     # rows pulled into the in-memory loader; trimmed DOWN to a
+                                       # multiple of effective_batch so a pass is whole steps
+    "loader_seed": 0,                  # seeds every shuffle, so a config sees the same order twice
     "name": None,                      # dataset config/subset
     "split": "train",
     "text_field": "text",
@@ -93,6 +95,39 @@ def _usable_texts(rows, text_field, sample):
     return texts
 
 
+def _whole_steps(texts, effective_batch):
+    """Trim `texts` down to a multiple of `effective_batch`, keeping file order.
+
+    A pass over the sample must be a whole number of optimizer steps, or the pass boundary falls
+    mid-step and no clean window can cover every row the same number of times. Trimming from the
+    END keeps the kept rows identical across configs: every config drops the same tail.
+    """
+    return texts[:len(texts) - len(texts) % effective_batch]
+
+
+def _reference_indices(lengths, n):
+    """The `n` rows nearest the median length, ordered by length — the fixed reference batch.
+
+    Chosen by RULE from the sample, never by where the loader happens to be, so changing
+    `clean_steps`, warmup or loader order cannot change which rows the trace describes; and it is
+    the same `n` rows for every `micro_batch` that divides `n`, only split differently. Ties break
+    on row index, so it is deterministic.
+    """
+    order = sorted(range(len(lengths)), key=lambda i: (lengths[i], i))
+    start = max(0, min(len(order) // 2 - n // 2, len(order) - n))
+    return order[start:start + n]
+
+
+def _rows_hash(rows):
+    """Short content hash of a list of token-id sequences: identifies a population of rows."""
+    import hashlib
+    h = hashlib.sha1()
+    for r in rows:
+        h.update(len(r).to_bytes(4, "little"))
+        h.update(b"".join(int(t).to_bytes(4, "little", signed=True) for t in r))
+    return h.hexdigest()[:16]
+
+
 def _length_grouped(rows, micro_batch, seed=0):
     """Reorder rows so each consecutive `micro_batch` chunk holds similar lengths.
 
@@ -123,8 +158,9 @@ def _resolve(config):
         raise ValueError(                              # never changes it (it's the quality boundary)
             f"effective_batch ({eb}) must be divisible by micro_batch ({mb})")
     c["grad_accum"] = eb // mb                          # derived to hold the human's effective_batch
-    if not synthetic and c["sample"] < mb:              # synthetic builds its batch, never loads rows
-        raise ValueError(f"sample ({c['sample']}) < micro_batch ({mb}): loader would be empty")
+    if not synthetic and c["sample"] < eb:              # synthetic builds its batch, never loads rows
+        raise ValueError(f"sample ({c['sample']}) < effective_batch ({eb}): "   # a pass must hold
+                         "no whole optimizer step fits in the sample")          # one whole step
     c["tokens_per_step"] = eb * c["seq_len"]            # = micro_batch * grad_accum * seq_len
     return c
 
@@ -165,6 +201,7 @@ class HFRunner:
         self.opt = torch.optim.AdamW(
             self.model.parameters(), lr=self.cfg["lr"],
             **({"fused": True} if self.cfg["fused_optimizer"] else {}))
+        self._reference = self._population = self.steps_per_pass = None
         if self.cfg.get("data") == "synthetic":
             self._loader = self._it = None
             self._batch = self._synthetic_batch(tok)    # one worst-case batch, reused every step
@@ -179,11 +216,17 @@ class HFRunner:
 
         c = self.cfg
         rows = load_dataset(c["dataset"], c["name"], split=c["split"], streaming=True)
-        texts = _usable_texts(rows, c["text_field"], c["sample"])
-        if len(texts) < c["micro_batch"]:                  # else drop_last empties the loader ->
-            raise ValueError(                              # StopIteration out of step()
+        texts = _whole_steps(_usable_texts(rows, c["text_field"], c["sample"]),
+                             c["effective_batch"])
+        if len(texts) < c["effective_batch"]:              # a pass must hold at least one step, or
+            raise ValueError(                              # drop_last empties the loader
                 f"only {len(texts)} usable rows from {c['dataset']} (split={c['split']}, "
-                f"field={c['text_field']!r}); need at least micro_batch={c['micro_batch']}")
+                f"field={c['text_field']!r}); need at least effective_batch={c['effective_batch']}")
+        # Every row is used exactly once per pass: micro_batch divides effective_batch, which
+        # divides the trimmed sample, so drop_last drops nothing and a pass is whole steps.
+        self.steps_per_pass = len(texts) // c["effective_batch"]
+        seeded = torch.Generator().manual_seed(c["loader_seed"])   # same order, run to run
+        mb = c["micro_batch"]
         if c["padding"] == "longest":
             # Pad each batch to its OWN longest row instead of to seq_len. Identical arithmetic --
             # pad positions are masked out of attention and set to -100 in labels, so they
@@ -191,24 +234,60 @@ class HFRunner:
             # them. seq_len still caps via truncation, so max_len is respected, not changed.
             enc = tok(texts, truncation=True, max_length=c["seq_len"])
             rows_ = [torch.tensor(i) for i in enc["input_ids"]]
+            ref = _reference_indices([r.numel() for r in rows_], c["effective_batch"])
+            self._set_population(enc["input_ids"], ref, [
+                self._pad_batch([rows_[i] for i in ref[j:j + mb]], tok.pad_token_id)
+                for j in range(0, len(ref), mb)])
             if c["length_grouped"]:
                 # Sort by length so each batch's rows are near-equal and pad-to-longest wastes
                 # little. Batch ORDER is still shuffled, so the epoch is not length-ordered.
-                rows_ = _length_grouped(rows_, c["micro_batch"])
+                rows_ = _length_grouped(rows_, mb, seed=c["loader_seed"])
                 return torch.utils.data.DataLoader(
-                    rows_, batch_size=c["micro_batch"], shuffle=False, drop_last=True,
+                    rows_, batch_size=mb, shuffle=False, drop_last=True,
                     collate_fn=lambda b: self._pad_batch(b, tok.pad_token_id))
             return torch.utils.data.DataLoader(
-                rows_, batch_size=c["micro_batch"], shuffle=True, drop_last=True,
+                rows_, batch_size=mb, shuffle=True, drop_last=True, generator=seeded,
                 collate_fn=lambda b: self._pad_batch(b, tok.pad_token_id))
 
         enc = tok(texts, truncation=True, max_length=c["seq_len"], padding="max_length")
         input_ids = torch.tensor(enc["input_ids"])
         attention = torch.tensor(enc["attention_mask"])
         labels = input_ids.masked_fill(attention == 0, -100)   # don't train on padding
+        real = [[t for t, m in zip(ids, mask) if m]              # by mask, not by slicing: some
+                for ids, mask in zip(enc["input_ids"], enc["attention_mask"])]   # tokenizers pad left
+        ref = _reference_indices([len(r) for r in real], c["effective_batch"])
+        self._set_population(real, ref, [
+            (input_ids[ref[j:j + mb]], attention[ref[j:j + mb]], labels[ref[j:j + mb]])
+            for j in range(0, len(ref), mb)])
         dset = torch.utils.data.TensorDataset(input_ids, attention, labels)
-        return torch.utils.data.DataLoader(dset, batch_size=c["micro_batch"],
-                                           shuffle=True, drop_last=True)
+        return torch.utils.data.DataLoader(dset, batch_size=mb, shuffle=True, drop_last=True,
+                                           generator=seeded)
+
+    def _set_population(self, real_rows, ref, ref_batches):
+        """Record which rows the clean window covers and which batch the trace will describe.
+
+        real_rows: every sample row's token ids, unpadded, in file order. ref: the reference row
+        indices. ref_batches: those rows as this config batches them (micro_batch, padding,
+        pad_multiple) — the reference differs across configs only in how it is split and padded,
+        and `batch_key` changes exactly when that does.
+        """
+        import hashlib
+        self._reference = ref_batches
+        shapes = [list(b[0].shape) for b in ref_batches]
+        rows_hash = _rows_hash([real_rows[i] for i in ref])
+        self._population = {
+            "sample_rows": len(real_rows),
+            "sample_hash": _rows_hash(real_rows),       # same rows in the clean window?
+            "steps_per_pass": self.steps_per_pass,
+            "loader_seed": self.cfg["loader_seed"],
+            "reference": {
+                "row_ids": list(ref),
+                "rows_hash": rows_hash,                 # same rows in the trace?
+                "real_tokens": sum(len(real_rows[i]) for i in ref),
+                "batch_shapes": shapes,
+                "batch_key": hashlib.sha1(f"{rows_hash}{shapes}".encode()).hexdigest()[:16],
+            },
+        }
 
     def _pad_batch(self, rows, pad_id):
         """Pad a batch to its longest row, rounded up to `pad_multiple`.
@@ -253,16 +332,47 @@ class HFRunner:
             self._it = iter(self._loader)
             return next(self._it)
 
+    def start_pass(self):
+        """Restart the loader at a pass boundary, so a clean window of whole passes covers every
+        row the same number of times whatever warmup consumed. No-op for synthetic data."""
+        if self._loader is not None:
+            self._it = iter(self._loader)
+
+    def population(self):
+        """Which rows this runner's clean window covers and which batch its trace describes
+        (see `_set_population`). None for synthetic data: one fixed batch, nothing to identify."""
+        return self._population
+
+    def last_step_tokens(self):
+        """Tokens the most recent `step()` pushed through the model (padded width x rows)."""
+        return self._tokens
+
     def step(self):
-        c = self.cfg
         self._tokens = 0                                   # measured, not assumed (see tokens_per_step)
         self._steps = getattr(self, "_steps", 0) + 1
+        self._train_step(self._next, count=True)
+
+    def reference_step(self):
+        """One full training step on the fixed reference batch — what the profiler traces.
+
+        The same forward/backward/optimizer as `step()`, fed the rows `_reference_indices` chose
+        instead of the loader's next ones, and kept out of the token counts, which describe the
+        clean window only. Synthetic data has one fixed batch already, so it is just `step()`.
+        """
+        if self._reference is None:
+            return self.step()
+        batches = iter(self._reference)
+        self._train_step(lambda: next(batches), count=False)
+
+    def _train_step(self, next_batch, count):
+        c = self.cfg
         self.opt.zero_grad(set_to_none=True)
         for _ in range(c["grad_accum"]):
             with self._rf("dataloader"):
-                input_ids, attention, labels = self._next()
-            self._tokens += input_ids.numel()
-            self._tokens_total = getattr(self, "_tokens_total", 0) + input_ids.numel()
+                input_ids, attention, labels = next_batch()
+            if count:
+                self._tokens += input_ids.numel()
+                self._tokens_total = getattr(self, "_tokens_total", 0) + input_ids.numel()
             input_ids = input_ids.to(self.device)
             attention = attention.to(self.device)
             labels = labels.to(self.device)
@@ -319,7 +429,7 @@ class HFRunner:
     def teardown(self):
         """Free this trial's weights/optimizer/data, so a ceiling search's next trial starts on a
         clean card. Without it each trial measures the previous trial's leftovers."""
-        self.model = self.opt = self._loader = self._it = self._batch = None
+        self.model = self.opt = self._loader = self._it = self._batch = self._reference = None
 
     def tokens_per_step(self):
         """Tokens actually pushed through the model per optimizer step.
