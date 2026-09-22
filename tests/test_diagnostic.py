@@ -34,15 +34,36 @@ MEMORY = {"peak_gb": 12.0, "reserved_gb": 14.0, "total_gb": 80.0, "headroom_gb":
 CPU = {"mean": 62.0, "max": 88.0, "nproc": 16}
 
 
-def _cap(status="ok", step_times=None, trace=TRACE, memory=MEMORY, cpu=CPU, error=None, peak=PEAK):
+def _cap(status="ok", step_times=None, trace=TRACE, memory=MEMORY, cpu=CPU, error=None, peak=PEAK,
+         device="cuda"):
     return SimpleNamespace(
-        status=status, trace=trace, memory=memory, cpu=cpu, error=error,
+        status=status, trace=trace, memory=memory, cpu=cpu, error=error, device=device,
         peak_flops=peak, peak_dtype="bfloat16", profiled_step_s=None,
         step_times_s=STEP_TIMES if step_times is None else step_times)
 
 
 def _obs():
     return diagnose(_cap(), params=PARAMS, tokens=TOKENS, gpu=GPU)
+
+
+def test_device_type_flows_through():
+    assert _obs().device_type == "cuda"                 # the normal case, unremarkable
+    o = diagnose(_cap(status="error", error="boom"), params=PARAMS, tokens=TOKENS, gpu=GPU)
+    assert o.device_type == "cuda"                      # kept on the failure paths too
+
+
+def test_a_cpu_probe_is_marked_as_one():
+    # a cpu probe returns a well-formed Observation; without this it is indistinguishable from a
+    # real GPU probe in results.tsv, and nothing downstream can tell the MFU is meaningless
+    o = diagnose(_cap(device="cpu"), params=PARAMS, tokens=TOKENS, gpu=GPU)
+    assert o.device_type == "cpu"
+    assert o.summary.startswith("[CPU — not a GPU probe]")
+    assert not _obs().summary.startswith("[")           # the cuda summary is unchanged
+
+    # ...and on the paths that never reach a timing, where it is just as misleading
+    bad = diagnose(_cap(device="cpu", status="error", error="boom"),
+                   params=PARAMS, tokens=TOKENS, gpu=GPU)
+    assert bad.summary.startswith("[CPU — not a GPU probe]") and "boom" in bad.summary
 
 
 def test_trace_fields_flow_through():

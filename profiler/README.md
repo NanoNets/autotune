@@ -46,7 +46,7 @@ The peak is measured, never read from a table: tables can't tell an A10 from an 
 sparse numbers, and fail on hardware they've never heard of. Measuring supports any chip and prices
 in real clocks and power caps.
 
-## The Observation (40 fields)
+## The Observation (41 fields)
 
 A **flat JSON object** — one level deep, except four container fields (`phase_times_s`,
 `provenance`, `device`, `top_kernels`). `python -m profiler` prints the one-line `summary`, then
@@ -92,9 +92,10 @@ so "unknown" can't be mistaken for "measured zero".
 | 35 | `achieved_occupancy_pct` | runtime-weighted; the "why is compute slow" signal | trace has no occupancy args (CPU / no kernels) |
 | 36 | `limiting_factor` | what caps occupancy (`REGS` / shared mem / warps) | ditto |
 | 37 | `device` | real hw from the trace: `{name, mem_gb, compute_capability, num_sms}` | `{}` on a CPU trace |
-| 38 | `trace_path` | raw Chrome trace on disk, for drill-down | no trace exported (e.g. OOM before the profiled step) |
-| 39 | `error` | failure cause, first line | `status == "ok"` |
-| 40 | `summary` | the one-line human/agent digest | never |
+| 38 | `device_type` | what it RAN on (`cuda` / `cpu` / `mps`). A `cpu` probe is a smoke test: MFU and every GPU signal are meaningless, so never rank it against a `cuda` probe or learn a belief from it | capture never reached a device |
+| 39 | `trace_path` | raw Chrome trace on disk, for drill-down | no trace exported (e.g. OOM before the profiled step) |
+| 40 | `error` | failure cause, first line | `status == "ok"` |
+| 41 | `summary` | the one-line human/agent digest (prefixed `[CPU — not a GPU probe]` when `device_type` isn't `cuda`) | never |
 
 **Two steps, two sources.** `step_time_s` is the median of the clean steps (profiler **off**);
 everything read from the trace — `gpu_busy_s`, the phase maps, gaps, occupancy — comes from the one
