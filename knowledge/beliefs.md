@@ -6,6 +6,15 @@ the `Belief` contract in `loop/contracts.md`.
 
 ## Regime — what kind of problem this is
 
+- [dispatch-count-bounds-small-real-batches](dispatch-count-bounds-small-real-batches.md) — when
+  real tokens/step is small the wall is the NUMBER of kernel launches, not GPU work: gaps track
+  `grad_accum`, wall tracks gaps, and levers that only cut GPU time return nothing. Tell:
+  `cpu_cores_busy` ~1.00 with the GPU half idle.
+- [linear-attention-kernel-library-is-the-lever](linear-attention-kernel-library-is-the-lever.md) —
+  on a hybrid linear-attention model `attn_implementation` reaches a quarter of the layers and is
+  near-dead; the gated-delta-rule kernel library is where the value is, and a fresh box silently
+  runs the reference PyTorch fallback.
+
 - [static-padding-is-usually-the-bottleneck](static-padding-is-usually-the-bottleneck.md) — when
   `max_len` sits far above the data's real lengths, padding is the dominant cost and fixing it at the
   **loader** outweighs every kernel lever combined. Check p50/p99 vs `max_len` before any kernel work.
@@ -17,6 +26,15 @@ the `Belief` contract in `loop/contracts.md`.
   gone it can be the majority of the step. Read `gpu_phase_times_s`, then `AdamW(fused=True)`.
 
 ## Ceiling — what bounds the memory
+
+- [synthetic-ceiling-underestimates-real-peak](synthetic-ceiling-underestimates-real-peak.md) — the
+  synthetic ceiling is necessary but NOT sufficient: real runs peak ~3.5GB+ above it at matched
+  shapes, so a config near the ceiling can pass the search and OOM in training. Prove any candidate
+  above ~0.65 `card_frac` with one `padding=max_length` probe.
+- [chunked-ce-makes-memory-batch-independent](chunked-ce-makes-memory-batch-independent.md) — at
+  large vocab, slicing CE over the token axis with a checkpoint per slice removes the only
+  activation term that scales with batch; peak goes flat in `micro_batch` and the ceiling stops
+  being memory-bound.
 
 - [ce-dominates-activation-memory-large-vocab](ce-dominates-activation-memory-large-vocab.md) — on a
   small model with a **large** vocab, the logits/cross-entropy term (~70%), not attention, dominates
@@ -47,6 +65,10 @@ the `Belief` contract in `loop/contracts.md`.
   grouping makes them so. MFU > 100% is the tell. Report the mean; more steps does not fix it.
 
 ## Dead levers & safety
+
+- [compile-unusable-on-hybrid-linear-attention](compile-unusable-on-hybrid-linear-attention.md) —
+  `torch.compile` never reaches a timed step on a gated-delta-rule hybrid; shape count was ruled
+  out explicitly (timed out at 128 widths AND at 4). Don't spend early probes on it there.
 
 - [tf32-inert-under-bf16](tf32-inert-under-bf16.md) — no effect on a pure-bf16 graph; there is no fp32
   matmul to accelerate. Don't spend a probe unless the trace shows fp32 GEMMs.

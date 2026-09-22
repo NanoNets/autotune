@@ -10,12 +10,26 @@ context:
   dataset_shape: short rows under dynamic padding — i.e. downstream of
     [[static-padding-is-usually-the-bottleneck]]
 evidence:
+  # 2026-09-21: +1 run, +1 architecture — see the note below for the mechanism correction
   probes: 4 (smollm2_1.7b_a100_wikitext experiments 10, 13, 15, 36) + the gpu_phase_times_s
     decomposition that predicted it
   confidence: high — diagnosed from the trace before probing, then measured twice at two samples
 links: [[static-padding-is-usually-the-bottleneck]],
   [[micro-batch-interacts-with-dynamic-padding]]
 ---
+
+> **2026-09-21 (qwen3.5_2b_a100_wikitext) — confirmed on a second architecture, with the stated
+> mechanism shown to be INCOMPLETE.** `fused_optimizer` was worth **+8.1%** on the final config
+> (turning it off cost 7.5%, well outside a ±3% sem). Attribution was exact: optimizer GPU time
+> 0.0223 -> 0.0622s and `gap_count` 12,883 -> 13,517, together accounting for the whole step-time
+> delta.
+>
+> **The correction:** I predicted a ceiling of ~5% from the optimizer's 4.9% share of GPU phase time,
+> and measured 8.1%. Fused AdamW is not only less GPU *work*, it is **fewer launches** — the
+> `multi_tensor_apply` chain re-issues per parameter group. This belief's "cost is per-PARAMETER"
+> is right about the cost but names only half of it: per-parameter *launch count* is the other half,
+> and on a launch-bound step ([[dispatch-count-bounds-small-real-batches]]) a lever's share of GPU
+> time systematically UNDERSTATES a kernel-count lever.
 
 Every lever in `loop/throughput.md` that touches the *model* scales with tokens. The optimizer does
 not: AdamW touches each parameter once per step whatever the batch contains. Fix the padding problem

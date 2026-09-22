@@ -33,6 +33,15 @@ _DEFAULTS = {
                                        # "fused optimizer" under Kernels). Matters most when the
                                        # optimizer is a large share of the step: its cost is per
                                        # PARAMETER, so it does not shrink with the batch.
+    "chunked_ce": 0,                   # 0 = off (the model computes its own loss). N > 0 = compute
+                                       # cross-entropy in N chunks over the token axis, each chunk
+                                       # checkpointed so its [chunk, vocab] logits are freed after
+                                       # the forward and recomputed in the backward. SAME loss --
+                                       # a sum over the same terms, in the same order, divided by
+                                       # the same count -- so it is a memory/kernel lever, not a
+                                       # model change (loop/throughput.md lists "chunked
+                                       # cross-entropy" under Kernels). Pays only when
+                                       # vocab x seq is large enough for the logits to dominate.
     "padding": "max_length",           # "max_length" (every batch seq_len) | "longest" (pad to the
                                        # batch's own longest, rounded up to pad_multiple)
     "pad_multiple": 64,                # bucket dynamic lengths so torch.compile sees few shapes
@@ -63,6 +72,7 @@ def knobs():
         "fused_optimizer":        {"type": "bool"},   # AdamW(fused=True); CUDA + float params only
         "padding":                {"type": "choice", "options": ["max_length", "longest"]},
         "length_grouped":         {"type": "bool"},   # pairs with padding="longest"
+        "chunked_ce":             {"type": "int",    "min": 0},   # 0 = off; N = chunks
     }
 
 
@@ -257,12 +267,54 @@ class HFRunner:
             attention = attention.to(self.device)
             labels = labels.to(self.device)
             with self._rf("forward"):
-                loss = self.model(input_ids=input_ids, attention_mask=attention,
-                                  labels=labels).loss / c["grad_accum"]
+                if c["chunked_ce"]:
+                    loss = self._chunked_loss(input_ids, attention, labels, c["chunked_ce"])
+                else:
+                    loss = self.model(input_ids=input_ids, attention_mask=attention,
+                                      labels=labels).loss
+                loss = loss / c["grad_accum"]
             with self._rf("backward"):
                 loss.backward()
         with self._rf("optimizer"):
             self.opt.step()
+
+    def _chunked_loss(self, input_ids, attention, labels, chunks):
+        """Causal-LM cross-entropy computed in `chunks` slices of the token axis.
+
+        The full-logits path materializes `[batch, seq, vocab]` twice over -- once in bf16 from the
+        lm_head and again as the fp32 copy cross_entropy upcasts to. At vocab 248320 that is the
+        single largest activation in the step and it is what caps the OOM ceiling, so slicing it is
+        the lever. Each slice runs under `checkpoint`, so its logits are freed once the slice's loss
+        is computed and rebuilt during the backward: peak logits memory becomes one chunk's worth
+        instead of the whole batch's.
+
+        Arithmetically identical to the unchunked loss, which is why it is a speed lever and not a
+        model change: the same shift, the same ignore_index mask, a sum of the same per-token terms
+        divided by the same token count. Only the fp32 summation ORDER differs, which is the same
+        class of reassociation any fused kernel performs.
+        """
+        import torch
+        from torch.utils.checkpoint import checkpoint
+        hidden = self.model.model(input_ids=input_ids,
+                                  attention_mask=attention).last_hidden_state
+        h = hidden[:, :-1, :].reshape(-1, hidden.size(-1))      # predict t+1 from t
+        y = labels[:, 1:].reshape(-1)
+        keep = y != -100                                        # drop padding before chunking, so
+        h, y = h[keep], y[keep]                                 # chunks are equal in REAL tokens
+        n = y.numel()
+        if n == 0:                                              # an all-padding batch: keep the
+            return hidden.sum() * 0.0                           # graph connected, contribute zero
+        head = self.model.lm_head
+        size = -(-n // chunks)                                  # ceil, so exactly <= `chunks` slices
+
+        def slice_loss(hs, ys):
+            return torch.nn.functional.cross_entropy(head(hs).float(), ys, reduction="sum")
+
+        total = None
+        for i in range(0, n, size):
+            part = checkpoint(slice_loss, h[i:i + size], y[i:i + size], use_reentrant=False)
+            total = part if total is None else total + part
+        return total / n                                        # mean over real tokens, as HF does
 
     def teardown(self):
         """Free this trial's weights/optimizer/data, so a ceiling search's next trial starts on a

@@ -7,6 +7,7 @@ context:
   hardware_class: any
   dataset_shape: p50 far below max_len (A10 run p50 10 vs 2048; A100 run p50 9 vs 1024)
 evidence:
+  # 2026-09-21: third dataset/model/card. Direction holds; magnitude is regime-dependent
   probes: 7 across 2 runs, 2 models, 2 cards (test_a10G experiments 9/15/17/18/20;
     smollm2_1.7b_a100_wikitext experiments 2 and 38)
   confidence: high on DIRECTION — now reproduced on a second architecture (Llama MHA 1.7B,
@@ -16,6 +17,20 @@ evidence:
 links: [[padding-regime-flips-attention-verdict]], [[micro-batch-interacts-with-dynamic-padding]],
   [[probe-sample-must-match-length-distribution]], [[median-step-time-overstates-skewed-throughput]]
 ---
+
+> **2026-09-21 (qwen3.5_2b_a100_wikitext) — third independent confirmation, with a bound on the
+> magnitude.** p50 9 tokens against `max_len` 1024 (~99% pad), and the padding levers were again the
+> largest single jump of the run (5.37x from the baseline). But isolated on the *final* config the
+> lever was worth **3.58x**, and on an intermediate config only **2.01x**, against the prior run's
+> 6.26x on a dense model.
+>
+> **The magnitude is capped by whatever else bounds the step.** Removing pad tokens removes GPU
+> *work*; if the step is launch-bound, that work was partly free
+> ([[dispatch-count-bounds-small-real-batches]]). The tell is stark here: under static padding this
+> model runs at MFU 49% and GPU-active 100% — it is *efficient* per token and merely computes 6.8x
+> too many of them. So the isolated value of the padding fix RISES as the dispatch wall lifts
+> (2.01x -> 3.58x as grad_accum went 4 -> 1). Check p50/p99 against `max_len` first, as the belief
+> says — but expect the payoff to scale with how compute-bound you already are.
 
 **2026-09-21 (smollm2_1.7b_a100_wikitext).** Re-confirmed, and for the first time **isolated on the
 shipped config** rather than inferred from a baseline-vs-winner gap: flipping only `padding`

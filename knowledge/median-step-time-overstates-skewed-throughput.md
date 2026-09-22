@@ -7,6 +7,7 @@ context:
   hardware_class: any
   dataset_shape: variable-length rows under padding="longest" with length_grouped=true
 evidence:
+  # 2026-09-21: third sighting across two runs — treat as a standing repo defect
   probes: 8 (smollm2_1.7b_a100_wikitext experiments 27/28/30/31/32/33/34/38, including
     median/mean measured at 1.00 / 1.03 / 0.93 / 0.45 across four padding+grouping regimes)
   confidence: high — the failure is self-evident (MFU > 100%, GPU-active 560%) and the
@@ -14,6 +15,20 @@ evidence:
 links: [[probe-sample-must-match-length-distribution]],
   [[micro-batch-interacts-with-dynamic-padding]], [[recompute-pays-only-instrumentally]]
 ---
+
+> **2026-09-21 (qwen3.5_2b_a100_wikitext) — third sighting, and the fix is still not in the
+> profiler.** The champion reported **`GPU active 126%`** — physically impossible, from
+> `gpu_active_frac` dividing GPU busy by the MEDIAN step time at median/mean 0.781. `samples/s` was
+> unaffected because the run harness divides by `step_time_mean_s`, so the two disagreed in the
+> same Observation.
+>
+> Also measured here: **more steps does not fix skew, but it does bound it.** The same config at
+> n=30/150/400 gave mean 0.7399/0.5807/0.5597 with cv 2.11/0.98/0.60 while the median sat still at
+> 0.5105/0.5040/0.5106 — so most of that skew was amortizable warmup, and a real heavy tail
+> remained. And at `grad_accum=1` the skew is **irreducible**: one optimizer step is one batch, so
+> step time tracks batch width with no averaging at all (cv 1.34, sem ±6.7%, untightenable by more
+> steps). `mfu`, `gpu_active_frac` and `roofline_floor_s` remain median-based in
+> `profiler/diagnostic.py`.
 
 Throughput is total work over total time. A rate built as `effective_batch / median_step_time` is
 therefore only correct when mean == median. Under length-grouped dynamic padding it badly is not: a

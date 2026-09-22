@@ -9,11 +9,28 @@ context:
   hardware_class: single mid-range datacenter GPU (A10 22GB)
   dataset_shape: any — the term is a function of shape, not content
 evidence:
-  probes: 1 ceiling search (4 synthetic trials) + first-principles derivation
-  confidence: high WHERE IT APPLIES; context narrowed 2026-09-21 after a measured counter-case
+  probes: 1 ceiling search (test_a10G) + 4 ceiling searches and 4 probes
+    (qwen3.5_2b_a100_wikitext, vocab 248320) + first-principles derivation
+  confidence: high WHERE IT APPLIES; context narrowed 2026-09-21 (SmolLM2 counter-case) and
+    re-confirmed 2026-09-21 at the largest vocab seen
 links: [[compile-cuts-memory-not-just-time]],
   [[ce-does-not-dominate-activation-memory-modest-vocab]]
 ---
+
+> **2026-09-21 (qwen3.5_2b_a100_wikitext) — strongest confirmation yet, and the corollary is now
+> actionable.** Qwen3.5-2B at **vocab 248,320** / seq 1024 is the most extreme case in this repo.
+> Measured directly by removing the term: chunking the cross-entropy cut peak memory **9.35GB at
+> micro_batch=4** (36.449 -> 27.095GB), and at mb=8 it cut 34.174 -> 17.542GB. The discriminator in
+> this belief's context line — `vocab*seq*4B` against the model state — picked the regime correctly
+> in advance (248320 x 1024 x 4B = 1.02GB/sample of fp32 logits, against a 24.8GB model state).
+>
+> **The corollary "recompute cannot touch that term" is the load-bearing part** and it was confirmed
+> the hard way: recompute alone took the ceiling only to 8, and the run's two OOM failures were both
+> configs where recompute had removed the layer activations and the logits were what remained. The
+> term needs its own lever. That lever now exists and is measured —
+> [[chunked-ce-makes-memory-batch-independent]] — which turns this belief from a diagnosis into a
+> prescription: at large `vocab*seq`, reach for chunked CE *before* spending the memory budget on
+> recompute, because chunked CE is what makes peak memory batch-independent.
 
 > **Context narrowed 2026-09-21.** This held on Qwen2-0.5B/vocab 151936/seq 2048 and was *not*
 > reproduced on SmolLM2-1.7B/vocab 49152/seq 1024, where the same term is ~9% rather than 70%. The

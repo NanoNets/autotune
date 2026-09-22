@@ -7,11 +7,25 @@ context:
   hardware_class: any
   dataset_shape: variable-length rows under dynamic padding
 evidence:
+  # 2026-09-21: confirmed in its constructive form on a second architecture
   probes: 8 across 2 runs (test_a10G 14/15/17; smollm2_1.7b_a100_wikitext 3/4/34/37/39)
   confidence: high — mechanism measured via tokens/step on two models and two cards
 links: [[static-padding-is-usually-the-bottleneck]], [[recompute-pays-only-instrumentally]],
   [[median-step-time-overstates-skewed-throughput]]
 ---
+
+> **2026-09-21 (qwen3.5_2b_a100_wikitext) — confirmed in its CONSTRUCTIVE form.** Doubling
+> `micro_batch` 2 -> 4 under `length_grouped=True` raised tokens/step only **1693 -> 1793 (+5.9%)**
+> while throughput rose 83.8%. Grouping absorbed almost the entire pad-to-longest widening, which is
+> exactly what this belief says makes a larger micro_batch pay.
+>
+> Grouping's own value, isolated: **+20.3%**, and the damage when removed is **entirely compute** —
+> tokens/step +150% with `gap_count` unchanged (12,883 -> 12,932). That was predicted in advance on
+> the grounds that grouping changes batch WIDTH, not batch COUNT, and it is the cleanest
+> confirmation of [[dispatch-count-bounds-small-real-batches]] in that run.
+>
+> The cost to state alongside the benefit: grouping is also what makes step times right-skewed
+> (cv fell 0.603 -> 0.491 with it off), so it buys throughput and pays in variance.
 
 **2026-09-21 (smollm2_1.7b_a100_wikitext).** Re-confirmed and **extended in three ways**:
 

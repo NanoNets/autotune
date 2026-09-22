@@ -105,7 +105,7 @@ def payload_config(config):
     The `ssh` block never crosses the wire — the box has no use for its own address, and on
     password auth it would otherwise carry the credential into a remote argv.
     """
-    return {**{k: v for k, v in config.items() if k != "ssh"}, "device": "cuda"}
+    return {**{k: v for k, v in config.items() if k not in ("ssh", "env")}, "device": "cuda"}
 
 
 def run(config):
@@ -120,6 +120,12 @@ def run(config):
     env_prefix = ""
     if os.environ.get("HF_TOKEN"):
         env_prefix = f"HF_TOKEN={shlex.quote(os.environ['HF_TOKEN'])} "
+    # config["env"] -> the remote process's environment. Some levers are only settable BEFORE the
+    # process starts and so cannot be a runner knob: PYTORCH_CUDA_ALLOC_CONF is read when the CUDA
+    # caching allocator initializes, which happens on first allocation, before any runner code runs.
+    # Non-secret by construction (it travels in the config, not the env file).
+    for k, v in (config.get("env") or {}).items():
+        env_prefix += f"{shlex.quote(str(k))}={shlex.quote(str(v))} "
     remote = (f"cd {_sh_path(s['remote_dir'])} && {env_prefix}"
               f"{_sh_path(s['python'])} -c {shlex.quote(script)} {payload}")
 

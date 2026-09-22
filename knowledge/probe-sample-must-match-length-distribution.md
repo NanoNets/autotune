@@ -14,6 +14,24 @@ evidence:
 links: [[static-padding-is-usually-the-bottleneck]], [[micro-batch-interacts-with-dynamic-padding]]
 ---
 
+> **2026-09-21 (qwen3.5_2b_a100_wikitext) — still open. This run did NOT address it, and its
+> confirmation run must not be mistaken for evidence that it did.** Every dynamic-padding number in
+> that run was measured at `sample=1000`, a head slice of an ordered file, with p50 9 / p99 372 /
+> max 520 against `max_len` 1024.
+>
+> The champion was confirmed twice to **0.31%** (36.006 / 35.894) — but `frameworks/hf.py` builds
+> the loader deterministically: `_usable_texts` takes the first N rows in file order,
+> `_length_grouped` shuffles CHUNKS with `random.Random(0)`, and the grouped DataLoader uses
+> `shuffle=False`. **Both probes therefore saw identical rows in identical order.** That agreement
+> measures instrument reproducibility, not sample-independence, and it is exactly the kind of tight
+> repeat that could be misread as retiring this belief.
+>
+> The prior run measured this choice moving samples/s by **1.9x**; nothing here narrows that. Two
+> reasons it now matters more, not less: `length_grouped=True` deliberately clusters the longest
+> rows together, and the run's OOM failures
+> ([[synthetic-ceiling-underestimates-real-peak]]) were precisely about batches the probe's sample
+> never draws. The fix remains `design_improvements.md` 1b — draw to match the distribution.
+
 Under `padding="max_length"` every batch is `seq_len` wide whichever rows the loader drew, so
 throughput is independent of the sample. Under `padding="longest"` batch width **is** the rows
 drawn — so the sample's length distribution is part of the measurement.

@@ -13,6 +13,17 @@ evidence:
 links: [[static-padding-is-usually-the-bottleneck]]
 ---
 
+> **2026-09-21 (qwen3.5_2b_a100_wikitext) — NOT tested, and worth saying why rather than leaving a
+> silent gap.** This belief is about `flash_attention_2` vs `sdpa` under heavy padding.
+> `flash_attn` is still not installed on the box (third run in a row it has been untestable), so
+> the FA2 comparison was again impossible.
+>
+> What *was* measured bounds how much the question can matter on this architecture: `sdpa` vs
+> `eager` came out at **-1.7%, inside noise**, because only 6 of 24 layers are full attention
+> ([[linear-attention-kernel-library-is-the-lever]]). Whatever FA2's unpad/repad tradeoff is worth
+> on a dense model, expect roughly a quarter of it here. The belief is undisturbed; its *stakes*
+> on a hybrid model are small.
+
 **With `padding="max_length"`** (~97% pad): FA2 won **+40.2%** (12940 → 18136 tokens/s). `sdpa` was
 falling back to cutlass *memory-efficient* attention (`fmha_cutlassB/F`) because a padding mask
 disqualifies its flash backend. Transformers' FA2 path unpads via `flash_attn_varlen_func`, so

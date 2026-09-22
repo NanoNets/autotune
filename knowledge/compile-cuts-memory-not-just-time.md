@@ -3,7 +3,8 @@ claim: torch.compile can be a memory lever, not only a speed one — Inductor's 
   avoids materializing the fp32 logits copies, which raises the measured OOM ceiling.
 type: ceiling
 context:
-  arch_family: causal LM, any vocab size — the effect survived where CE does NOT dominate
+  arch_family: DENSE causal LM, any vocab size — the effect survived where CE does NOT dominate.
+    NOT hybrid linear-attention, where compile does not complete at all (2026-09-21)
   hardware_class: any CUDA
   dataset_shape: any
 evidence:
@@ -13,6 +14,13 @@ evidence:
 links: [[ce-dominates-activation-memory-large-vocab]],
   [[ce-does-not-dominate-activation-memory-modest-vocab]]
 ---
+
+> **2026-09-21 (qwen3.5_2b_a100_wikitext) — context narrowed to DENSE models.** All five prior
+> probes were dense transformers. On a hybrid linear-attention model `torch.compile` never reached a
+> timed step at all — two 601s timeouts, with shape count explicitly ruled out as the cause — so this
+> belief has no purchase there and its memory benefit must be obtained another way
+> ([[chunked-ce-makes-memory-batch-independent]] attacks the same CE term directly). See
+> [[compile-unusable-on-hybrid-linear-attention]]. The dense evidence is untouched.
 
 **2026-09-21 (smollm2_1.7b_a100_wikitext).** Third confirmation, and it **widens the context**: this
 claim was filed under "large-vocab LM where CE dominates activations", but SmolLM2-1.7B at vocab

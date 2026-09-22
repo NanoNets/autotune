@@ -9,13 +9,35 @@ context:
   dataset_shape: any, but the arithmetic is most volatile under dynamic padding, where real
     tokens/step depends on the rows drawn
 evidence:
-  probes: 6 (smollm2_1.7b_a100_wikitext experiments 9, 10, 12, 15, 33, 37/40) + 3 ceiling searches
+  probes: 10 across 2 runs (smollm2_1.7b_a100_wikitext experiments 9, 10, 12, 15, 33, 37/40;
+    qwen3.5_2b_a100_wikitext experiments 10/13, 19, 22) + 6 ceiling searches
   confidence: high — the tradeoff was measured on both sides of the flip and the winner confirmed
     twice to 0.04%
 links: [[ce-does-not-dominate-activation-memory-modest-vocab]],
   [[micro-batch-interacts-with-dynamic-padding]],
   [[median-step-time-overstates-skewed-throughput]]
 ---
+
+> **2026-09-21 (qwen3.5_2b_a100_wikitext) — confirmed, and sharpened with a mechanism the
+> original claim was missing.** Both signs were measured on one architecture in one run: recompute
+> **+10.8%** at `micro_batch=8` (ceiling 4 -> 8, crossing a factorization boundary of
+> `effective_batch=16`, grad_accum 4 -> 2) and **-40%** at `micro_batch=4`, where it crosses no
+> boundary. Textbook instance of the claim.
+>
+> **The sharpening: recompute is a DISPATCH cost, not only a compute cost.** Its recomputed forward
+> re-issues every kernel. At mb=4 gaps went 20,610 -> 25,974 (+26%) while wall rose 67%. I predicted
+> 26-28 samples/s from "the GPU is 57% idle so the extra forward is nearly free" and measured 15.4 —
+> the error was treating the extra forward as GPU work that idle time absorbs, when it is also work
+> for the single saturated dispatching core, which idle GPU cannot absorb at all.
+>
+> **Restated for a launch-bound step** ([[dispatch-count-bounds-small-real-batches]]): recompute is
+> strictly negative unless the ceiling it buys cuts micro-steps by more than its own added launches.
+> The arithmetic to re-do is not just "does the new ceiling divide `effective_batch`" but "does the
+> resulting drop in `grad_accum` outweigh ~one forward's worth of launches per micro-step".
+>
+> Corollary worth carrying: pairing recompute with [[chunked-ce-makes-memory-batch-independent]]
+> removed the memory reason to choose between them — together they made peak memory flat in
+> micro_batch and took the ceiling to the `effective_batch` cap.
 
 Recompute costs throughput by construction — it re-runs the forward. Measured standalone here:
 **-35%** (52.1 vs 80.7 samples/s). It can still be the right call, but only indirectly: by raising the
