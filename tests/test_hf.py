@@ -16,8 +16,8 @@ BASE = {"model": "Qwen/Qwen2.5-0.5B", "dataset": "Salesforce/wikitext"}
 def test_knobs_are_safe_levers_only():
     k = knobs()
     assert set(k) == {"micro_batch", "gradient_checkpointing",
-                      "attn_implementation", "torch_compile", "tf32", "padding",
-                      "length_grouped"}
+                      "attn_implementation", "torch_compile", "tf32", "fused_optimizer",
+                      "padding", "length_grouped"}
     # dtype (precision) and seq_len (max_length) are off-limits run params, NOT searchable knobs;
     # grad_accum is derived, not free.
     assert "dtype" not in k and "seq_len" not in k and "grad_accum" not in k
@@ -25,6 +25,11 @@ def test_knobs_are_safe_levers_only():
     # compile is off/default/max-autotune in loop/throughput.md, so the knob is a choice, not a bool
     assert k["torch_compile"]["options"] == [False, "default", "reduce-overhead",
                                             "max-autotune", "max-autotune-no-cudagraphs"]
+    # fused_optimizer swaps AdamW's foreach kernel chain for one fused kernel -- the SAME AdamW
+    # algorithm, so it is a kernel swap (loop/throughput.md lists "fused optimizer" under Kernels),
+    # not the optimizer-algorithm change that would be off-limits.
+    assert k["fused_optimizer"] == {"type": "bool"}
+    assert _resolve(BASE)["fused_optimizer"] is False         # default = the shipped behaviour
 
 
 def test_padding_is_a_speed_lever_not_a_model_change():

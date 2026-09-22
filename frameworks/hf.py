@@ -26,6 +26,13 @@ _DEFAULTS = {
     "attn_implementation": "sdpa",     # always available in torch 2.x; flash_attention_2 needs the lib
     "torch_compile": False,             # False | True (default mode) | a torch.compile mode string
     "tf32": False,                     # TF32 matmuls on Ampere+ (speeds matmul, doesn't change the model)
+    "fused_optimizer": False,          # torch.optim.AdamW(fused=True): one fused kernel per param
+                                       # group instead of the foreach multi_tensor_apply chain.
+                                       # SAME AdamW algorithm -- a kernel swap, not an algorithm
+                                       # change, so it is a speed knob (loop/throughput.md lists
+                                       # "fused optimizer" under Kernels). Matters most when the
+                                       # optimizer is a large share of the step: its cost is per
+                                       # PARAMETER, so it does not shrink with the batch.
     "padding": "max_length",           # "max_length" (every batch seq_len) | "longest" (pad to the
                                        # batch's own longest, rounded up to pad_multiple)
     "pad_multiple": 64,                # bucket dynamic lengths so torch.compile sees few shapes
@@ -53,6 +60,7 @@ def knobs():
                                    "options": [False, "default", "reduce-overhead",
                                                "max-autotune", "max-autotune-no-cudagraphs"]},
         "tf32":                   {"type": "bool"},
+        "fused_optimizer":        {"type": "bool"},   # AdamW(fused=True); CUDA + float params only
         "padding":                {"type": "choice", "options": ["max_length", "longest"]},
         "length_grouped":         {"type": "bool"},   # pairs with padding="longest"
     }
@@ -144,7 +152,9 @@ class HFRunner:
             self.model = torch.compile(
                 self.model, **({} if compile_mode is True else {"mode": compile_mode}))
 
-        self.opt = torch.optim.AdamW(self.model.parameters(), lr=self.cfg["lr"])
+        self.opt = torch.optim.AdamW(
+            self.model.parameters(), lr=self.cfg["lr"],
+            **({"fused": True} if self.cfg["fused_optimizer"] else {}))
         if self.cfg.get("data") == "synthetic":
             self._loader = self._it = None
             self._batch = self._synthetic_batch(tok)    # one worst-case batch, reused every step
