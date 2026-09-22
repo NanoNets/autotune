@@ -7,10 +7,22 @@ context:
   hardware_class: any
   dataset_shape: variable-length rows under dynamic padding
 evidence:
-  probes: 3 (experiment 14 GC+mb8 without grouping; 15 with; 17 isolation control)
-  confidence: high — mechanism measured via tokens/step, not inferred
-links: [[static-padding-is-usually-the-bottleneck]]
+  probes: 8 across 2 runs (test_a10G 14/15/17; smollm2_1.7b_a100_wikitext 3/4/34/37/39)
+  confidence: high — mechanism measured via tokens/step on two models and two cards
+links: [[static-padding-is-usually-the-bottleneck]], [[recompute-pays-only-instrumentally]],
+  [[median-step-time-overstates-skewed-throughput]]
 ---
+
+**2026-09-21 (smollm2_1.7b_a100_wikitext).** Re-confirmed and **extended in three ways**:
+
+1. *Grouping's value quantified honestly*: +96% (42.8 → 102.7 samples/s), tokens/step 5376 → 1836.
+2. *`micro_batch` has an interior optimum*, not a "bigger is better once grouped" rule: mb 4 / 8 / 16
+   gave 76.9 / **102.7** / 83.8. Below the optimum grouping has already removed the padding, so a
+   smaller mb buys almost no width (1804 vs 1836 tokens/step) while doubling grad_accum.
+3. *The optimum moves with the probe's sample.* At `sample=256` mb=16 won; at `sample=1000` mb=8 won.
+   Batch width is the rows drawn, so the whole tradeoff is conditional on the length distribution the
+   probe sees — which is why this belief and
+   [[probe-sample-must-match-length-distribution]] have to be read together.
 
 Experiment 14 (`gradient_checkpointing` + `micro_batch` 4 → 8) **lost 13.9%** on samples/s while
 being **+15% more efficient per token** and lifting GPU-active 66% → 76%. Both halves were real:

@@ -8,8 +8,9 @@ context:
   hardware_class: any
   dataset_shape: any — the effect is created by the padding lever, not by the data
 evidence:
-  probes: 0 direct — inferred from test_a10G's measurement conditions, not yet measured head-on
-  confidence: medium — the mechanism is structural, the magnitude is unquantified
+  probes: 5 direct (smollm2_1.7b_a100_wikitext experiments 23/26/27/28/33, sample 256→1000→2000→4000
+    plus a sample-invariance control on the baseline), after 0 direct in test_a10G
+  confidence: HIGH — mechanism structural AND magnitude measured at 1.9x on samples/s
 links: [[static-padding-is-usually-the-bottleneck]], [[micro-batch-interacts-with-dynamic-padding]]
 ---
 
@@ -30,6 +31,32 @@ enlarging `sample` still yields a head slice — an ordered file defeats it at a
 computes exactly this) and treat a tail mismatch as a caveat on the number, not a detail. Report a
 speedup measured on an unrepresentative sample as a ceiling.
 
-**Not yet measured.** The experiment that would settle it — samples/s at 256 / 1k / 4k and against a
-stratified draw — is in `design_improvements.md` 1b. Until then this is a mechanism argument with an
-unquantified effect size; sharpen or retire it on the next run that uses dynamic padding.
+**MEASURED — 2026-09-21 (smollm2_1.7b_a100_wikitext).** The experiment this belief asked for was
+run, and the belief is upgraded from mechanism to fact.
+
+| `sample` | tokens/step | samples/s (champion) |
+|---|---|---|
+| 256 (shipped) | 1088 | 264.4 |
+| 1000 | 2057 | 138.1 |
+
+**Effect size: 1.9x on samples/s from the row sample alone**, same config, same hardware. The first
+256 non-empty rows of wikitext are far shorter than the first 1000.
+
+Three things the measurement added that the mechanism argument did not predict:
+
+- **The baseline really is sample-invariant** — 9.365 at 256 vs 9.342 at 1000, 0.25% apart, tokens/step
+  identical. So a dynamic-padding config at any sample can still be compared against it honestly. That
+  assumption was load-bearing for the whole run and it is now checked, not assumed.
+- **`tokens/s` is sample-ROBUST while `samples/s` is sample-SENSITIVE** (17994 → 17758, 1.3%, across
+  the same 1.9x). Exactly mirroring the cross-padding-mode problem where tokens/s inflates static
+  padding and samples/s is the honest metric. **Neither metric is safe on its own** — read the pair
+  against what changed.
+- **Enlarging the head slice does not converge.** tokens/step at 1000 / 2000 / 4000 went
+  2057 / 1719 / 1810 — non-monotone. `_usable_texts` takes the first N usable rows, so a bigger N is
+  still a head slice of an ordered file. Confirms the "worse than sample size" note above: the fix is
+  a stratified draw (`design_improvements.md` 1b), not a bigger number.
+
+**What it cost when ignored:** this run's headline read 28.2x before the correction and 11.0x after,
+and the probe sample was one of the two compounding causes (the other is
+[[median-step-time-overstates-skewed-throughput]]). It also **flipped which config won** — see
+[[recompute-pays-only-instrumentally]].

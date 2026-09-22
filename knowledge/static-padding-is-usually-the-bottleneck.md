@@ -5,14 +5,24 @@ type: regime
 context:
   arch_family: any
   hardware_class: any
-  dataset_shape: p50 far below max_len (here p50 10 tok vs max_len 2048)
+  dataset_shape: p50 far below max_len (A10 run p50 10 vs 2048; A100 run p50 9 vs 1024)
 evidence:
-  probes: 5 (experiments 9, 15, 17, 18, 20)
-  confidence: high on DIRECTION — reproduced across four configs, best confirmed twice to 0.6%.
-    MEDIUM on magnitude — measured on a 256-row loader sample, so the speedup is an upper bound
-    (see "Known gap" below).
-links: [[padding-regime-flips-attention-verdict]], [[micro-batch-interacts-with-dynamic-padding]]
+  probes: 7 across 2 runs, 2 models, 2 cards (test_a10G experiments 9/15/17/18/20;
+    smollm2_1.7b_a100_wikitext experiments 2 and 38)
+  confidence: high on DIRECTION — now reproduced on a second architecture (Llama MHA 1.7B,
+    vocab 49k) and a second card (A100 SM80), and isolated cleanly on a final config.
+    MEDIUM on magnitude — still sample-conditional; see "Known gap" and
+    [[probe-sample-must-match-length-distribution]], which now has a measured effect size.
+links: [[padding-regime-flips-attention-verdict]], [[micro-batch-interacts-with-dynamic-padding]],
+  [[probe-sample-must-match-length-distribution]], [[median-step-time-overstates-skewed-throughput]]
 ---
+
+**2026-09-21 (smollm2_1.7b_a100_wikitext).** Re-confirmed, and for the first time **isolated on the
+shipped config** rather than inferred from a baseline-vs-winner gap: flipping only `padding`
+on the final config gave 16.4 → 102.8 samples/s, **6.26x**, at `sample=1000` over 300 mean-scored
+steps. p50 9 tok against `max_len` 1024. Worth noting what the isolation also showed: the static
+config ran at **MFU 75% and GPU-active 99%** while delivering 6.3x less throughput — a busy GPU
+computing padding still looks healthy on every utilization signal.
 
 `frameworks/hf.py` padded every batch to `max_length`. On wikitext (p50 **10** tokens, p99 374,
 max 520) against `max_len=2048`, ~97% of every step was pad tokens — positions masked out of

@@ -3,14 +3,25 @@ claim: torch.compile can be a memory lever, not only a speed one — Inductor's 
   avoids materializing the fp32 logits copies, which raises the measured OOM ceiling.
 type: ceiling
 context:
-  arch_family: large-vocab causal LM where CE dominates activations
+  arch_family: causal LM, any vocab size — the effect survived where CE does NOT dominate
   hardware_class: any CUDA
   dataset_shape: any
 evidence:
-  probes: 2 ceiling searches (uncompiled, compiled) + experiments 3 and 21
-  confidence: high — reproduced in ceiling trials and in throughput probes
-links: [[ce-dominates-activation-memory-large-vocab]]
+  probes: 5 across 2 runs, 2 models, 2 cards (test_a10G ceiling searches + experiments 3/21;
+    smollm2_1.7b_a100_wikitext ceiling search + experiments 7 and 35)
+  confidence: high — reproduced in ceiling trials and throughput probes on both runs
+links: [[ce-dominates-activation-memory-large-vocab]],
+  [[ce-does-not-dominate-activation-memory-modest-vocab]]
 ---
+
+**2026-09-21 (smollm2_1.7b_a100_wikitext).** Third confirmation, and it **widens the context**: this
+claim was filed under "large-vocab LM where CE dominates activations", but SmolLM2-1.7B at vocab
+49152 / seq 1024 is a model where CE does **not** dominate (~9% of activations, see
+[[ce-does-not-dominate-activation-memory-modest-vocab]]) — and compile still cut memory. Measured
+20.83 → 18.65 GB at mb=8 and 16.56 → 14.50 GB at mb=16, and the ceiling moved **8 → 12**. So the
+memory saving is not contingent on the CE term being the dominant one; the arch_family key has been
+loosened accordingly. Caveat carried forward: 12 did not divide `effective_batch=16`, so on this run
+the lifted ceiling bought nothing — a ceiling only pays at a legal factorization.
 
 Enabling `torch.compile` cut peak memory **16.63 → 11.23 GB** (-5.4 GB) at the same `micro_batch`,
 alongside a +32.8% throughput gain. Re-measuring the ceiling under compile moved it **2 → 4** — and 4
