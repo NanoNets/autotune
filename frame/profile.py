@@ -189,7 +189,7 @@ def framework_runner(framework):
 
 def frame(model, dataset, gpu, max_len, dtype="bfloat16", device="cuda", framework="hf",
           effective_batch=16, text_field="text", split="train", sample=1000, name=None,
-          runner=None, seed=0, on_trial=None):
+          runner=None, seed=0, on_trial=None, sample_path=None, sample_seed=0, max_scan=None):
     """Live: measure the peak, load config + tokenizer, scan the dataset, measure the ceiling,
     assemble.
 
@@ -202,16 +202,27 @@ def frame(model, dataset, gpu, max_len, dtype="bfloat16", device="cuda", framewo
     out loud rather than implying a ceiling was checked.
     effective_batch: the human's target. Doubles as the ceiling search's cap — above it
     grad_accum would be < 1, so a larger micro_batch is not a legal config to test.
+    sample / sample_path / sample_seed / max_scan: the PROBE SAMPLE (`frame.dataset.draw_sample`).
+    `sample` rows, rounded down to a multiple of effective_batch, are drawn length-stratified from
+    a random pool over the split. The pool's distribution becomes the Profile's dataset shape, and
+    when `sample_path` is given the drawn rows are written there for every probe to load
+    (`sample_file` in the probe config), so Frame's statistics and the probes' rows are one
+    population.
     """
     from frame.hardware import hardware, versions, measure
     m = measure(device, dtype)                          # measure the peak ONCE, at the run dtype
     from transformers import AutoTokenizer
     from frame.model import load
-    from frame.dataset import scan
+    from frame.dataset import draw_sample, write_sample
 
     mi = load(model)
     tok = AutoTokenizer.from_pretrained(model, trust_remote_code=True)
-    ds = scan(dataset, tok, text_field=text_field, split=split, sample=sample, name=name)
+    drawn = draw_sample(dataset, tok, sample, text_field=text_field, split=split, name=name,
+                        seed=sample_seed, effective_batch=effective_batch, max_len=max_len,
+                        max_scan=max_scan)
+    if sample_path:
+        write_sample(sample_path, drawn)
+    ds = drawn["meta"]["pool"]                          # the corpus's shape, not the head's
     hw = hardware(gpu, peak_flops=m["peak_flops"], mem_gb=m["mem_gb"], dtype=dtype,
                   device_name=m["device_name"], num_sms=m["num_sms"],
                   peak_mem_bw_gb_s=m["peak_mem_bw_gb_s"])

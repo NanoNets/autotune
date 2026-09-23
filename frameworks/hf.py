@@ -47,8 +47,12 @@ _DEFAULTS = {
     "pad_multiple": 64,                # bucket dynamic lengths so torch.compile sees few shapes
     "length_grouped": False,           # batch similar-length rows together, so pad-to-longest wastes
                                        # less; only meaningful with padding="longest"
-    "sample": 256,                     # rows pulled into the in-memory loader; trimmed DOWN to a
-                                       # multiple of effective_batch so a pass is whole steps
+    "sample_file": None,               # the probe sample Frame drew (frame.dataset.draw_sample):
+                                       # length-stratified from a random pool. Every probe of a
+                                       # run should load the same file. None -> the head fallback
+    "sample": 256,                     # head fallback only: the FIRST `sample` usable rows, trimmed
+                                       # DOWN to a multiple of effective_batch. Not representative
+                                       # of an ordered file; population records it as "head"
     "loader_seed": 0,                  # seeds every shuffle, so a config sees the same order twice
     "name": None,                      # dataset config/subset
     "split": "train",
@@ -128,6 +132,21 @@ def _rows_hash(rows):
     return h.hexdigest()[:16]
 
 
+def _sample_file_texts(c):
+    """The texts of a Frame-drawn probe sample, checked against this probe's config.
+
+    A sample drawn from a different dataset, split or field is a different population, so a
+    mismatch is an error rather than a silently wrong measurement. Returns (texts, meta).
+    """
+    from frame.dataset import read_sample
+    meta, rows = read_sample(c["sample_file"])
+    for key in ("dataset", "name", "split", "text_field"):
+        if meta.get(key) != c.get(key):
+            raise ValueError(f"sample_file {c['sample_file']!r} was drawn with {key}="
+                             f"{meta.get(key)!r}, but this probe has {key}={c.get(key)!r}")
+    return [r["text"] for r in rows], meta
+
+
 def _length_grouped(rows, micro_batch, seed=0):
     """Reorder rows so each consecutive `micro_batch` chunk holds similar lengths.
 
@@ -158,7 +177,7 @@ def _resolve(config):
         raise ValueError(                              # never changes it (it's the quality boundary)
             f"effective_batch ({eb}) must be divisible by micro_batch ({mb})")
     c["grad_accum"] = eb // mb                          # derived to hold the human's effective_batch
-    if not synthetic and c["sample"] < eb:              # synthetic builds its batch, never loads rows
+    if not synthetic and not c["sample_file"] and c["sample"] < eb:   # synthetic loads no rows
         raise ValueError(f"sample ({c['sample']}) < effective_batch ({eb}): "   # a pass must hold
                          "no whole optimizer step fits in the sample")          # one whole step
     c["tokens_per_step"] = eb * c["seq_len"]            # = micro_batch * grad_accum * seq_len
@@ -215,9 +234,13 @@ class HFRunner:
         from datasets import load_dataset
 
         c = self.cfg
-        rows = load_dataset(c["dataset"], c["name"], split=c["split"], streaming=True)
-        texts = _whole_steps(_usable_texts(rows, c["text_field"], c["sample"]),
-                             c["effective_batch"])
+        if c["sample_file"]:                               # the rows Frame drew: every probe of the
+            texts, self._sample_meta = _sample_file_texts(c)   # run times exactly these
+        else:                                              # head fallback: first N usable rows
+            rows = load_dataset(c["dataset"], c["name"], split=c["split"], streaming=True)
+            texts = _usable_texts(rows, c["text_field"], c["sample"])
+            self._sample_meta = {"method": "head"}
+        texts = _whole_steps(texts, c["effective_batch"])
         if len(texts) < c["effective_batch"]:              # a pass must hold at least one step, or
             raise ValueError(                              # drop_last empties the loader
                 f"only {len(texts)} usable rows from {c['dataset']} (split={c['split']}, "
@@ -276,6 +299,8 @@ class HFRunner:
         shapes = [list(b[0].shape) for b in ref_batches]
         rows_hash = _rows_hash([real_rows[i] for i in ref])
         self._population = {
+            "sample_method": self._sample_meta.get("method"),   # length-stratified | head
+            "sample_file": self.cfg["sample_file"],
             "sample_rows": len(real_rows),
             "sample_hash": _rows_hash(real_rows),       # same rows in the clean window?
             "steps_per_pass": self.steps_per_pass,

@@ -134,6 +134,39 @@ def test_rows_hash_identifies_the_population():
     assert _rows_hash([[1, 2], [3]]) != _rows_hash([[1], [2, 3]])   # row boundaries matter
 
 
+def _write_sample(d, **meta):
+    from frame.dataset import write_sample
+    path = os.path.join(d, "sample.jsonl")
+    write_sample(path, {"meta": {"method": "length-stratified", "dataset": BASE["dataset"],
+                                 "name": None, "split": "train", "text_field": "text", **meta},
+                        "rows": [{"row": 5, "text": "hello there", "tokens": 2},
+                                 {"row": 40, "text": "a much longer row", "tokens": 4}]})
+    return path
+
+
+def test_sample_file_supplies_the_rows_and_skips_the_head_check():
+    import tempfile
+    from frameworks.hf import _sample_file_texts
+    with tempfile.TemporaryDirectory() as d:
+        c = _resolve({**BASE, "sample_file": _write_sample(d), "sample": 1})   # sample ignored
+        texts, meta = _sample_file_texts(c)
+    assert texts == ["hello there", "a much longer row"] and meta["method"] == "length-stratified"
+
+
+def test_sample_file_drawn_from_another_dataset_is_refused():
+    """A different dataset/split/field is a different population: fail, don't mis-measure."""
+    import tempfile
+    from frameworks.hf import _sample_file_texts
+    with tempfile.TemporaryDirectory() as d:
+        c = _resolve({**BASE, "sample_file": _write_sample(d, split="validation")})
+        try:
+            _sample_file_texts(c)
+        except ValueError as e:
+            assert "split" in str(e)
+            return
+    assert False, "expected ValueError for a sample drawn from another split"
+
+
 def test_usable_texts_skips_blanks_missing_fields_and_caps():
     rows = [{"text": "hello"}, {"text": "  "}, {"text": ""}, {"other": "x"},
             {"text": "world"}, {"text": "\n"}, {"text": "again"}]

@@ -66,6 +66,11 @@ Do these in order. Don't start experimenting until Step 3 is confirmed back to t
 
 - Confirm the model is retrievable; build a real architecture picture.
 - Confirm the dataset loads and matches the expected schema.
+- **Draw the probe sample once, here:** `python -m frame ... --sample-out runs/<run_name>/sample.jsonl`.
+  Frame draws it length-stratified from a random pool over the split. **Every probe of the run
+  passes `sample_file: runs/<run_name>/sample.jsonl`**, so all probes time the same rows, and those
+  rows carry the corpus's length distribution. Never time a probe on the head-slice fallback: its
+  Observation says `population.sample_method: head`, and a result on it is not evidence.
 - **Measure the OOM ceiling at `max_len`** before any tuning — `micro_batch` is bounded by
   measurement, never by guesswork. Procedure: `frame/README.md`.
 

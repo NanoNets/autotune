@@ -65,8 +65,15 @@ load is a setup failure, not an experiment result.
    parameter count, attention type (MHA / GQA / MoE), context length. The parameter count is computed
    with math — **no multi-gigabyte weight download** — and lands within 1% of the published sizes.
 
-2. **What's the data?** Tokenizes a sample of the dataset and reports how long the sequences are
-   (median, 90th/99th percentile, max). That shape drives batch-size and packing decisions later.
+2. **What's the data?** Draws a uniform random pool over the whole split (20× the sample, blank
+   rows skipped), tokenizes it, and reports how long the sequences are (median, 90th/99th
+   percentile, max). That shape drives batch-size and packing decisions later. From the same pool it
+   draws the **probe sample**: `sample` rows at evenly spaced length quantiles, so the rows every
+   probe times carry the corpus's length distribution, tail included. With `--sample-out` it writes
+   them to `runs/<run>/sample.jsonl`, and every probe loads that file (`sample_file`). Frame's
+   statistics and the probes' rows are then one population (the Measurement axiom,
+   `loop/contracts.md`). It is not a head slice: the first N rows of an ordered file aren't a sample
+   of it, and on wikitext that alone moved throughput 1.9x.
 
 3. **What's the hardware?** **Measures** how fast the GPU actually is (peak FLOP/s) and its memory
    bandwidth, right there on the card — not from a spec sheet. This measured peak is the yardstick
@@ -170,6 +177,7 @@ and `16` is eliminated *before* the loop spends a 5-minute probe watching it cra
 python -m frame --model <hub-id|path> --dataset <hub-id|path> --gpu A10G --max-len 2048 \
                 [--dtype bfloat16] [--device cuda] \
                 [--name <dataset-config>] [--split train] [--sample 1000] \
+                [--sample-out runs/<run>/sample.jsonl] [--sample-seed 0] [--max-scan N] \
                 [--ceiling --effective-batch 16 --seed 0]
 ```
 
@@ -182,6 +190,12 @@ Qwen2ForCausalLM (gqa, bfloat16) | 0.5B params | A10G 24.0GB x1 | peak 121 TFLOP
 `--max-len` is **required** — without it there is no worst case to measure against. `--ceiling`
 runs the search with `--framework`'s real runner, so the number is one to tune against; it costs
 ~2·log₂(n) short trials. Omit it and the Profile carries `ceiling: null`.
+
+`--sample` is rounded down to a multiple of `--effective-batch` (1000 → 992 at 16), so one pass over
+the probe sample is whole optimizer steps. The pool streams the whole split by default: seconds for
+a fine-tuning set, since only the pool is tokenized. `--max-scan` caps the rows streamed for a corpus
+too large to read end to end. The pool is then random over that prefix only, and the sample file's
+`meta.max_scan` records it.
 
 **Inputs.** `model` and `dataset` are each an **HF hub id or a local path**. `gpu` is just a **label**
 for the record — any hardware works, because the peak is measured, not looked up. `dtype` is the
@@ -286,7 +300,7 @@ needed, a **shell** that hits the hub or the card.
 | File | Does |
 |---|---|
 | `model.py` | HF config → model shape + analytical params |
-| `dataset.py` | tokenize a sample → sequence-length distribution |
+| `dataset.py` | the random pool → sequence-length distribution, and the length-stratified probe sample (`draw_sample`, `write_sample`, `read_sample`) |
 | `hardware.py` | assemble hardware facts; `measure()` runs the on-device peak/bandwidth benchmark |
 | `memory.py` | analytical weights/grads/optimizer breakdown |
 | `synthetic.py` | worst-case batch at `max_len` — every sequence full length, seeded |

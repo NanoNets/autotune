@@ -76,11 +76,13 @@ adapter actually applies — a declared knob must really take effect.
 
 - **Pre-tokenized in-memory loader** → the `dataloader` phase is ~0 (no real data-wait), so
   `workers`/`prefetch` have nothing to recover. On-the-fly tokenization + packing come later.
-- **`sample` interacts with `padding`.** `_usable_texts` takes the FIRST `sample` usable rows, so
-  the loader sees a head slice. Under `padding="max_length"` that was invisible — every batch was
-  `seq_len` wide whichever rows you drew. Under `padding="longest"` batch width *is* the rows drawn,
-  so `sample` now influences what gets measured, not just how much data is resident. (Still a head
-  slice: drawing the sample to match the length distribution is `design_improvements.md` 1b.)
+- **The rows are part of the measurement.** Under `padding="longest"` batch width *is* the rows
+  drawn, so which rows a probe loads decides what it measures. Give every probe the sample Frame
+  drew, via `sample_file` (`frame.dataset.draw_sample`: length-stratified from a random pool over
+  the split). The file's dataset/name/split/text_field must match the probe's, or the runner
+  refuses it. Without `sample_file` the runner falls back to the FIRST `sample` usable rows, a head
+  slice that is not representative of an ordered file. `population.sample_method` then reads
+  `head`, so the Observation says so.
 - **The population is fixed, so probes are comparable** (Measurement axiom, `loop/contracts.md`).
   The sample is trimmed down to a multiple of `effective_batch` (from the end, so every config
   keeps the same rows), making a pass exactly `steps_per_pass` optimizer steps. Every shuffle is

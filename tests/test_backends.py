@@ -138,6 +138,19 @@ def test_cpu_fallback_announces_itself():
     assert "CPU" in err.getvalue() and "meaningless" in err.getvalue()
 
 
+def test_sample_file_must_be_repo_relative_and_exist_before_anything_is_sent():
+    """The box resolves sample_file under remote_dir, so an absolute path would miss it."""
+    from backends.ssh import _push_sample
+    s = _settings({"ssh": {"host": "box"}})
+    for bad, err in (("/tmp/sample.jsonl", ValueError),
+                     ("runs/no-such-run/sample.jsonl", FileNotFoundError)):
+        try:
+            _push_sample(s, bad)                         # raises before any ssh/rsync runs
+        except err:
+            continue
+        assert False, f"expected {err.__name__} for {bad!r}"
+
+
 if __name__ == "__main__":
     for _n, _f in list(globals().items()):
         if _n.startswith("test_") and callable(_f):
