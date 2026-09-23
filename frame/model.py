@@ -16,6 +16,21 @@ MoE, which is the N the 6ND roofline wants), and the mechanically-derived facts
 _GATED_ACTS = {"silu", "swish", "swiglu", "geglu", "gelu_pytorch_tanh"}
 
 
+def _flatten(cfg):
+    """Multimodal configs nest the language model's dims under `text_config` (Qwen3.5, Gemma3,
+    Llama4) while `architectures` / `vision_config` / `tie_word_embeddings` stay at the top level.
+    Read the text config as the base and overlay the top level's set fields, so a nested config
+    presents the same flat surface a text-only one does. Top-level `None`s (transformers writes
+    `dtype: null` on the wrapper) must not shadow the text config's real values.
+    """
+    text = cfg.get("text_config")
+    if not isinstance(text, dict):
+        return cfg
+    merged = dict(text)
+    merged.update({k: v for k, v in cfg.items() if v is not None})
+    return merged
+
+
 def _get(cfg, *names, default=None):
     """First present field among aliases (HF field names vary across archs)."""
     for n in names:
@@ -49,6 +64,7 @@ def _params(layers, hidden, heads, kv_heads, head_dim, vocab, inter, gated,
 def internals(config):
     """config: a mapping of HF config fields (or anything with `.to_dict()`)."""
     cfg = config.to_dict() if hasattr(config, "to_dict") else dict(config)
+    cfg = _flatten(cfg)
 
     layers = _get(cfg, "num_hidden_layers", "n_layer")
     hidden = _get(cfg, "hidden_size", "n_embd")

@@ -7,10 +7,36 @@ context:
   hardware_class: any
   dataset_shape: variable-length rows under dynamic padding
 evidence:
-  probes: 3 (experiment 14 GC+mb8 without grouping; 15 with; 17 isolation control)
-  confidence: high — mechanism measured via tokens/step, not inferred
-links: [[static-padding-is-usually-the-bottleneck]]
+  # 2026-09-21: confirmed in its constructive form on a second architecture
+  probes: 8 across 2 runs (test_a10G 14/15/17; smollm2_1.7b_a100_wikitext 3/4/34/37/39)
+  confidence: high — mechanism measured via tokens/step on two models and two cards
+links: [[static-padding-is-usually-the-bottleneck]], [[recompute-pays-only-instrumentally]],
+  [[median-step-time-overstates-skewed-throughput]]
 ---
+
+> **2026-09-21 (qwen3.5_2b_a100_wikitext) — confirmed in its CONSTRUCTIVE form.** Doubling
+> `micro_batch` 2 -> 4 under `length_grouped=True` raised tokens/step only **1693 -> 1793 (+5.9%)**
+> while throughput rose 83.8%. Grouping absorbed almost the entire pad-to-longest widening, which is
+> exactly what this belief says makes a larger micro_batch pay.
+>
+> Grouping's own value, isolated: **+20.3%**, and the damage when removed is **entirely compute** —
+> tokens/step +150% with `gap_count` unchanged (12,883 -> 12,932). That was predicted in advance on
+> the grounds that grouping changes batch WIDTH, not batch COUNT, and it is the cleanest
+> confirmation of [[dispatch-count-bounds-small-real-batches]] in that run.
+>
+> The cost to state alongside the benefit: grouping is also what makes step times right-skewed
+> (cv fell 0.603 -> 0.491 with it off), so it buys throughput and pays in variance.
+
+**2026-09-21 (smollm2_1.7b_a100_wikitext).** Re-confirmed and **extended in three ways**:
+
+1. *Grouping's value quantified honestly*: +96% (42.8 → 102.7 samples/s), tokens/step 5376 → 1836.
+2. *`micro_batch` has an interior optimum*, not a "bigger is better once grouped" rule: mb 4 / 8 / 16
+   gave 76.9 / **102.7** / 83.8. Below the optimum grouping has already removed the padding, so a
+   smaller mb buys almost no width (1804 vs 1836 tokens/step) while doubling grad_accum.
+3. *The optimum moves with the probe's sample.* At `sample=256` mb=16 won; at `sample=1000` mb=8 won.
+   Batch width is the rows drawn, so the whole tradeoff is conditional on the length distribution the
+   probe sees — which is why this belief and
+   [[probe-sample-must-match-length-distribution]] have to be read together.
 
 Experiment 14 (`gradient_checkpointing` + `micro_batch` 4 → 8) **lost 13.9%** on samples/s while
 being **+15% more efficient per token** and lifting GPU-active 66% → 76%. Both halves were real:
