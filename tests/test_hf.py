@@ -8,7 +8,8 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from frameworks.hf import knobs, _resolve, _usable_texts
+from frameworks.hf import (knobs, _resolve, _usable_texts, _whole_steps, _reference_indices,
+                           _rows_hash)
 
 BASE = {"model": "Qwen/Qwen2.5-0.5B", "dataset": "Salesforce/wikitext"}
 
@@ -98,13 +99,72 @@ def test_missing_model_or_dataset_raises():
         assert False, f"expected ValueError for {bad}"
 
 
-def test_sample_smaller_than_micro_batch_raises():
+def test_sample_smaller_than_effective_batch_raises():
+    """A pass over the sample must hold at least one whole optimizer step."""
     try:
-        _resolve({**BASE, "sample": 4, "micro_batch": 8})
+        _resolve({**BASE, "sample": 8, "micro_batch": 4})         # 8 rows < effective_batch 16
     except ValueError as e:
-        assert "loader would be empty" in str(e)
+        assert "no whole optimizer step" in str(e)
         return
-    assert False, "expected ValueError when sample < micro_batch"
+    assert False, "expected ValueError when sample < effective_batch"
+
+
+def test_sample_is_trimmed_to_whole_steps_from_the_end():
+    """Every config keeps the SAME rows: the tail is dropped, file order is kept."""
+    texts = [f"row{i}" for i in range(1000)]
+    kept = _whole_steps(texts, 16)
+    assert len(kept) == 992 and kept == texts[:992]            # 62 whole steps of 16
+    assert _whole_steps(texts[:992], 16) == texts[:992]        # already whole: unchanged
+
+
+def test_reference_rows_are_chosen_by_rule_around_the_median():
+    lengths = [5, 900, 9, 12, 300, 9, 40, 7, 9, 11]
+    ref = _reference_indices(lengths, 4)
+    assert sorted(lengths[i] for i in ref) == [9, 9, 11, 12]   # the 4 rows centred on the median
+    assert [lengths[i] for i in ref] == sorted(lengths[i] for i in ref)   # ordered by length
+    assert _reference_indices(lengths, 4) == ref               # deterministic: ties break on index
+    assert _reference_indices(lengths, 2) == ref[1:3]          # nested: same centre, fewer rows
+    assert len(_reference_indices(lengths[:4], 4)) == 4        # sample == n: every row
+
+
+def test_rows_hash_identifies_the_population():
+    a, b = [[1, 2, 3], [4, 5]], [[1, 2, 3], [4, 6]]
+    assert _rows_hash(a) == _rows_hash([[1, 2, 3], [4, 5]])    # same rows, same hash
+    assert _rows_hash(a) != _rows_hash(b)                      # one token differs
+    assert _rows_hash([[1, 2], [3]]) != _rows_hash([[1], [2, 3]])   # row boundaries matter
+
+
+def _write_sample(d, **meta):
+    from frame.dataset import write_sample
+    path = os.path.join(d, "sample.jsonl")
+    write_sample(path, {"meta": {"method": "length-stratified", "dataset": BASE["dataset"],
+                                 "name": None, "split": "train", "text_field": "text", **meta},
+                        "rows": [{"row": 5, "text": "hello there", "tokens": 2},
+                                 {"row": 40, "text": "a much longer row", "tokens": 4}]})
+    return path
+
+
+def test_sample_file_supplies_the_rows_and_skips_the_head_check():
+    import tempfile
+    from frameworks.hf import _sample_file_texts
+    with tempfile.TemporaryDirectory() as d:
+        c = _resolve({**BASE, "sample_file": _write_sample(d), "sample": 1})   # sample ignored
+        texts, meta = _sample_file_texts(c)
+    assert texts == ["hello there", "a much longer row"] and meta["method"] == "length-stratified"
+
+
+def test_sample_file_drawn_from_another_dataset_is_refused():
+    """A different dataset/split/field is a different population: fail, don't mis-measure."""
+    import tempfile
+    from frameworks.hf import _sample_file_texts
+    with tempfile.TemporaryDirectory() as d:
+        c = _resolve({**BASE, "sample_file": _write_sample(d, split="validation")})
+        try:
+            _sample_file_texts(c)
+        except ValueError as e:
+            assert "split" in str(e)
+            return
+    assert False, "expected ValueError for a sample drawn from another split"
 
 
 def test_usable_texts_skips_blanks_missing_fields_and_caps():

@@ -88,6 +88,32 @@ def _sync(s):
         raise RuntimeError(f"rsync to {s['target']} failed:\n{r.stderr.strip()}")
 
 
+def _push_sample(s, sample_file):
+    """Copy the run's probe sample to the same repo-relative path on the box.
+
+    `_sync` excludes `runs/` (outputs, not code), and a sample is too large to ride in the config:
+    the config travels as one argv entry, which Linux caps at 128KB. So the file goes separately,
+    and the probe's `sample_file` resolves to the same relative path under `remote_dir`.
+    """
+    if os.path.isabs(sample_file):
+        raise ValueError(f"sample_file {sample_file!r} must be relative to the repo root, so it "
+                         "resolves to the same path on the box")
+    repo = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    local = os.path.join(repo, sample_file)
+    if not os.path.isfile(local):
+        raise FileNotFoundError(f"sample_file {sample_file!r} not found under {repo}")
+    remote_dir = f"{s['remote_dir'].rstrip('/')}/{os.path.dirname(sample_file)}"
+    r = subprocess.run(_ssh_cmd(s) + [s["target"], f"mkdir -p {_sh_path(remote_dir)}"],
+                       capture_output=True, text=True)
+    if r.returncode != 0:
+        raise RuntimeError(f"could not create {remote_dir} on {s['target']}:\n{r.stderr.strip()}")
+    cmd = ["rsync", "-az", "-e", " ".join(shlex.quote(c) for c in _ssh_cmd(s)),
+           local, f"{s['target']}:{s['remote_dir'].rstrip('/')}/{sample_file}"]
+    r = subprocess.run(cmd, capture_output=True, text=True)
+    if r.returncode != 0:
+        raise RuntimeError(f"rsync of {sample_file} to {s['target']} failed:\n{r.stderr.strip()}")
+
+
 # Runs on the box: read the config off argv, run the probe, frame the result in sentinels.
 _REMOTE = """
 import base64, json, os, sys
@@ -113,6 +139,8 @@ def run(config):
     s = _settings(config)
     if s["sync"]:
         _sync(s)
+        if config.get("sample_file"):                  # runs/ is excluded from the code sync
+            _push_sample(s, config["sample_file"])
 
     payload = base64.b64encode(json.dumps(payload_config(config), default=str).encode()).decode()
 

@@ -31,7 +31,14 @@ def main():
                     help="human target the loop factorizes; also caps the ceiling search")
     ap.add_argument("--text-field", default="text")
     ap.add_argument("--split", default="train")
-    ap.add_argument("--sample", type=int, default=1000)
+    ap.add_argument("--sample", type=int, default=1000,
+                    help="probe sample size (rounded down to a multiple of --effective-batch)")
+    ap.add_argument("--sample-out", default=None,
+                    help="write the drawn probe sample here, e.g. runs/<run>/sample.jsonl; "
+                         "every probe then loads it via sample_file")
+    ap.add_argument("--sample-seed", type=int, default=0, help="seed for the sample's random pool")
+    ap.add_argument("--max-scan", type=int, default=None,
+                    help="cap the rows streamed for the pool (very large corpora); default: all")
     ap.add_argument("--name", default=None, help="dataset config, e.g. wikitext-2-raw-v1")
     ap.add_argument("--ceiling", action="store_true",
                     help="measure the OOM ceiling at --max-len using --framework's real runner")
@@ -52,7 +59,10 @@ def main():
     p = frame(a.model, a.dataset, a.gpu, a.max_len, dtype=a.dtype, device=a.device,
               framework=a.framework, effective_batch=a.effective_batch,
               text_field=a.text_field, split=a.split, sample=a.sample, name=a.name,
-              runner=runner, seed=a.seed, on_trial=on_trial)
+              runner=runner, seed=a.seed, on_trial=on_trial, sample_path=a.sample_out,
+              sample_seed=a.sample_seed, max_scan=a.max_scan)
+    if a.sample_out:
+        print(f"frame: probe sample written to {a.sample_out} (pass it to probes as sample_file)")
     print(p.summary)
     for n in p.notes:
         print(f"NOTE: {n}")

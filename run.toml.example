@@ -23,7 +23,9 @@ device  = "cuda"    # what the probe runs ON. "cuda" for any GPU box; single-GPU
 [scan]
 text_field = "text"    # which dataset column to tokenize
 split      = "train"   # dataset split to scan
-sample     = 1000      # rows to tokenize for the length distribution
+sample     = 1000      # probe sample size: rows drawn length-stratified from a random pool
+                       # (20x this) by Frame, rounded down to a multiple of effective_batch.
+                       # Written to runs/<run>/sample.jsonl; every probe loads it (sample_file)
 
 [ceiling]
 seed = 0               # seed for the synthetic max_len batches, so a ceiling is reproducible

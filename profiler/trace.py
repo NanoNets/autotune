@@ -53,8 +53,25 @@ def kernels(trace, top=None):
 
 
 def gpu_busy_us(trace):
-    """Total GPU kernel time (us)."""
-    return sum(dur for _, dur in kernels(trace))
+    """Time the GPU was busy (us): the UNION of kernel intervals on the timeline.
+
+    Not the sum of durations: kernels running concurrently on different streams would count twice
+    in a sum and let busy time exceed the step's own wall-clock. Falls back to the plain sum when
+    kernel events carry no `ts` (a CPU trace, or a hand-built fixture) — no timeline to union over.
+    """
+    spans = sorted((e["ts"], e["ts"] + e["dur"])
+                   for e in _events(trace)
+                   if e.get("cat") in _KERNEL_CATS and "ts" in e and "dur" in e)
+    if not spans:
+        return sum(dur for _, dur in kernels(trace))
+    busy, (start, end) = 0.0, spans[0]
+    for s, e in spans[1:]:
+        if s > end:                                    # a gap: close the current interval
+            busy += end - start
+            start, end = s, e
+        else:                                          # overlap or touching: extend it
+            end = max(end, e)
+    return busy + (end - start)
 
 
 def kernel_gaps(trace):

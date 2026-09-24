@@ -76,10 +76,20 @@ adapter actually applies — a declared knob must really take effect.
 
 - **Pre-tokenized in-memory loader** → the `dataloader` phase is ~0 (no real data-wait), so
   `workers`/`prefetch` have nothing to recover. On-the-fly tokenization + packing come later.
-- **`sample` interacts with `padding`.** `_usable_texts` takes the FIRST `sample` usable rows, so
-  the loader sees a head slice. Under `padding="max_length"` that was invisible — every batch was
-  `seq_len` wide whichever rows you drew. Under `padding="longest"` batch width *is* the rows drawn,
-  so `sample` now influences what gets measured, not just how much data is resident.
+- **The rows are part of the measurement.** Under `padding="longest"` batch width *is* the rows
+  drawn, so which rows a probe loads decides what it measures. Give every probe the sample Frame
+  drew, via `sample_file` (`frame.dataset.draw_sample`: length-stratified from a random pool over
+  the split). The file's dataset/name/split/text_field must match the probe's, or the runner
+  refuses it. Without `sample_file` the runner falls back to the FIRST `sample` usable rows, a head
+  slice that is not representative of an ordered file. `population.sample_method` then reads
+  `head`, so the Observation says so.
+- **The population is fixed, so probes are comparable** (Measurement axiom, `loop/contracts.md`).
+  The sample is trimmed down to a multiple of `effective_batch` (from the end, so every config
+  keeps the same rows), making a pass exactly `steps_per_pass` optimizer steps. Every shuffle is
+  seeded by `loader_seed`. `reference_step()` trains on a fixed batch: the `effective_batch` rows
+  nearest the median length, split and padded the way this config batches. That batch is what the
+  profiler traces. `population()` records the sample's hash, the reference rows and the reference
+  batch's shapes (`batch_key`), so the agent can check whether two probes measured the same work.
 - **`tokens_per_step()` is measured, not assumed** — the mean over steps actually run. Under
   `padding="longest"` the batch width varies, so `effective_batch * seq_len` overstates the work and
   inflates both tokens/s and MFU. Under `padding="max_length"` the measured value equals that
