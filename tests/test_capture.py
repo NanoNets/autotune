@@ -147,6 +147,33 @@ def test_rounding_up_to_whole_passes_is_announced():
     assert "clean_steps 5 -> 8" in err.getvalue()
 
 
+class _FingerprintRunner(_PassRunner):
+    def reference_fingerprint(self):
+        return {"loss": 2.5, "grad_norm": 0.75}
+
+
+def test_fingerprint_flows_from_runner_to_observation():
+    """Taken after setup, before warmup; both halves land on the Observation and its summary."""
+    from profiler.diagnostic import diagnose
+    cap = capture(_FingerprintRunner(), {"device": "cpu"}, warmup=1, clean_steps=2,
+                  peak_flops=1e12, peak_mem_bw_gb_s=1.0)
+    assert cap.fingerprint == {"loss": 2.5, "grad_norm": 0.75}
+    o = diagnose(cap, params=10, tokens=1, gpu="x")
+    assert o.reference_loss == 2.5 and o.reference_grad_norm == 0.75
+    assert "ref-loss 2.5000 grad 0.75" in o.summary
+
+
+def test_a_runner_without_a_fingerprint_reports_none():
+    """Optional: the torch fixture and synthetic ceiling trials have no reference rows."""
+    from profiler.diagnostic import diagnose
+    cap = capture(_Runner(), {"device": "cpu"}, warmup=1, clean_steps=2,
+                  peak_flops=1e12, peak_mem_bw_gb_s=1.0)
+    assert cap.fingerprint is None
+    o = diagnose(cap, params=10, tokens=1, gpu="x")
+    assert o.reference_loss is None and o.reference_grad_norm is None
+    assert "ref-loss" not in o.summary
+
+
 if __name__ == "__main__":
     for _n, _f in list(globals().items()):
         if _n.startswith("test_") and callable(_f):

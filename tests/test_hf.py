@@ -206,6 +206,34 @@ def test_synthetic_skips_the_row_count_check():
     assert c["micro_batch"] == 512 and c["grad_accum"] == 1
 
 
+def test_fingerprint_is_a_token_mean_independent_of_micro_batch():
+    """Same reference rows, mean over real tokens: neither half may move when only micro_batch
+    (and so the batching) changes -- or a batch knob would read as a numerical change."""
+    import torch
+    from frameworks.hf import HFRunner
+    r = HFRunner()
+    r.device = "cpu"
+    r.model = torch.nn.Linear(1, 1, bias=False)
+    with torch.no_grad():
+        r.model.weight.fill_(1.0)
+    r.opt = torch.optim.SGD(r.model.parameters(), lr=0.0)
+    rows = [torch.arange(1, 6), torch.arange(1, 12), torch.arange(1, 4)]   # 4 + 10 + 2 real tokens
+
+    def fake_loss(ids, att, labels):                       # a true per-token mean, times the weight
+        y = labels[:, 1:]
+        return y[y != -100].float().mean() * r.model.weight.sum()
+    r._loss = fake_loss
+
+    expected = (sum(range(2, 6)) + sum(range(2, 12)) + sum(range(2, 4))) / 16   # 5.25
+    for mb in (1, 2, 3):
+        r.cfg = {"pad_multiple": 8, "seq_len": 32}
+        r._reference = [r._pad_batch(rows[j:j + mb], 0) for j in range(0, len(rows), mb)]
+        fp = r.reference_fingerprint()
+        assert abs(fp["loss"] - expected) < 1e-6, mb                  # d(loss)/d(weight) = the
+        assert abs(fp["grad_norm"] - expected) < 1e-6, mb             #   same token mean
+        assert r.model.weight.grad is None                            # nothing left behind
+
+
 def test_a_ceiling_trial_accumulates_once():
     """find_ceiling sets effective_batch = micro_batch: same peak memory, 1/grad_accum the time."""
     c = _resolve({"model": BASE["model"], "data": "synthetic",

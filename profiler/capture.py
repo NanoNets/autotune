@@ -48,6 +48,8 @@ class Capture:
     reference_step_s: float = None                    # wall of the reference batch, profiler OFF
     profiled_step_s: float = None                     # wall of the same batch, profiler ON (distorted)
     population: dict = None                           # runner.population(): which rows, which batch
+    fingerprint: dict = None                          # runner.reference_fingerprint(): {loss,
+                                                      #   grad_norm} on the weights as loaded
     peak_flops: float = None                          # measured dense-GEMM peak (MFU denominator)
     peak_dtype: str = None                            # the dtype that peak was measured at
     peak_mem_bw_gb_s: float = None                    # measured achievable bandwidth (roofline)
@@ -263,12 +265,15 @@ def capture(runner, config, warmup=3, clean_steps=10, trace_path=None, peak_flop
     peak_dtype = str(dtype).replace("torch.", "")
 
     step_tokens, step_samples, per_pass, requested = [], [], None, clean_steps
+    fp = None                                          # fingerprint: before warmup, kept on OOM
 
     def passes():                                      # completed, not planned: an OOM mid-window
         return len(times) / per_pass if per_pass else None   # must not report a whole pass
 
     try:
         runner.setup(config)
+        fingerprint = getattr(runner, "reference_fingerprint", None)   # on the weights as loaded,
+        fp = fingerprint() if fingerprint else None                    #   before any step trains them
         has_ref = getattr(runner, "has_reference", False)
         reference = runner.reference_step if has_ref else runner.step
         count_tokens = getattr(runner, "last_step_tokens", None)
@@ -338,7 +343,7 @@ def capture(runner, config, warmup=3, clean_steps=10, trace_path=None, peak_flop
                        step_tokens=step_tokens, step_samples=step_samples,
                        clean_steps_requested=requested, clean_passes=passes(),
                        reference_step_s=reference_s, profiled_step_s=profiled_s,
-                       population=population,
+                       population=population, fingerprint=fp,
                        peak_flops=peak, peak_dtype=peak_dtype, peak_mem_bw_gb_s=peak_bw,
                        memory=memory, cpu=cpu, device=device)
 
@@ -350,6 +355,7 @@ def capture(runner, config, warmup=3, clean_steps=10, trace_path=None, peak_flop
         return Capture(status="oom", step_times_s=times, memory=mem,    # steps that DID run are
                        step_tokens=step_tokens, clean_passes=passes(),  # evidence, not noise
                        clean_steps_requested=requested, step_samples=step_samples,
+                       fingerprint=fp,
                        cpu=_cpu_stats(cpu_samples), peak_flops=peak,
                        peak_dtype=peak_dtype, peak_mem_bw_gb_s=peak_bw, device=device, error=first)
     except Exception as e:                             # any other failure, surfaced not swallowed

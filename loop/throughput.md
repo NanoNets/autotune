@@ -54,7 +54,7 @@ genuinely efficient per token while computing 6.8x too many of them.
 ## Safe vs off-limits
 The agent classifies each knob at Frame (conservative: unsure → off_limits). Guidance:
 
-- **Safe** (change speed, not the model): batch factorization, sharding/parallelism, recompute, offload, kernel swaps (verified numerically-safe), packing, compile, dataloader, tf32.
+- **Safe** (change speed, not the model): batch factorization, sharding/parallelism, recompute, offload, kernel swaps that are adapter knobs (`attn_implementation`, `fused_optimizer`, `chunked_ce`), packing, compile, dataloader, tf32. Installing a package that replaces layer kernels is **not** on this list — see the fingerprint section below.
 - **Off-limits** (change the model): learning rate, weight decay, warmup, dropout, optimizer *algorithm*, precision (bf16/fp16/FP8-train), `max_len`, seed, LoRA rank, and the effective_batch target.
 
 `max_len` is off-limits *and* load-bearing: it is the length the OOM ceiling is measured at
@@ -65,6 +65,44 @@ The agent classifies each knob at Frame (conservative: unsure → off_limits). G
 CE. **NEVER** drop `dtype` to make a config fit: it changes the model you get, so it is a decision to
 put to the human with the measured numbers, not one the loop may take. (`dtype` appears in the
 ceiling's staleness list only because a human changing it invalidates the measurement.)
+
+## The reference fingerprint is a smoke check, not verification
+
+Every real probe records a **reference fingerprint** on the weights as loaded, before any step
+trains them: `reference_loss` and `reference_grad_norm`, from one forward + backward over the fixed
+reference batch (`population.reference`: the same rows in every config, batched and padded the
+config's way). Same function → same pair. A grossly wrong forward moves the loss; a grossly wrong
+backward moves the gradient norm while the loss stays put.
+
+**What it catches and what it doesn't.** Two scalars, each a mean over ~a thousand median-length
+tokens (the reference batch never holds a long row), catch a kernel that ignores the mask, NaNs, a
+dtype blow-up, a backward that is plainly wrong. They do NOT catch a kernel that is wrong only at
+edge cases — padded positions, a chunk boundary, a long sequence — because a few hundred wrong
+logits barely move a mean. Verification proper is how the kernel authors test: full output *and*
+gradient tensors against a reference on identical inputs, swept over shapes chosen to hit the
+edges, with tolerances set per dtype (flash-attention: kernel error ≤ 2× fwd / 3× grads the
+plain-PyTorch bf16 error vs fp32; fla: L2 error ratio < 0.005–0.006 fwd / 0.005–0.008 grads;
+Liger: 32-step convergence, loss atol 1e-2 to 5e-2). That is a separate piece of work, not this
+number.
+
+**So a package that replaces layer kernels (`flash-linear-attention`, `causal_conv1d`,
+`flash_attn`) is decided with the human at Step 3, never installed mid-run.** Transformers binds
+the kernel at import with no switch to turn it off, so an install rewrites every later probe and
+the fingerprint has no "before" to compare against. Frame prints the fallback warnings; Step 3
+puts them to the human, and whatever is installed at confirmation is the run's environment. The
+fingerprint then guards the swaps that happen *within* a run — `attn_implementation`,
+`chunked_ce`, `torch_compile` — which is what it can do.
+
+**Reading the fingerprint.** bf16 kernels reorder sums, so the same math on different kernels does
+not give identical numbers — this repo measured a 0.29 max|Δ| in logits from a change of padded
+*width* alone, same kernels (`knowledge/packing-leaks-across-documents-on-hybrid-models.md`).
+Compare at matching `population.reference.batch_key` (same rows, same shapes); read the noise band
+off probes that changed only shape knobs (`micro_batch`, `padding`, `pad_multiple`) or
+`attn_implementation` on the baseline — those change `batch_key` by construction, so the band is
+an upper bound taken across keys. A move outside it disqualifies the knob for this run; with no
+band yet, a NaN or a move in the first significant digit disqualifies and anything smaller is
+recorded and re-judged later. A move inside the band is *not* a pass — it is the absence of gross
+breakage. Dropout > 0 adds its own noise; say so when comparing.
 
 ## The dynamic-padding guarantee
 

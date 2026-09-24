@@ -67,6 +67,10 @@ class Observation:
     reference_step_s: float = None     # wall of the reference batch, profiler OFF
     profiled_step_s: float = None      # wall of the same batch, profiler ON; / reference_step_s =
                                        #   profiler overhead
+    reference_loss: float = None       # fingerprint: loss on the reference batch, weights as loaded
+    reference_grad_norm: float = None  # fingerprint: gradient norm of that loss. A smoke check on a
+                                       #   kernel swap: catches gross breakage, not equivalence
+                                       #   (loop/throughput.md)
     population: dict = field(default_factory=dict)   # which rows the window timed, which batch the
                                                      #   trace describes (runner.population())
     phase_times_s: dict = field(default_factory=dict)   # HOST dispatch time per annotation
@@ -143,6 +147,8 @@ def diagnose(capture, params, tokens, gpu, trainable=None):
         peak_flops=peak, peak_dtype=getattr(capture, "peak_dtype", None),
         peak_mem_bw_gb_s=getattr(capture, "peak_mem_bw_gb_s", None),
         device_type=getattr(capture, "device", None),
+        reference_loss=(getattr(capture, "fingerprint", None) or {}).get("loss"),
+        reference_grad_norm=(getattr(capture, "fingerprint", None) or {}).get("grad_norm"),
         peak_mem_gb=mem.get("peak_gb"), reserved_mem_gb=mem.get("reserved_gb"),
         mem_total_gb=mem.get("total_gb"), headroom_gb=mem.get("headroom_gb"),
         cpu_util_mean=cpu.get("mean"), cpu_util_max=cpu.get("max"), nproc=cpu.get("nproc"),
@@ -209,6 +215,8 @@ def diagnose(capture, params, tokens, gpu, trainable=None):
                 "error": "impossible reading: " + "; ".join(impossible)}
 
     mem_str = f" | mem {mem['peak_gb']}/{mem['total_gb']}GB" if mem else ""
+    fp_str = (f" | ref-loss {base['reference_loss']:.4f} grad {base['reference_grad_norm']:.4g}"
+              if base["reference_loss"] is not None else "")
     if cpu.get("mean") is not None:
         cpu_str = f" | cpu {cpu['mean']:.0f}%"
     elif cpu.get("cores_busy") is not None:            # short window: the counter still has it
@@ -227,7 +235,8 @@ def diagnose(capture, params, tokens, gpu, trainable=None):
     summary = (f"{dev_str}samples/s {rate(samples_s, '.2f')} | tokens/s {rate(tok_s, '.0f')} | "
                f"MFU {pct(mfu_v)} | ref-batch GPU active {pct(active)} | "
                f"data-wait {pct(wait)} | "
-               f"idle {pct(frac(gap, ref_wall))}{cpu_str} | step cv {cv:.0%}{occ_str}{mem_str}")
+               f"idle {pct(frac(gap, ref_wall))}{cpu_str} | step cv {cv:.0%}{occ_str}{mem_str}"
+               f"{fp_str}")
     if busy is None:
         summary += " | trace recorded no kernels: GPU signals unknown"
     if impossible:

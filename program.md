@@ -85,6 +85,10 @@ user's script unchanged instead of a `frameworks/` runner (`backends/README.md`,
   every Profile `note`, and the run name back to the user.
 - IF the ceiling says `micro_batch=1` OOMs → say so here: it's a memory regime, and Step 4 starts
   from recompute/offload/sharding, not from batch knobs.
+- IF Frame printed kernel-fallback warnings (`fla`, `causal_conv1d`, `flash_attn` absent) → say
+  which layers run reference kernels and that installing the package is a numerical change the
+  loop cannot verify; the human decides here, and whatever is installed at confirmation is the
+  environment for the whole run (`loop/throughput.md`).
 - Once confirmed → proceed to Step 4. **"NEVER stop" (Global rules) applies from here on.**
 
 ### Step 4 — Run the experimental loop → `loop/loop.md`
@@ -116,6 +120,17 @@ anything but the shipped defaults, "faster by X%" means nothing.
   ceiling, usually in 1-2 short trials; otherwise it runs nothing. Then choose the probe's
   `micro_batch` against the bound it reports (`frame/README.md`). `compile` is in that list on measured evidence: fusing the
   cross-entropy cut peak memory 5.4GB and moved a measured ceiling from 2 to 4 (`experience/test_a10G.md`).
+- **ALWAYS** read the reference fingerprint (`reference_loss`, `reference_grad_norm`) on every
+  probe that swaps a kernel (`attn_implementation`, `chunked_ce`, `torch_compile`). At matching
+  `batch_key`, a move outside the noise band read off shape-only probes disqualifies the knob for
+  this run; with no such probe yet, a NaN or a move in the first significant digit disqualifies,
+  anything smaller is recorded and re-judged once a shape-only probe exists. It is a smoke check:
+  passing it is not verification (`loop/throughput.md`).
+- **NEVER** install a package that replaces layer kernels (`flash-linear-attention`,
+  `causal_conv1d`, `flash_attn`) mid-run. Transformers binds them at import with no off switch, so
+  an install silently rewrites every later probe and the fingerprint has no "before" to compare
+  to. Packages are decided with the human at Step 3, from Frame's fallback warnings
+  (`loop/throughput.md`).
 - **NEVER** raise `micro_batch` above the ceiling because a probe reported spare `headroom_gb`.
   Under `padding="longest"` a probe's peak reflects the rows it drew, not the dataset's longest —
   the ceiling is the bound, the observed peak is not. Dynamic padding is safe *because*

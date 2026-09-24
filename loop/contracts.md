@@ -67,6 +67,7 @@ Everything measured from running a Config. Raw and rich.
 | `signals` | raw gpu/cpu util, comm, data-wait. **No derived labels** — the model interprets |
 | `provenance` | did the config apply? which kernels engaged vs silently fell back? |
 | `population` | which rows the clean window timed (and over how many whole passes), and which fixed reference batch the trace describes. A **script probe** (the user's own training script, `program.md` "Script mode") says so: `driver: "script"`, `clean_window: "fixed-position"` (not whole passes) and `trace_basis: "traced-step"` (not a reference batch), plus the `script`, `script_args` and `script_files` it ran. Under the axiom below, it is never `same-rows` or `same-reference-batch` evidence |
+| `fingerprint` | `reference_loss` + `reference_grad_norm`: one fwd/bwd over the reference batch on the weights as loaded. A smoke check on a kernel swap — catches gross breakage, not equivalence (`loop/throughput.md`) |
 | `reliability` | step-time spread (`step_time_cv`), steps measured, passes completed |
 | `error` | on failure: structured cause |
 

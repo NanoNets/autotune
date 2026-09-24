@@ -19,6 +19,7 @@ Anything the profiler drives implements:
 | `step()` | run **one** optimizer step, each phase wrapped in `record_function("dataloader"/"forward"/"backward"/"optimizer")` |
 | `tokens_per_step()` | tokens processed per optimizer step (the D in the roofline) |
 | `.params` | total parameter count, every weight of the model (N_total in the roofline). Runners train every weight, so it is also the trainable count |
+| `reference_fingerprint()` *(optional)* | `{loss, grad_norm}` from one fwd/bwd over the reference batch on the weights as loaded; the profiler calls it once after `setup()`, before warmup. A runner without it reports `null` |
 
 The profiler is unchanged across runners — it just calls these.
 
@@ -65,6 +66,15 @@ adapter actually applies — a declared knob must really take effect.
   the dataset — a genuine fwd/bwd/opt is what gets timed.
 - **`grad_accum` is inside one `step()`** — grad_accum micro fwd/bwd passes (loss scaled by
   `1/grad_accum`), then one optimizer step. `tokens_per_step = effective_batch · seq_len`.
+- **`reference_fingerprint()` is the numerical fingerprint.** One forward + backward over the
+  reference batch (the rows `_reference_indices` chose, batched and padded this config's way),
+  loss weighted to the mean over real tokens, no optimizer step, gradients discarded. Same rows
+  run-wide, so a kernel swap that grossly changed the forward moves the loss and one that grossly
+  changed the backward moves the gradient norm. A smoke check, not verification: two means over
+  thousands of tokens miss edge-case errors (`loop/throughput.md`). Taken before warmup, so it never
+  touches the timed window or the peak; grad on and `train()` mode, so `torch.compile` traces the
+  training graph once; the RNG is forked so dropout, if any, is deterministic and the loader's
+  shuffle is untouched.
 - **Padding is masked** in the labels (`-100`) and attention, so a padded step is still a valid
   training step. Fully blank/whitespace rows are **dropped** (an all-pad batch has all-`-100`
   labels → `0/0` NaN loss, which would poison every later step); a run with too few usable rows

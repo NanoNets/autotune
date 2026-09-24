@@ -407,16 +407,55 @@ class HFRunner:
             attention = attention.to(self.device)
             labels = labels.to(self.device)
             with self._rf("forward"):
-                if c["chunked_ce"]:
-                    loss = self._chunked_loss(input_ids, attention, labels, c["chunked_ce"])
-                else:
-                    loss = self.model(input_ids=input_ids, attention_mask=attention,
-                                      labels=labels).loss
-                loss = loss / c["grad_accum"]
+                loss = self._loss(input_ids, attention, labels) / c["grad_accum"]
             with self._rf("backward"):
                 loss.backward()
         with self._rf("optimizer"):
             self.opt.step()
+
+    def _loss(self, input_ids, attention, labels):
+        """The config's loss path: HF's own, or the chunked cross-entropy when `chunked_ce` is on."""
+        c = self.cfg
+        if c["chunked_ce"]:
+            return self._chunked_loss(input_ids, attention, labels, c["chunked_ce"])
+        return self.model(input_ids=input_ids, attention_mask=attention, labels=labels).loss
+
+    def reference_fingerprint(self):
+        """Loss and gradient norm on the fixed reference batch, on the weights as loaded.
+
+        The config's numerical fingerprint, taken once before any step trains the model: one
+        forward + backward over the reference rows (`_reference_indices`, batched and padded the
+        way this config batches them), the loss weighted to the mean over real tokens, no
+        optimizer step, gradients discarded. Same rows for every config in a run, so two configs
+        that compute the same function return the same pair, to bf16 kernel-reordering noise. A
+        grossly wrong forward moves the loss; a grossly wrong BACKWARD moves the gradient norm
+        while the loss stays put -- fla / causal_conv1d ship their own backward kernels. A SMOKE
+        CHECK, not verification: two means over thousands of tokens miss edge-case errors
+        (loop/throughput.md). Runs the training graph (grad on, `train()` mode), so torch.compile
+        traces it once. None for synthetic data.
+        """
+        import torch
+        if self._reference is None:
+            return None
+        batches = list(self._reference)                 # collate once; the loader is re-iterable
+        counts = [int((b[2][:, 1:] != -100).sum()) for b in batches]   # what HF's mean counts
+        total = sum(counts)
+        if not total:
+            return None
+        loss_sum = 0.0
+        self.opt.zero_grad(set_to_none=True)
+        devices = [torch.cuda.current_device()] if self.device == "cuda" else []
+        with torch.random.fork_rng(devices=devices):    # dropout, if any, draws the same mask --
+            torch.manual_seed(0)                        #   without touching the loader's RNG
+            for (ids, att, labels), n in zip(batches, counts):
+                ids, att, labels = ids.to(self.device), att.to(self.device), labels.to(self.device)
+                loss = self._loss(ids, att, labels)
+                loss_sum += loss.item() * n
+                (loss * (n / total)).backward()        # grads sum to the token-mean's gradient
+        grads = [p.grad for p in self.model.parameters() if p.grad is not None]
+        norm = torch.nn.utils.get_total_norm(grads).item()   # one sync, not one per tensor
+        self.opt.zero_grad(set_to_none=True)            # leave the model exactly as loaded
+        return {"loss": loss_sum / total, "grad_norm": norm}
 
     def _chunked_loss(self, input_ids, attention, labels, chunks):
         """Causal-LM cross-entropy computed in `chunks` slices of the token axis.
