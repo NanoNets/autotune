@@ -47,7 +47,8 @@ class Observation:
     step_time_mean_s: float = None     # clean wall-clock per step, MEAN — what every rate divides by
     step_time_cv: float = None         # noise floor: coefficient of variation across clean steps
     clean_steps_measured: int = None   # clean steps timed (rounded up to whole passes when known)
-    clean_passes: float = None         # passes over the sample the window covered (None: unknown)
+    clean_steps_requested: int = None  # what the caller asked for; differs when rounding applied
+    clean_passes: float = None         # passes COMPLETED over the sample (None: unknown)
     tokens_per_step: float = None      # mean tokens per clean step — the numerator of every rate
     tokens_per_s: float = None         # total clean tokens / total clean time
     flops: float = None                # training FLOPs of the mean clean step (6ND)
@@ -62,7 +63,7 @@ class Observation:
                                                      #   trace describes (runner.population())
     phase_times_s: dict = field(default_factory=dict)   # HOST dispatch time per annotation
     gpu_phase_times_s: dict = field(default_factory=dict)  # GPU time per annotation (correlation ids)
-    gpu_phase_coverage: float = None   # fraction of gpu_busy_s attributed to some annotation
+    gpu_phase_coverage: float = None   # share of summed kernel time attributed to an annotation
     data_wait_s: float = None
     data_wait_frac: float = None
     gap_s: float = None                # reference batch GPU idle (reference_step_s - busy)
@@ -80,7 +81,7 @@ class Observation:
     provenance: dict = field(default_factory=dict)
     top_kernels: list = field(default_factory=list)   # [[name, seconds], ...] top 8 by total time
     kernel_count: int = None           # distinct kernels; with top8_coverage exposes the long tail
-    top8_coverage: float = None        # fraction of GPU-busy in the top-8 kernels
+    top8_coverage: float = None        # share of summed kernel time in the top-8 kernels
     gap_count: int = None              # idle-shape: number of gaps on the GPU-kernel timeline
     max_gap_s: float = None            #   largest single gap (one big stall vs many small)
     achieved_occupancy_pct: float = None   # runtime-weighted; the "why is compute slow" signal
@@ -132,6 +133,7 @@ def diagnose(capture, params, tokens, gpu):
         cpu_util_mean=cpu.get("mean"), cpu_util_max=cpu.get("max"), nproc=cpu.get("nproc"),
         cpu_cores_busy=cpu.get("cores_busy"),
         clean_passes=getattr(capture, "clean_passes", None),
+        clean_steps_requested=getattr(capture, "clean_steps_requested", None),
         population=getattr(capture, "population", None) or {},
     )
 
@@ -156,6 +158,8 @@ def diagnose(capture, params, tokens, gpu):
     ks = kernels(trace)                                # all kernels, by name (desc)
     kernel_us = sum(d for _, d in ks)                  # summed per kernel: top-8 share only
     busy = gpu_busy_us(trace) / 1e6                    # union of intervals: the time GPU was busy
+    if not ks and dev == "cuda":                       # a CUDA step with no kernels in its trace is
+        busy = None                                    # a trace that failed, not an idle GPU
     top8 = [[n, d / 1e6] for n, d in ks[:8]]            # seconds — every duration here is `_s`
     top8_cov = round(sum(d for _, d in ks[:8]) / kernel_us, 3) if kernel_us else None
     gap_count, max_gap_us = kernel_gaps(trace)
@@ -172,7 +176,7 @@ def diagnose(capture, params, tokens, gpu):
         return x / over if over and x is not None else None
 
     active = frac(busy, ref_wall)
-    gap = ref_wall - busy if ref_wall else None        # null, not 0: a negative gap means the two
+    gap = ref_wall - busy if ref_wall and busy is not None else None   # negative gap: the two
     impossible = []                                    # executions disagree, which is information
     if active is not None and active > 1 + _TOLERANCE:
         impossible.append(f"gpu_active_frac {active:.2f} > 1")
@@ -200,6 +204,8 @@ def diagnose(capture, params, tokens, gpu):
     summary = (f"{dev_str}MFU {pct(mfu_v)} | ref-batch GPU active {pct(active)} | "
                f"data-wait {pct(wait)} | "
                f"idle {pct(frac(gap, ref_wall))}{cpu_str} | noise +/-{cv:.0%}{occ_str}{mem_str}")
+    if busy is None:
+        summary += " | trace recorded no kernels: GPU signals unknown"
     if impossible:
         summary = f"{dev_str}INVALID ({'; '.join(impossible)}) | " + summary[len(dev_str):]
 

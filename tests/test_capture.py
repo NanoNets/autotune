@@ -59,6 +59,7 @@ def test_cpu_signal_survives_a_window_too_short_to_sample():
 class _PassRunner(_Runner):
     """A runner that exposes the population hooks: passes, a reference batch, token counts."""
     steps_per_pass = 4
+    has_reference = True
 
     def setup(self, config):
         super().setup(config)
@@ -87,21 +88,59 @@ def test_clean_window_is_whole_passes_and_the_trace_is_the_reference_batch():
                   peak_flops=1e12, peak_mem_bw_gb_s=1.0)
     assert cap.status == "ok", cap.error
     assert len(cap.step_times_s) == 8 and cap.clean_passes == 2.0   # 5 rounded up to 2 passes of 4
-    # warmup, warm the reference, restart at a pass boundary, window, then the reference twice:
-    # once profiler-off (its wall), once profiler-on (the trace) — never a loader batch
-    assert r.log == ["step"] * 2 + ["ref", "pass"] + ["step"] * 8 + ["ref", "ref"]
+    assert cap.clean_steps_requested == 5
+    # warmup, warm the reference as many times (compile, then capture), restart at a pass
+    # boundary, window, then the reference twice: profiler off (its wall), then on (the trace)
+    assert r.log == ["step"] * 2 + ["ref"] * 2 + ["pass"] + ["step"] * 8 + ["ref", "ref"]
     assert cap.step_tokens == [10 * n for n in range(3, 11)]   # clean steps only, not warmup
     assert cap.reference_step_s is not None and cap.profiled_step_s is not None
     assert cap.population["reference"]["batch_key"] == "k1"
 
 
-def test_a_runner_without_hooks_is_its_own_reference():
-    """The torch fixture and synthetic ceiling trials reuse one batch: step() is the reference."""
-    cap = capture(_Runner(), {"device": "cpu"}, warmup=1, clean_steps=3,
+def test_a_runner_without_a_reference_pays_no_extra_steps():
+    """One fixed batch (torch fixture, synthetic ceiling): the clean window already times it."""
+    class Counting(_Runner):
+        def setup(self, config):
+            super().setup(config)
+            self.steps = 0
+
+        def step(self):
+            self.steps += 1
+
+    r = Counting()
+    cap = capture(r, {"device": "cpu"}, warmup=1, clean_steps=3,
                   peak_flops=1e12, peak_mem_bw_gb_s=1.0)
+    assert r.steps == 1 + 3 + 1                         # warmup + window + the traced step only
     assert len(cap.step_times_s) == 3 and cap.clean_passes is None   # no rounding without passes
     assert cap.step_tokens == [] and cap.population is None
-    assert cap.reference_step_s is not None
+    assert abs(cap.reference_step_s - sum(cap.step_times_s) / 3) < 1e-12   # the window's mean
+
+
+def test_an_oom_mid_window_reports_the_passes_completed_not_planned():
+    """Review: an OOM after 3 of 8 steps must not claim 2 whole passes (same-rows evidence)."""
+    import torch
+
+    class OomAfter3(_PassRunner):
+        def step(self):
+            super().step()
+            if self.log.count("pass") and self.n > 2 + 3:  # 2 warmup, then 3 clean steps
+                raise torch.cuda.OutOfMemoryError("CUDA out of memory")
+
+    cap = capture(OomAfter3(), {"device": "cpu"}, warmup=2, clean_steps=5,
+                  peak_flops=1e12, peak_mem_bw_gb_s=1.0)
+    assert cap.status == "oom"
+    assert len(cap.step_times_s) == 3 and cap.clean_passes == 3 / 4   # 0.75, not 2.0
+
+
+def test_rounding_up_to_whole_passes_is_announced():
+    """Review: 10 clean steps silently becoming 250 is a probe-length surprise."""
+    import contextlib
+    import io
+    err = io.StringIO()
+    with contextlib.redirect_stderr(err):
+        capture(_PassRunner(), {"device": "cpu"}, warmup=1, clean_steps=5,
+                peak_flops=1e12, peak_mem_bw_gb_s=1.0)
+    assert "clean_steps 5 -> 8" in err.getvalue()
 
 
 if __name__ == "__main__":

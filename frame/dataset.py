@@ -118,11 +118,8 @@ def stratify(lengths, n):
 
 
 def whole_steps(n, effective_batch):
-    """`n` rounded DOWN to a multiple of `effective_batch`, so one pass is whole optimizer steps.
-
-    Rounded here, at the draw, rather than by trimming later: a trim after stratifying would cut
-    whichever rows sit last, and a later sort could make those the longest.
-    """
+    """`n` rounded down to a multiple of `effective_batch`, at the draw, so no later trim can
+    cut the stratified sample's longest rows."""
     return n - n % effective_batch if effective_batch else n
 
 

@@ -130,6 +130,15 @@ def test_no_reference_wall_means_no_trace_fractions():
     assert o.gpu_busy_s == 120e-6                       # the trace itself still reports
 
 
+def test_a_cuda_trace_with_no_kernels_is_unknown_not_idle():
+    """A failed trace (seen at 38.97/39.5GB reserved) must not read as a 0%-busy GPU."""
+    empty = {**TRACE, "traceEvents": [e for e in TRACE["traceEvents"] if e["cat"] != "kernel"]}
+    o = diagnose(_cap(trace=empty), params=PARAMS, tokens=TOKENS, gpu=GPU)
+    assert o.gpu_busy_s is None and o.gpu_active_frac is None and o.gap_s is None
+    assert o.status == "ok" and "no kernels" in o.summary     # rates still stand; GPU signals don't
+    assert o.mfu is not None
+
+
 def test_an_impossible_reading_is_invalid_not_scored():
     """smollm2 exp 28: one wide batch's busy over a narrow median read 560%. Never score it."""
     o = diagnose(_cap(ref=40e-6), params=PARAMS, tokens=TOKENS, gpu=GPU)   # 120us busy / 40us

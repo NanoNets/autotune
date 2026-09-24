@@ -18,11 +18,13 @@ Two populations, never mixed (the Measurement axiom, `loop/contracts.md`):
   is a fixed set of rows chosen by rule, not whichever batch the loader happened to be on. It is
   run once profiler-OFF (its own clean wall, `reference_step_s`) and once profiler-ON (the trace),
   so busy time is only ever divided by the wall of the same batch.
-Runners without these hooks (the torch fixture, synthetic ceiling trials) reuse one fixed batch,
-so `step()` already is the reference and nothing changes for them.
+Runners without a reference batch (`has_reference` false: the torch fixture, synthetic ceiling
+trials) reuse one fixed batch, so the clean window already times the reference. Its mean step is
+`reference_step_s`, and only the traced step is extra.
 """
 import math
 import os
+import sys
 import tempfile
 import threading
 import time
@@ -40,7 +42,8 @@ class Capture:
     memory: dict = None                               # {peak_gb, reserved_gb, total_gb, headroom_gb}
     cpu: dict = None                                  # {mean, max, nproc} over the clean window
     step_tokens: list = field(default_factory=list)   # tokens per clean step, when the runner counts
-    clean_passes: float = None                        # clean window / steps_per_pass (None: unknown)
+    clean_steps_requested: int = None                 # what the caller asked for, before rounding
+    clean_passes: float = None                        # clean steps COMPLETED / steps_per_pass
     reference_step_s: float = None                    # wall of the reference batch, profiler OFF
     profiled_step_s: float = None                     # wall of the same batch, profiler ON (distorted)
     population: dict = None                           # runner.population(): which rows, which batch
@@ -258,20 +261,30 @@ def capture(runner, config, warmup=3, clean_steps=10, trace_path=None, peak_flop
     peak_bw = peak_mem_bw_gb_s or measure_peak_bandwidth_gb_s(device)
     peak_dtype = str(dtype).replace("torch.", "")
 
-    step_tokens, passes = [], None
+    step_tokens, per_pass, requested = [], None, clean_steps
+
+    def passes():                                      # completed, not planned: an OOM mid-window
+        return len(times) / per_pass if per_pass else None   # must not report a whole pass
+
     try:
         runner.setup(config)
-        reference = getattr(runner, "reference_step", None) or runner.step
+        has_ref = getattr(runner, "has_reference", False)
+        reference = runner.reference_step if has_ref else runner.step
         count_tokens = getattr(runner, "last_step_tokens", None)
         per_pass = getattr(runner, "steps_per_pass", None)
         if per_pass:                                   # whole passes, so every config times the
             clean_steps = max(1, math.ceil(clean_steps / per_pass)) * per_pass   # same rows
-            passes = clean_steps / per_pass
+            if clean_steps != requested:
+                print(f"autotune: clean_steps {requested} -> {clean_steps} "
+                      f"({clean_steps // per_pass} whole pass(es) of {per_pass} steps)",
+                      file=sys.stderr)
 
         for _ in range(warmup):                        # kernel/cache warmup, discarded
             runner.step()
-        reference()                                    # warm the reference batch's shapes too, or
-        if hasattr(runner, "start_pass"):              # its first run pays compile/autotune
+        if has_ref:                                    # warm the reference as long as the loader:
+            for _ in range(warmup):                    # under compile, call 1 compiles and call 2
+                reference()                            # captures; neither may be the timed one
+        if hasattr(runner, "start_pass"):
             runner.start_pass()                        # the window starts at a pass boundary
         _sync(device)
         if device == "cuda":
@@ -292,10 +305,13 @@ def capture(runner, config, warmup=3, clean_steps=10, trace_path=None, peak_flop
         _stop_sampler()
         memory = _read_memory(device)                  # the window's peak, before the reference runs
 
-        t0 = time.perf_counter()                       # the reference batch, profiler OFF: the
-        reference()                                    # denominator for everything the trace says
-        _sync(device)
-        reference_s = time.perf_counter() - t0
+        if has_ref:                                    # the reference batch, profiler OFF: the
+            t0 = time.perf_counter()                   # denominator for everything the trace says
+            reference()
+            _sync(device)
+            reference_s = time.perf_counter() - t0
+        else:                                          # one fixed batch: the window WAS the reference
+            reference_s = sum(times) / len(times) if times else None
 
         activities = [ProfilerActivity.CPU]            # attribution: the same batch, profiled
         if device == "cuda":
@@ -315,7 +331,8 @@ def capture(runner, config, warmup=3, clean_steps=10, trace_path=None, peak_flop
         population = runner.population() if hasattr(runner, "population") else None
 
         return Capture(status="ok", step_times_s=times, trace=trace_path,
-                       step_tokens=step_tokens, clean_passes=passes,
+                       step_tokens=step_tokens, clean_steps_requested=requested,
+                       clean_passes=passes(),
                        reference_step_s=reference_s, profiled_step_s=profiled_s,
                        population=population,
                        peak_flops=peak, peak_dtype=peak_dtype, peak_mem_bw_gb_s=peak_bw,
@@ -327,7 +344,8 @@ def capture(runner, config, warmup=3, clean_steps=10, trace_path=None, peak_flop
         torch.cuda.empty_cache()
         first = str(e).strip().splitlines()[0] if str(e).strip() else "CUDA out of memory"
         return Capture(status="oom", step_times_s=times, memory=mem,    # steps that DID run are
-                       step_tokens=step_tokens, clean_passes=passes,    # evidence, not noise
+                       step_tokens=step_tokens, clean_passes=passes(),  # evidence, not noise
+                       clean_steps_requested=requested,
                        cpu=_cpu_stats(cpu_samples), peak_flops=peak,
                        peak_dtype=peak_dtype, peak_mem_bw_gb_s=peak_bw, device=device, error=first)
     except Exception as e:                             # any other failure, surfaced not swallowed
