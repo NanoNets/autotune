@@ -1,13 +1,14 @@
 ---
 claim: The synthetic OOM ceiling is a necessary but NOT sufficient bound — at matched shapes a real
   run peaks several GB above it, so a config sitting near the ceiling can pass the ceiling search
-  and still OOM in training. Treat a ceiling above ~0.65 card_frac as unproven until a real
-  full-width probe survives it.
+  and still OOM in training. The gap is one gradient buffer (params × dtype bytes): a
+  `grad_accum=1` trial has none resident at its peak, a `grad_accum >= 2` run does. Until the
+  fix is re-measured, a ceiling is unproven until a real full-width probe survives it.
 type: ceiling
 context:
   arch_family: any
-  hardware_class: any CUDA; the margin needed scales with micro_batch, so it bites hardest on
-    large cards running large micro_batches
+  hardware_class: any CUDA; the margin is one gradient buffer (params × dtype bytes), so it
+    bites hardest on large models near the card limit
   dataset_shape: any — but it is only DISCOVERABLE under dynamic padding, where the probe's own
     batches are narrow and never exercise the worst case the ceiling claims to bound
 evidence:
@@ -30,20 +31,25 @@ at matched shapes, on the same card and the same run:**
 | mb=4, no recompute | 36.449 GB | 0.928 | **OOM** (reached 35.697) |
 | mb=4 + recompute | 22.353 GB | 0.566 | ok — real peak **25.862 GB** |
 
-The positive control is the useful one: **+3.51 GB (+15.7%) over its own ceiling**. The two OOMs
-imply a larger gap still at their (larger) micro_batches, so the margin appears to **grow with
-micro_batch**.
+The offset is the same on three independent shapes: exp 21 **+3.509 GB** (25.862 vs 22.353);
+exp 1, the shipped baseline at `mb=1`/`grad_accum=16`, **+3.529 GB** (22.477 vs the `mb=1`
+trial's 18.948); and exp 18's OOM message reads **30.11 GiB allocated by PyTorch** at the 7.58 GiB
+fp32-logits allocation — its ceiling's pre-logits peak 34.174 − 7.58 + 3.505 = 30.10. The shipped
+`mb=16` config (exp 23, `grad_accum=1`) peaked 2.2 GB *below* its ceiling (see "How to use it" for
+why). The gap is an additive **constant**, not a fraction.
 
-**Mechanism.** `frame/synthetic.py` builds ONE worst-case batch, puts it on the device, and the
-runner reuses it every step (`frameworks/hf.py` `_synthetic_batch`). A real run instead allocates
-fresh host tensors per micro-step and `.to(device)`-copies them, so it carries per-micro-step
-staging allocations and the allocator churn they cause on top of the same activation peak. The
-ceiling measures activation memory correctly; it just isn't measuring the whole process.
+**Mechanism (found on review; fixed in `frame/ceiling.py`).** `find_ceiling.fits()` ran every
+trial at `effective_batch = micro_batch`, i.e. `grad_accum=1`, on the argument that accumulation
+does not move the peak. It does: `zero_grad(set_to_none=True)` frees `.grad` at step start, so a
+`grad_accum=1` trial reaches its peak with no gradient buffer resident, while any real config with
+`grad_accum >= 2` runs micro-step 2 with the full bf16 buffer — params × 2 bytes = 1.8818B × 2 =
+**3.505 GB**, against the measured +3.509 GB. Trials now accumulate twice whenever the real config
+accumulates at all. Predicted from this arithmetic; not yet re-measured on a GPU.
 
 **This is not a contradiction of the dynamic-padding guarantee so much as a measurement of its
-fine print.** `frame/README.md` already says *"at a high `card_frac`, keep a margin below the
-ceiling rather than running at it"* — that caveat was advisory and is now quantified. Every
-configuration that failed sat at `card_frac >= 0.878`; everything verified sits at `<= 0.60`.
+fine print.** The gap is one gradient buffer, an additive term, so the check is `ceiling peak + params × dtype
+bytes` fits — a `card_frac` fraction is the wrong model for it, even where it happens to separate
+this run's failures (0.878, 0.928) from its verified configs (0.57, 0.52).
 
 **What it cost.** It invalidated two champions mid-run. `micro_batch=8 + recompute` measured
 28.585 samples/s (13.27x) and `micro_batch=4` measured 25.803 (11.98x); both OOM on a full-width
@@ -52,6 +58,13 @@ batch and neither can be shipped. Under `length_grouped=True` this is not a remo
 sampler seeks out rather than stumbles on.
 
 **How to use it.** Do not ship a config on ceiling arithmetic. Run the candidate once at
-`padding="max_length"`, which forces every batch to `[micro_batch, max_len]` — the exact worst
-case — and costs one short probe because static padding is distribution-invariant (cv ~0.006, so
-20 steps suffices). If it survives, the bound is demonstrated rather than inferred.
+`padding="max_length"`, which forces every batch to `[micro_batch, max_len]` — the *shape* worst
+case — and costs one short probe: default warmup plus a couple of clean steps (optimizer state
+lands on the first `opt.step()`, the gradient buffer is resident from micro-step 2). If it
+survives, the shape bound is demonstrated rather than inferred.
+
+**Under `chunked_ce` that probe is not the whole worst case.** `_chunked_loss` drops pad labels
+before chunking, so a real `max_length` batch of short rows runs CE over a few thousand real
+tokens, while the synthetic trial (labels = ids, nothing masked) runs it over all `mb × max_len`.
+That is exp 23's −2.2 GB below its ceiling. So with chunked CE the real probe bounds the
+transformer stack and the (fixed) synthetic ceiling bounds the CE term: **both are required**.

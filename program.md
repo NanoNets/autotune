@@ -111,8 +111,13 @@ anything but the shipped defaults, "faster by X%" means nothing.
   test_a10G).
 - **NEVER** raise `micro_batch` above the ceiling because a probe reported spare `headroom_gb`.
   Under `padding="longest"` a probe's peak reflects the rows it drew, not the dataset's longest —
-  the ceiling is the bound, the observed peak is not. Dynamic padding is safe *because*
-  `micro_batch <= ceiling(max_len)`, not despite it.
+  the ceiling is the bound, the observed peak is not. And the ceiling is an upper bound only: a
+  config under it is not proven to fit (`loop/throughput.md`).
+- **ALWAYS** prove the champion on the real worst case before naming it: one probe at
+  `padding="max_length"` at `max_len`, default `warmup` + a couple of clean steps, conclusion
+  tagged `WORST-CASE PROOF`. The ceiling is an upper bound, not a fit guarantee — and under
+  `chunked_ce` the probe bounds the shape only, so the ceiling stays required too
+  (`loop/throughput.md`).
 - **NEVER** propose a `dtype` change to make something fit — precision changes the model. IF the
   memory regime blocks the run, put it to the human with the measured numbers (`loop/throughput.md`).
 - **NEVER** log a ceiling trial as an experiment. Synthetic probes measure memory, not throughput

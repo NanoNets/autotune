@@ -81,7 +81,8 @@ Run the Config — the cheapest test that answers the question.
 
 1. **Analytical** (free): predict via the surrogate. Kill predicted-OOM or predicted-worse-than-frontier configs here. `micro_batch` above the measured ceiling is killed on evidence, not on a prediction.
 2. **Probe** (seconds): run on real hardware. Cost-capped and adaptive — stop when the reading is steady within the noise floor, or the cost cap is hit. The agent sets the cap.
-3. **Extended probe** (minutes, champion only): confirm the number holds over time (fragmentation, drift, periodic stalls). Never a full training run. The ceiling is measured at a fixed shape and so does NOT predict fragmentation from varying real lengths — this is where that shows up.
+3. **Worst-case probe** (seconds, champion only): `padding="max_length"` at `max_len` on the real runner. The ceiling is an upper bound, not a fit guarantee — this is what proves the shape fits; under `chunked_ce` the ceiling still bounds the CE term (`loop/throughput.md`).
+4. **Extended probe** (minutes, champion only): confirm the number holds over time (fragmentation, drift, periodic stalls). Never a full training run. The ceiling is measured at a fixed shape and so does NOT predict fragmentation from varying real lengths — this is where that shows up.
 
 **Ceiling probes are not experiments.** They run on synthetic batches and answer "does it fit", never "how fast". They go to `ceiling.tsv`; only real-data probes are scored, ranked, or put on the frontier.
 

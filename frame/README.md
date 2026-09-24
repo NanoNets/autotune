@@ -133,9 +133,10 @@ and `16` is eliminated *before* the loop spends a 5-minute probe watching it cra
 
 ### Rules
 
-- **Dynamic padding is safe IFF `micro_batch <= ceiling`.** Every real batch is at most `max_len`
-  wide, so a config that fits the synthetic worst case fits every batch the dataset can produce.
-  That is the whole guarantee — and it is what makes `padding="longest"` usable at all.
+- **The ceiling is necessary, not sufficient.** `micro_batch > ceiling` cannot run; `micro_batch
+  <= ceiling` is not proven to run — on `qwen3.5_2b_a100_wikitext` two configs passed it and OOM'd
+  on real data (`knowledge/synthetic-ceiling-underestimates-real-peak.md`). Prove a champion with
+  one real `padding="max_length"` probe; why, and how many steps: `loop/throughput.md`.
 - **NEVER raise `micro_batch` on a probe's `headroom_gb`.** Under dynamic padding a probe's peak
   reflects the rows it happened to draw, not the dataset's longest, so its headroom is an artifact
   of the sample. On `test_a10G` the scan saw max 520 tok against `max_len=2048`: no probe in 23
@@ -155,7 +156,10 @@ and `16` is eliminated *before* the loop spends a 5-minute probe watching it cra
 - **Measure it with the REAL training step.** A ceiling measured on a different workload describes
   that workload, not this job. `--ceiling` uses `--framework`'s real runner (`frameworks/hf.py`
   loads real weights and runs a real fwd/bwd/opt); `frame.profile.frame(..., runner=...)` takes one
-  directly. Constructing a runner is never implicit — no `runner`, no ceiling.
+  directly. Constructing a runner is never implicit — no `runner`, no ceiling. Trials accumulate
+  twice whenever the real config would accumulate at all, so the gradient buffer is resident at
+  the peak as in training — at `grad_accum=1` it is not, and the ceiling read 3.5GB low on a 1.9B
+  model. The gap is measured; the fix closing it is not yet (`loop/throughput.md`).
 - **The bound lands on the knob.** `build()` stamps `micro_batch.max` from the measured ceiling
   (`_bound_knobs`). A framework's `knobs()` can only declare `min: 1` — it takes no arguments and
   cannot know a per-card measurement — so without this the SearchSpace would advertise an unbounded

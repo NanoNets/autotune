@@ -70,6 +70,10 @@ def load(path):
                 # still drawn -- a discarded measurement is part of the history -- but the staircase
                 # must not climb onto a number that did not apply.
                 "unreliable": "UNRELIABLE" in concl,
+                # The champion's fit check at padding="max_length" (loop/throughput.md): a real
+                # probe, drawn like a control, but a static-padding number that must never set
+                # a record on a dynamic-padding staircase.
+                "proof": "WORST-CASE PROOF" in concl,
                 "hyp": r.get("hypothesis") or "",
                 "knobs": _knobs(r.get("hypothesis") or ""),
             })
@@ -105,12 +109,13 @@ def main():
         r["superseded"] = bool(basis and r["n"] < basis and not r["unreliable"]
                                and r["n"] != rows[0]["n"])
 
-    eligible = [r for r in rows if r["sps"] and not r["unreliable"] and not r["superseded"]]
+    eligible = [r for r in rows if r["sps"] and not r["unreliable"] and not r["superseded"]
+                and not r["proof"]]
     baseline = eligible[0]["sps"] if eligible else rows[0]["sps"]
     best, records = 0.0, []                            # records: the staircase steps
     for r in rows:
         r["record"] = bool(r["sps"] and r["sps"] > best
-                           and not r["unreliable"] and not r["superseded"])
+                           and not r["unreliable"] and not r["superseded"] and not r["proof"])
         if r["record"]:
             best = r["sps"]
             records.append(r)
@@ -158,7 +163,7 @@ def main():
         elif r["record"]:
             ax.plot(r["n"], r["sps"], marker="o", ms=9, color=RECORD,
                     mec="white", mew=1.6, zorder=5)
-        elif r["control"]:                              # hollow = a control, not a new idea
+        elif r["control"] or r["proof"]:                # hollow = a control, not a new idea
             ax.plot(r["n"], r["sps"], marker="o", ms=7.5, mfc="white",
                     mec=RAN, mew=1.8, zorder=4)
         else:

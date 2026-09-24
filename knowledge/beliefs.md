@@ -28,9 +28,10 @@ the `Belief` contract in `loop/contracts.md`.
 ## Ceiling — what bounds the memory
 
 - [synthetic-ceiling-underestimates-real-peak](synthetic-ceiling-underestimates-real-peak.md) — the
-  synthetic ceiling is necessary but NOT sufficient: real runs peak ~3.5GB+ above it at matched
-  shapes, so a config near the ceiling can pass the search and OOM in training. Prove any candidate
-  above ~0.65 `card_frac` with one `padding=max_length` probe.
+  synthetic ceiling is necessary but NOT sufficient: a `grad_accum=1` trial has no gradient buffer
+  resident at its peak, so real runs at `grad_accum >= 2` peak params × dtype bytes above it
+  (+3.5GB on 1.9B, three shapes). Fixed in `frame/ceiling.py`, unmeasured since; prove the
+  champion with one `padding=max_length` probe (and under `chunked_ce`, keep the synthetic bound).
 - [chunked-ce-makes-memory-batch-independent](chunked-ce-makes-memory-batch-independent.md) — at
   large vocab, slicing CE over the token axis with a checkpoint per slice removes the only
   activation term that scales with batch; peak goes flat in `micro_batch` and the ceiling stops

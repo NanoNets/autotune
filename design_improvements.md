@@ -41,9 +41,10 @@ Only the ceiling ran it (`ceiling.tsv`, final block): 17.386 GB allocated / 20.7
 22.1 GB, fits at `micro_batch=8`, **OOMs at 9**. The shipped config is safe, and safe by one.
 
 **Doctrine that came out of it** (now in `loop/throughput.md`, `frame/README.md`, `program.md`):
-`padding="longest"` is safe **iff `micro_batch <= ceiling(max_len)`**, and `micro_batch` must NEVER
-be raised on a probe's reported `headroom_gb` — under dynamic padding that headroom is an artifact
-of which rows were drawn.
+`micro_batch` must NEVER be raised on a probe's reported `headroom_gb` — under dynamic padding that
+headroom is an artifact of which rows were drawn. The stronger form first written here, "safe
+**iff** `micro_batch <= ceiling`", was falsified by run 2 (`qwen3.5_2b_a100_wikitext`, exps 18/20):
+the ceiling is necessary, not sufficient — `loop/throughput.md`, and E2 below.
 
 **Still to do:** promote this to a belief in `knowledge/` and delete the entry.
 
@@ -215,16 +216,17 @@ Setup: `backend = "modal"`, `gpu = "A10G"`, `Qwen/Qwen2.5-0.5B`, `wikitext-2-raw
 |---|---|---|---|
 | **E0** | Run `find_ceiling` once on a real A10G with `HFRunner` | Does it run at all? Do `peak_gb` / `oom_at` / `frag_gb` populate? | **8** (blocking) |
 | **E1** | Same run — fit `peak_gb` vs `micro_batch` | Is the memory curve linear? How far is the predicted ceiling from the measured one? | **2** |
-| **E2** | Ceiling on synthetic vs ceiling on real rows, same config | Do they agree? (They should, under `padding="max_length"`) | **1** |
+| **E2** | Ceiling on synthetic vs ceiling on real rows, same config | Do they agree? Run 2 answered by accident: **no** — real peaked one bf16 gradient buffer (params × 2B) above synthetic, because trials ran at `grad_accum=1` (fixed: they now accumulate twice). Re-run to confirm the fix closes the gap | **1** |
 | **E3** | E2 again with pad-to-longest instead of `padding="max_length"` | Does the real ceiling become unstable once padding is dynamic? | **1** |
 | **E4** | Ceiling with `gradient_checkpointing` on vs off | How far does one memory lever move it? Does the staleness rule earn its cost? | **3** |
 | **E5** | Sweep (model, max_len) — 0.5B/1.5B × 1024/2048/4096 | How often does the ceiling land *below* `effective_batch`? | **3** |
 
 **E0 is the gate.** Nothing else is interpretable until the search has seen a real OOM.
 
-**E2/E3 are the ones that decide whether this feature was worth building.** If E2 shows agreement
-and E3 shows no instability, the honest conclusion is that the ceiling is a determinism-and-cost
-win rather than a safety one, and `frame/README.md` should stop claiming otherwise.
+**E2/E3 are the ones that decide whether this feature was worth building.** E2 has disagreed once
+(above) for a reason now fixed in code; if it agrees after the fix and E3 shows no instability, the
+ceiling is a fit guarantee again and the worst-case probe in `loop/throughput.md` becomes a
+confirmation rather than a requirement.
 
 These are dev experiments, run by hand to size up the current state — not a tuning session, so
 they don't follow `program.md`'s loop. Delete an entry above once its experiment has settled it.

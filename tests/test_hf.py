@@ -206,8 +206,9 @@ def test_synthetic_skips_the_row_count_check():
     assert c["micro_batch"] == 512 and c["grad_accum"] == 1
 
 
-def test_a_ceiling_trial_accumulates_once():
-    """find_ceiling sets effective_batch = micro_batch: same peak memory, 1/grad_accum the time."""
+def test_a_ceiling_trial_at_the_cap_accumulates_once():
+    """At the cap a trial runs grad_accum=1, exactly as training would; below it `find_ceiling`
+    passes 2*micro_batch so the .grad buffer is resident at the peak (frame/ceiling.py `fits`)."""
     c = _resolve({"model": BASE["model"], "data": "synthetic",
                   "micro_batch": 4, "effective_batch": 4})
     assert c["grad_accum"] == 1

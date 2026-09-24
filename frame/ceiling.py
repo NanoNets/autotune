@@ -15,6 +15,10 @@ that to the current config is how a stale ceiling is detected. Re-measure, don't
 Recorded, not hidden: fixed-shape probing avoids the allocator fragmentation that varying real
 lengths cause, so `frag_gb` understates a long run's drift. `card_frac` is reported so a margin
 can be kept below the ceiling — how much margin is the agent's call, not a constant in here.
+
+Each trial accumulates twice whenever the real config would accumulate at all (`fits`): with
+`zero_grad(set_to_none=True)` a `grad_accum=1` trial has no gradient buffer resident at its peak,
+and read 3.5GB low on a 1.9B model (`knowledge/synthetic-ceiling-underestimates-real-peak.md`).
 """
 
 # The knobs that move the ceiling. Whichever are present are stamped on the record, so a later
@@ -107,11 +111,14 @@ def find_ceiling(runner, config, seq_len, vocab, cap=None, seed=0, warmup=2, cle
     trials = []
 
     def fits(n):
-        # effective_batch = n makes grad_accum 1. Peak memory is unchanged by accumulation —
-        # each micro-batch's activations are freed at its backward, and the .grad buffers are
-        # full-size either way — so a 16-way accumulation would cost 16x the time for exactly
-        # the same answer.
-        cfg = {**config, "data": "synthetic", "micro_batch": n, "effective_batch": n,
+        # Below the cap the real config accumulates, and from micro-step 2 on it does so with the
+        # full .grad buffer resident (zero_grad(set_to_none=True) frees it only at step start). A
+        # grad_accum=1 trial never has it at the peak and reads params x 2B low: 3.5GB on a 1.9B
+        # model, the measured gap on qwen3.5_2b_a100 (knowledge/synthetic-ceiling-underestimates-
+        # real-peak.md). Two micro-steps reproduce the peak; sixteen would only cost time.
+        real_eb = config.get("effective_batch") or cap
+        eb = n if (real_eb and n >= real_eb) else 2 * n
+        cfg = {**config, "data": "synthetic", "micro_batch": n, "effective_batch": eb,
                "max_len": seq_len, "vocab": vocab, "seed": seed}
         cap_ = capture(runner, cfg, warmup=warmup, clean_steps=clean_steps,
                        peak_flops=peak_flops, peak_mem_bw_gb_s=peak_mem_bw_gb_s)

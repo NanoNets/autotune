@@ -17,6 +17,9 @@ experiment_number	token/s	samples/s	memory	status	hypothesis	conclusion
 - `status` — e.g. `ok` / `oom` / `crash` / `error`.
 - `hypothesis` — what you changed and why you expected it to help, written *before* running.
 - `conclusion` — kept or discarded, and why, written *after* observing the result.
+- A **worst-case probe** — the champion at `padding="max_length"` at `max_len`, the fit check
+  `loop/throughput.md` requires — is a real probe and is logged here, with `WORST-CASE PROOF` in
+  its conclusion. `progress.py` keeps it off the record staircase; it is never a champion candidate.
 
 This file is the running record every hypothesis after the baseline gets built on — treat it as the
 single source of truth for "what have we already tried." Every experiment (starting with the

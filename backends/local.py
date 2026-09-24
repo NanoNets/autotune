@@ -57,7 +57,7 @@ def run(config):
     config = {**config, "device": _resolve_device(config)}   # resolve ONCE — capture and the
     runner = _make_runner(config.get("framework", "torch"))  #   runner must agree on the device
     cap = capture(runner, config,
-                  # loop/loop.md Test 3 prescribes an "extended probe" for the champion; capture
+                  # loop/loop.md Test 4 prescribes an "extended probe" for the champion; capture
                   # already takes the dials, they just were not reachable from a config. Defaults
                   # unchanged, so an ordinary probe is byte-for-byte what it was.
                   warmup=config.get("warmup", 3),

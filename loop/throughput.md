@@ -22,11 +22,29 @@ CE. **NEVER** drop `dtype` to make a config fit: it changes the model you get, s
 put to the human with the measured numbers, not one the loop may take. (`dtype` appears in the
 ceiling's staleness list only because a human changing it invalidates the measurement.)
 
-## The dynamic-padding guarantee
+## The ceiling is a bound, not a guarantee
 
-`padding="longest"` is safe **iff `micro_batch <= ceiling(max_len)`**. Every real batch is at most
-`max_len` wide, so a config that fits the synthetic worst case fits *every* batch the dataset can
-produce — including the long rows a short profiling sample never drew.
+`micro_batch > ceiling(max_len)` cannot run: every real batch is at most `max_len` wide, so a
+config that OOMs on the synthetic worst case OOMs in training. `micro_batch <= ceiling` is
+necessary, not sufficient. Measured on `qwen3.5_2b_a100_wikitext`: the ceiling passed
+`mb=8+recompute` at 34.17GB and `mb=4` at 36.45GB, both OOM'd on real data at the same shape, and
+the shipped `mb=16` config peaked *below* its ceiling
+(`knowledge/synthetic-ceiling-underestimates-real-peak.md`).
+
+The cause is arithmetic, and fixed in `frame/ceiling.py`: ceiling trials ran at `grad_accum=1`,
+and with `zero_grad(set_to_none=True)` that leaves no gradient buffer resident at the peak. Any
+config with `grad_accum >= 2` carries one — params × 2 bytes, 3.51GB on this 1.88B model, which
+is the measured gap (exp 21: +3.51GB; exp 23 at `grad_accum=1`: no gap). Trials now accumulate
+twice whenever the real config accumulates at all. The fix is predicted, not yet measured on a GPU,
+so until a run confirms it: **before a config is called the champion, run it once on the real
+runner at `padding="max_length"` at `max_len`.** Every batch is then `[micro_batch, max_len]`, the
+widest shape training meets. Default `warmup` plus a couple of clean steps is enough — optimizer
+state lands on the first `opt.step()`, the grad buffer is resident from micro-step 2. Log it to
+`results.tsv` with `WORST-CASE PROOF` in the conclusion: it is a fit check, never a champion
+candidate and never on the frontier. Under `chunked_ce` it is the *shape* worst case only — real
+rows are mostly pad and chunked CE drops pad before chunking, while the synthetic trial's labels
+are all real — so there the synthetic ceiling stays the bound on the CE term and both are required
+(exp 23 sat 2.2GB below its ceiling for exactly this reason).
 
 **NEVER raise `micro_batch` above the ceiling on the strength of a probe's `headroom_gb`.** Under
 dynamic padding a probe's peak reflects the rows it happened to draw, not the dataset's longest, so

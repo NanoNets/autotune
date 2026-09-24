@@ -93,6 +93,15 @@ def test_every_trial_is_a_worst_case_batch():
     assert all(c["data"] == "synthetic" and c["max_len"] == 2048 for c in r.setups)
 
 
+def test_a_trial_below_the_cap_accumulates_twice():
+    """A grad_accum=1 trial has no .grad buffer resident at its peak; training below the cap does
+    (from micro-step 2), so the trial must too. At the cap grad_accum is 1 in training as well."""
+    r, _ = _find(11, cap=16)
+    eb = {c["micro_batch"]: c["effective_batch"] for c in r.setups}
+    assert eb[1] == 2 and eb[8] == 16                   # below the cap: two micro-steps
+    assert eb[16] == 16                                 # at the cap: one, as training would
+
+
 def test_nothing_fits_is_reported_not_raised():
     _, rec = _find(0)
     assert rec["micro_batch_max"] == 0 and rec["fits"] is False

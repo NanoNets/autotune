@@ -20,7 +20,7 @@ What we know about the situation, before searching. Built once by Frame.
 | `dataset` | length distribution, total tokens/samples, modality, storage location, schema |
 | `roofline` | peak FLOPs → achievable tokens/s ceiling (the "how good is possible") |
 | `constraint` | effective_batch + max_len targets (human-owned, off-limits) |
-| `ceiling` | MEASURED largest micro_batch that runs at max_len, on worst-case synthetic batches. Carries the `config` it was measured under — compare before trusting it. `null` = not measured, never "fine" |
+| `ceiling` | MEASURED largest micro_batch that runs at max_len, on worst-case synthetic batches. Carries the `config` it was measured under — compare before trusting it. `null` = not measured, never "fine". An upper bound on `micro_batch`, not a fit guarantee (`loop/throughput.md`) |
 | `notes` | what the agent must read before tuning: memory regime, padding-heavy max_len, a ceiling at the edge of the card |
 | `priors` | Beliefs retrieved by context + researched external priors |
 
