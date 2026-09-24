@@ -29,8 +29,11 @@ PHASES = ["forward", "backward", "optimizer", "dataloader"]
 # How far past 1.0 a fraction may read before it is called impossible. Covers run-to-run jitter
 # between the reference batch's two executions (busy is read from one, wall from the other) and
 # the measured peak being a floor on the true one (`capture.measure_peak_flops`), not headroom for
-# mixing populations — a mixed ratio lands at 1.3-5.6x, not at 1.03 (smollm2/qwen3.5 A100 runs).
-_TOLERANCE = 0.05
+# mixing populations — a mixed ratio lands at 1.3-5.6x (smollm2/qwen3.5 A100 runs). Calibrated on
+# an A100, 50 traced/untraced pairings per config: healthy GPU-active never passed 0.996, and the
+# most GPU-saturated config's mean + 3 sd was 1.017. Starts tight at 2%; revisit if healthy,
+# saturated probes get flagged invalid.
+_TOLERANCE = 0.02
 
 
 @dataclass

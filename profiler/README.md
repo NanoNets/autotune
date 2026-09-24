@@ -68,7 +68,7 @@ so "unknown" can't be mistaken for "measured zero".
 
 | # | Field | Meaning | `null` when |
 |---|---|---|---|
-| 1 | `status` | `ok` / `oom` / `error` / `invalid`. `invalid` = a physically impossible reading (a fraction above 1 beyond a 5% tolerance): two populations were mixed or the instrument failed, so the probe is never scored. The values stay in place and `error` names the reading | never |
+| 1 | `status` | `ok` / `oom` / `error` / `invalid`. `invalid` = a physically impossible reading (a fraction above 1 beyond a 2% tolerance, calibrated on an A100): two populations were mixed or the instrument failed, so the probe is never scored. The values stay in place and `error` names the reading | never |
 | 2 | `gpu` | hardware **label** from `--gpu`, for the record only — it is never priced or looked up | never |
 | 3 | `peak_flops` | dense-GEMM peak **measured on this device** — the MFU denominator. No datasheet table, so any hardware works and throttling is priced in | measurement failed (then `mfu` is `null` too) |
 | 4 | `peak_dtype` | dtype the peak was measured at. MFU is only apples-to-apples if it matches what the model ran in | ditto |

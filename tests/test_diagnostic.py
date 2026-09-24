@@ -152,6 +152,12 @@ def test_jitter_inside_tolerance_is_not_invalid():
     assert o.status == "ok"
 
 
+def test_the_tolerance_is_two_percent():
+    """Calibrated on an A100: healthy mean + 3 sd reached 1.017; 1.03 is past the 2% line."""
+    o = diagnose(_cap(ref=116.5e-6), params=PARAMS, tokens=TOKENS, gpu=GPU)  # 120/116.5 = 1.030
+    assert o.status == "invalid"
+
+
 def test_coverage_and_idle_shape():
     o = _obs()
     assert o.kernel_count == 2
