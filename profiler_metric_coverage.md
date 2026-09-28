@@ -11,6 +11,9 @@ those fields obtained, and at what cost?
 - The two runner inputs the Observation depends on (parameter count, tokens per step) are
   included, because several fields are computed from them.
 
+>
+> **`sandbox/attach_parity/` is a local, untracked harness** (gitignored). The experiments below ran
+> there; paths into it describe where the code and raw results live on the machine that ran them.
 ---
 
 ## 0. Update 2026-09-25: the patch-free rewrite

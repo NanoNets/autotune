@@ -8,6 +8,9 @@
 > Background and evidence: `bring_your_own_script.md`. Open design items: `design_improvements.md`
 > §10–§13.
 
+>
+> **`sandbox/attach_parity/` is a local, untracked harness** (gitignored). The experiments below ran
+> there; paths into it describe where the code and raw results live on the machine that ran them.
 ---
 
 ## Terms
