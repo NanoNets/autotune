@@ -95,6 +95,8 @@ def main():
             from loader_runner import BareLoaderRunner as BareTorchRunner
         att = Attach(device=dev, warmup=a.warmup, clean_steps=a.clean, dtype=cfg.get("dtype"),
                      peak_flops=a.peak_flops, peak_mem_bw_gb_s=a.peak_bw)
+        import nopatch
+        before = nopatch.snapshot()
         att.install()
         r = BareTorchRunner()
         r.setup(cfg)
@@ -107,6 +109,7 @@ def main():
         if cap is None:
             print(json.dumps({"arm": "C", "error": "attach never finished"}))
             return
+        nopatch.verify(before)                          # fails the run if torch was patched
         params, tokens = att.params, att.tokens_per_step()
         truth = {"params": r.params, "tokens": r.tokens_per_step(),
                  "grad_accum": getattr(r, "grad_accum", 1)}

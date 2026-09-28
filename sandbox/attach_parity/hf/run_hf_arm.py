@@ -26,6 +26,8 @@ from vendor.diagnostic import diagnose                            # noqa: E402
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--arm", choices=["R", "L", "T"], required=True)
+    ap.add_argument("--time-mode", choices=["end", "opt", "two"], default="end",
+                    help="arm T only: where the TrainerCallback syncs (see train_hf.StepTimer)")
     ap.add_argument("--config", default="{}")
     ap.add_argument("--peak-flops", type=float, required=True)
     ap.add_argument("--peak-bw", type=float, required=True)
@@ -48,6 +50,7 @@ def main():
             raise SystemExit(f"capture: {cap.status}: {cap.error}")
         params, tokens = r.params, r.tokens_per_step()
         truth = workload.truth(cfg, r.model)
+        loaded = workload.describe(r.model)
     else:
         train = os.path.join(HF, "train_hf.py")
         tail = ["--config", json.dumps(cfg), "--max-steps", str(steps)]
@@ -60,16 +63,21 @@ def main():
         else:
             out = os.path.join(tmp, "steps.json")
             cmd = [sys.executable, train] + tail + ["--time-out", out, "--warmup", str(a.warmup),
-                                                    "--clean", str(a.clean)]
+                                                    "--clean", str(a.clean),
+                                                    "--time-mode", a.time_mode]
         p = subprocess.run(cmd, capture_output=True, text=True, cwd=HF)
         if p.returncode != 0 or not os.path.exists(out):
             raise SystemExit(f"arm {a.arm} failed ({p.returncode}):\n{p.stderr[-4000:]}")
         got = json.load(open(out))
-        truth = workload.truth(cfg, workload.build_model(cfg))
+        ref = workload.build_model(cfg)                   # same call as the script, on CPU
+        truth, loaded = workload.truth(cfg, ref), workload.describe(ref)
+        del ref
         if a.arm == "T":                                          # timing only: no trace
             t = got["times"]
             wall = statistics.median(t)
             print(json.dumps({"arm": "T", "versions": got["versions"], "truth": truth,
+                              "loaded": got.get("loaded"), "mode": got.get("mode"),
+                              "host_after_sync": got.get("host_after_sync"),
                               "step_times_s": t,
                               "obs": {"step_time_s": wall,
                                       "step_time_cv": round(statistics.pstdev(t) / wall, 4)}}))
@@ -83,7 +91,7 @@ def main():
     leaked = sorted(m for m in sys.modules if m.split(".")[0] in ("profiler", "frameworks", "frame"))
     if leaked:
         raise SystemExit(f"live repo modules imported: {leaked}")
-    print(json.dumps({"arm": a.arm, "versions": got_versions, "obs": obs.__dict__,
+    print(json.dumps({"arm": a.arm, "versions": got_versions, "loaded": loaded, "obs": obs.__dict__,
                       "recovered": {"params": params, "tokens": tokens, "micro_batches": micro},
                       "truth": truth, "step_times_s": cap.step_times_s,
                       "fingerprint": fingerprint(cap.trace)}, default=str))

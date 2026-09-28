@@ -7,8 +7,23 @@ The script runs as if started directly (`python train.py <its args>`): its `__na
 Hooks go in before its first line runs, so they're in place before it builds an optimizer.
 
 The Capture is written to `--out` the moment the profiled step ends. The script then keeps
-running to its own end, so give it a small step budget (e.g. `max_steps`) for a probe. If the
-script ends before the profiled step, `--out` gets `{"status": "error", ...}` instead.
+running to its own end, so give it a small step budget (e.g. `max_steps`) for a probe.
+
+How the run ended decides what `--out` says, with the same statuses `capture()` uses, so
+`frame/ceiling.py` can read a user-script trial the way it reads its own:
+
+  | ended                               | `--out` status | notes                                        |
+  |-------------------------------------|----------------|----------------------------------------------|
+  | normally, after the profiled step   | ok             | the Capture                                  |
+  | CUDA OOM before the profiled step   | oom            | clean steps that ran + memory at failure     |
+  | CUDA OOM after the profiled step    | oom            | the Capture, status overridden: it doesn't fit|
+  | any other exception, before         | error          | `<ExceptionType>: <first line of message>`   |
+  | any other exception, after          | ok             | the Capture + `script_error` alongside it     |
+  | normally, but too few steps         | error          | how many optimizer steps it reached          |
+
+The exception is re-raised after `--out` is written, so the process still exits non-zero and
+the full traceback still reaches stderr. A process killed outright (OOM killer, SIGKILL,
+`os._exit`) writes nothing; treat a missing `--out` as an error.
 Single process only: multi-GPU launch is out of scope for now.
 """
 import argparse
@@ -21,6 +36,9 @@ import sys
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 
+import torch                                                     # noqa: E402
+
+import nopatch                                                   # noqa: E402
 from attach import Attach                                        # noqa: E402
 
 
@@ -29,6 +47,22 @@ def _write(path, rec):
     with open(tmp, "w") as f:
         json.dump(rec, f, default=str)
     os.replace(tmp, path)                                        # never a half-written file
+
+
+def _first_line(e):
+    msg = str(e).strip()
+    return f"{type(e).__name__}: {msg.splitlines()[0] if msg else '(no message)'}"
+
+
+def _classify(exc):
+    """(status, error) for how the script ended. (None, None) = a normal end."""
+    if exc is None:
+        return None, None
+    if isinstance(exc, SystemExit):                              # sys.exit(0) is a normal end
+        return (None, None) if exc.code in (None, 0) else ("error", f"SystemExit: {exc.code}")
+    if isinstance(exc, torch.cuda.OutOfMemoryError):
+        return "oom", _first_line(exc)
+    return "error", _first_line(exc)
 
 
 def main():
@@ -51,23 +85,41 @@ def main():
 
     att = Attach(device=a.device, warmup=a.warmup, clean_steps=a.clean, dtype=a.dtype,
                  peak_flops=a.peak_flops, peak_mem_bw_gb_s=a.peak_bw)
+    record = {}
 
     def on_done(cap):                                            # called from inside their step
-        _write(a.out, {"capture": dataclasses.asdict(cap), "params": att.params,
+        record.update({"capture": dataclasses.asdict(cap), "params": att.params,
                        "tokens": att.tokens, "micro_batches": att.micro_batches})
+        _write(a.out, record)
     att.on_done = on_done
+    before = nopatch.snapshot()
     att.install()
 
     sys.argv = theirs                                            # the script sees its own argv
     sys.path[0] = os.path.dirname(script)                        # ...and its own directory
+    exc = None
     try:
         runpy.run_path(script, run_name="__main__")
+    except BaseException as e:                                   # recorded, then re-raised below
+        exc = e
+        raise
     finally:
-        if not att.done:                                         # ended (or crashed) too early
-            att.uninstall()
-            _write(a.out, {"capture": {"status": "error", "error":
-                           f"script ended after {att._n} optimizer steps; needs "
-                           f"{a.warmup + a.clean + 1}"}})
+        status, error = _classify(exc)
+        if not att.done:                                         # ended before the profiled step
+            if status is None:                                   # a normal end, but too early
+                status, error = "error", (f"script ended after {att._n} optimizer steps; "
+                                          f"needs {a.warmup + a.clean + 1}")
+            cap = att.failed(status, error)
+            _write(a.out, {"capture": dataclasses.asdict(cap), "params": att.params,
+                           "tokens": None, "micro_batches": None})
+        elif status == "oom":                                    # fit for one step, not for the run
+            record["capture"]["status"] = "oom"
+            record["capture"]["error"] = f"{error} (after the profiled step)"
+            _write(a.out, record)
+        elif status == "error":                                  # the measurement stands
+            record["script_error"] = error
+            _write(a.out, record)
+        nopatch.verify(before)                                   # fails the run if torch was patched
 
 
 if __name__ == "__main__":

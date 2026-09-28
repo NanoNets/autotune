@@ -11,6 +11,8 @@ PINNED = {
     "tokenizers": "0.22.2",
     "safetensors": "0.8.0",
     "numpy": "1.24.4",
+    "pillow": "12.3.0",
+    "peft": "0.20.0",
     "scipy": "1.8.0",                      # system package, imported by Trainer; not pip-installed
 }
 
@@ -18,6 +20,8 @@ PINNED = {
 def installed():
     import accelerate
     import numpy
+    import PIL
+    import peft
     import scipy
     import huggingface_hub
     import safetensors
@@ -34,6 +38,8 @@ def installed():
         "tokenizers": tokenizers.__version__,
         "safetensors": safetensors.__version__,
         "numpy": numpy.__version__,
+        "pillow": PIL.__version__,
+        "peft": peft.__version__,
         "scipy": scipy.__version__,
     }
 

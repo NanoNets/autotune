@@ -33,7 +33,8 @@ def run(arm, cfg, pf, bw, warmup, clean):
                         "--config", json.dumps(cfg), "--peak-flops", str(pf), "--peak-bw", str(bw),
                         "--warmup", str(warmup), "--clean", str(clean)],
                        capture_output=True, text=True, cwd=HF,
-                       env={k: v for k, v in os.environ.items() if k != "PYTHONPATH"})
+                       env={**{k: v for k, v in os.environ.items() if k != "PYTHONPATH"},
+                            "HF_HUB_OFFLINE": "1"})           # prefetched: no hub calls mid-study
     if p.returncode != 0:
         raise RuntimeError(f"arm {arm} failed:\n{p.stderr[-4000:]}")
     return json.loads(p.stdout.strip().splitlines()[-1])
@@ -49,6 +50,13 @@ def main():
     a = ap.parse_args()
     pinned = versions.check()
     cfg = json.loads(a.config)
+    if cfg.get("model"):                                          # download once, before any round
+        import workload
+        from huggingface_hub import snapshot_download
+        rev = workload.resolve(cfg)["revision"]
+        path = snapshot_download(cfg["model"], revision=rev,
+                                 allow_patterns=["*.json", "*.safetensors", "*.txt"])
+        print(f"prefetched {cfg['model']}@{rev} -> {path}")
     pf, bw = parity.ceilings("cuda", "bfloat16")
     print(f"versions: {pinned}")
     print(f"frozen ceilings (bf16): peak_flops {pf:.4g}  peak_bw {bw:.4g} GB/s   config {cfg}")
@@ -73,7 +81,19 @@ def main():
         mb, t = r["recovered"]["micro_batches"], r["truth"]
         assert mb["forwards"] == mb["backwards"] == t["grad_accum"], (mb, t)
         assert r["recovered"]["tokens"] == t["tokens"] and r["recovered"]["params"] == t["params"]
+    if L0["truth"].get("total_params") and L0["truth"]["total_params"] != L0["truth"]["params"]:
+        tr, tot, tok = L0["truth"]["params"], L0["truth"]["total_params"], L0["truth"]["tokens"]
+        rep = 6 * tr * tok                                   # what the capture feeds 6ND
+        cor = (4 * tot + 2 * tr) * tok                       # fwd + bwd-through-activations on all
+        m = [r["obs"]["mfu"] for r in recs["L"] if r["obs"]["mfu"] is not None]   # + wgrad on trainable
+        print(f"  LoRA: trainable {tr:,} of {tot:,} params ({tr / tot:.2%})")
+        print(f"  FLOPs/step reported (6*N_trainable*D) {rep:.3e} vs LoRA-correct ((4*N_total + 2*N_trainable)*D) {cor:.3e}: x{cor / rep:.1f}")
+        if m:
+            mm = sorted(m)[len(m) // 2]
+            print(f"  MFU as reported {mm:.2%} -> corrected {mm * cor / rep:.2%}")
     print(f"  recovered (every round identical): {L0['recovered']} vs truth {L0['truth']}")
+    loads = {json.dumps(r["loaded"], sort_keys=True) for rs in recs.values() for r in rs}
+    print(f"  model as loaded (identical in every arm and round: {len(loads) == 1}): {L0['loaded']}")
 
     print("\n# 3. Timing: L (hooks) vs T (TrainerCallback, no hooks), same Trainer run")
     noise = parity.med([r["obs"]["step_time_cv"] for r in recs["L"] + recs["T"]])

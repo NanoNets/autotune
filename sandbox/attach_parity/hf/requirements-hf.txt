@@ -27,6 +27,17 @@ accelerate==1.14.0
 #  uv.lock's 2.4.6 / 2.5.2 are out anyway (Python>=3.11; the box has 3.10.12).
 #  1.24.4 = the last numpy release below 1.25 (2023-06-26, Python>=3.8). Satisfies all three.
 numpy==1.24.4
+# pillow: the box's system Pillow 9.0.1 leaks in through --system-site-packages and predates
+# `PIL.Image.Resampling` (9.1). transformers' lazy importer swallows the AttributeError and reports
+# `ModuleNotFoundError: Could not import module 'PreTrainedModel'`, so Trainer can't import.
+# 12.3.0 = the version experiments 4 and 4b ran with (it was installed by hand on that box and
+# not pinned here; found when a fresh box failed on 2026-09-25).
+pillow==12.3.0
+# peft: LoRA experiment (7). Not in uv.lock. 0.20.0 = the release current when transformers
+# 5.15.1 shipped (2026-07-28; 0.21.0 came 2026-09-15). Declares torch>=1.13, accelerate>=0.21,
+# huggingface-hub>=0.25, python>=3.10: all satisfied. It does not pin transformers, so
+# compatibility with 5.15.1 is verified by running, not assumed.
+peft==0.20.0
 
 # NOT installed from here, but checked by versions.py because they come from the box's system
 # site-packages: torch 2.7.0 (CUDA 12.8) and scipy 1.8.0 (imported by transformers' Trainer).

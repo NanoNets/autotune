@@ -12,7 +12,10 @@ fails if any live module gets imported. Iterate on `attach.py` freely; the basel
 |---|---|
 | `vendor/` | frozen baseline: capture, diagnostic, trace, roofline, synthetic, torch runner |
 | `bare_runner.py` | `vendor/torch_runner.py` with every `record_function` removed ("user's script") |
-| `attach.py` | the hook-driven capture under test |
+| `attach.py` | the capture under test. **Patch-free** since 2026-09-25: public APIs only (optimizer post-hook, `torch.profiler`, `torch.cuda`, psutil). The patched version is in commit `51c8c4e` |
+| `derive.py` | torch-free: recovers forward / backward / dataloader spans, tokens and micro-batch count from the trace torch recorded |
+| `tests/` | 28 CPU tests, `.venv/bin/python -m pytest sandbox/attach_parity/tests -q`:<br>`test_derive.py` (torch-free rules on hand-built traces),<br>`test_trace_format.py` (**drift check:** does this torch still emit what derive reads? Run it per torch version),<br>`test_attach.py` (state machine; nothing left registered; profiler stopped on early exit),<br>`test_nopatch.py` (the guard catches each kind of patch),<br>`test_launcher.py` (ok / oom / error / early-exit statuses) |
+| `nopatch.py` | guard: every hook-based run (arms C and L) fails if a torch function was replaced or a global module hook is left registered |
 | `loader_runner.py` | experiment 2 workload: real `DataLoader` + grad accum, labelled (A) and bare (C) |
 | `train.py` | the same workload as a standalone user script: argparse, no autotune imports (arm L) |
 | `launcher.py` | runs a script with Attach installed first, same process; writes the Capture JSON |
