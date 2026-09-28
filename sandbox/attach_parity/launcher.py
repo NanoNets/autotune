@@ -89,7 +89,8 @@ def main():
 
     def on_done(cap):                                            # called from inside their step
         record.update({"capture": dataclasses.asdict(cap), "params": att.params,
-                       "tokens": att.tokens, "micro_batches": att.micro_batches})
+                       "tokens": att.tokens, "step_tokens": att.step_tokens,
+                       "micro_batches": att.micro_batches})
         _write(a.out, record)
     att.on_done = on_done
     before = nopatch.snapshot()
@@ -111,7 +112,7 @@ def main():
                                           f"needs {a.warmup + a.clean + 1}")
             cap = att.failed(status, error)
             _write(a.out, {"capture": dataclasses.asdict(cap), "params": att.params,
-                           "tokens": None, "micro_batches": None})
+                           "tokens": None, "step_tokens": att.step_tokens, "micro_batches": None})
         elif status == "oom":                                    # fit for one step, not for the run
             record["capture"]["status"] = "oom"
             record["capture"]["error"] = f"{error} (after the profiled step)"

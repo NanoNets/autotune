@@ -164,6 +164,50 @@ uv run python -m profiler --device cpu --gpu A10G   # capture → trace → diag
 
 The roofline / trace / diagnostic logic is pure-python; only the capture engine needs torch.
 
+## Bring your own training script *(early; single GPU)*
+
+By default autotune trains through its own runners (`frameworks/`). You can instead point it at
+**your own training script**: an HF Trainer script, TRL, a hand-written PyTorch loop. autotune runs
+it unchanged and measures it from the outside. Nothing in torch is patched (a guard fails the run if
+anything is), and your script needs no autotune imports.
+
+**What the script needs:**
+- It runs as `python train.py <args>` on **one GPU**, with a **torch optimizer** and a **torch
+  `DataLoader`** (HF Trainer, TRL, ms-swift's Python entry point, Lightning, and plain loops all
+  qualify).
+- A **step budget** you can pass on the command line (e.g. `--max-steps`), so a probe runs ~15
+  steps and exits by itself.
+- The settings you want tuned (micro-batch / grad accumulation, attention implementation,
+  gradient checkpointing, compile, …) reachable as **flags or a config file**. The agent sets them
+  in your script's own terms; there's no adapter to write.
+- A **fixed seed**, so every probe sees the same examples.
+
+**The workflow:**
+1. Put the script in the repo (e.g. `runs/<run_name>/train.py`). A repo-relative path is what lets
+   the ssh backend run it on your GPU box.
+2. In `run.toml`, set `script` and the baseline `script_args` (see `run.toml.example`), alongside
+   the usual model / dataset / gpu / backend.
+3. Hand `program.md` to the agent. It reads your script, runs it once as-is (the baseline), then
+   probes variations by changing **only your script's own flags**, and records each probe in
+   `runs/<run_name>/results.tsv`.
+4. You get back the fastest settings, expressed as your script's own flags, plus what was tried and
+   why.
+
+Under the hood: `backends/local.py` runs `python -m profiler.launch -- <script> <args>`. It times
+the optimizer steps, profiles one step, reads phases and token counts from torch's own trace, and
+returns the same Observation a runner probe produces (`profiler/README.md`, "Attached capture").
+
+**Not there yet** (tracked in `integration_plan.md`, Appendix A, and `design_improvements.md`
+§10–§14):
+- **Script probes are provisional evidence.** Their clean window is a fixed stretch of steps, not
+  whole passes over Frame's sample, so under the Measurement axiom they don't count as `same-rows`
+  comparisons, and no belief is promoted from their timings.
+- **No OOM ceiling for scripts yet**: the agent won't raise the micro-batch above your baseline
+  without asking you.
+- GPU-active / idle fractions are not reported (no replayable reference batch).
+- MFU reads far too low under LoRA / frozen weights.
+- Multi-GPU and installed commands (e.g. `swift sft`, not a `.py` file) aren't supported.
+
 ## Layout
 
 ```

@@ -10,14 +10,26 @@ inverts control: the user's loop runs as-is, and it produces the same `Capture` 
     ... user's loop runs ...   # att.done flips after warmup + clean + 1 profiled step
     cap = att.result()
 
-NO MONKEYPATCHING, and no module hooks. Only public APIs, used as designed:
+NO MONKEYPATCHING. Only public APIs, used as designed:
   - `register_optimizer_step_post_hook`  step boundary (the FIRST optimizer seen) + its params
   - `torch.cuda.synchronize` + a clock  clean step time
   - `torch.cuda` memory stats, psutil    memory, CPU
+  - `model.register_forward_pre_hook(with_kwargs=True)` on the user's model: TOKENS PER CLEAN
+    STEP (decision B1, 2026-09-27). It counts padded `input_ids.numel()` (shape metadata, no GPU
+    sync), the same definition as OG's `frameworks/hf.py`. A hook on one module only; the rest of
+    the model keeps torch's no-hook fast path.
+  - `register_module_forward_pre_hook` (global), ONE-SHOT during warmup: finds the model (the
+    first module called), attaches the per-module hook above, and removes itself before any
+    timed step.
   - `torch.profiler.profile(record_shapes=True)` + one `record_function("step")` of our own,
-    for the one profiled step
-Phases, tokens and the micro-batch count are then recovered from the trace torch recorded
-(`derive.py`), not from code we inject into the user's run.
+    for the one profiled step.
+Phases and the micro-batch count are recovered from the trace torch recorded (`derive.py`). The
+trace's token count for the traced step is kept only as a cross-check of the hook's.
+
+Why tokens are counted on every clean step (B1): a rate's numerator and denominator must describe
+the same steps (the Measurement axiom, `loop/contracts.md`). Under variable batch width, one
+traced step's tokens over the clean window's time would be off by (traced width / mean width),
+silently, and differently for every config.
 
 The boundary fires inside torch's own `Optimizer.step#...` label (that's where the post-hook
 runs), so the profiled window opens and closes inside one. `derive.py` only reads spans fully
@@ -29,6 +41,7 @@ import threading
 import time
 
 import torch
+import torch.nn.modules.module as _module
 from torch.autograd.profiler import record_function
 from torch.optim.optimizer import register_optimizer_step_post_hook
 from torch.profiler import ProfilerActivity, profile
@@ -37,6 +50,22 @@ import derive
 from vendor.capture import (Capture, _MIN_SAMPLE_S, _cpu_stats, _default_trace_path,
                             _read_memory, _sync, _tree_cpu_seconds, measure_peak_bandwidth_gb_s,
                             measure_peak_flops)
+
+
+def _padded_tokens(args, kwargs):
+    """Tokens in one micro-batch as the model receives it: padded, like OG (`input_ids.numel()`).
+
+    Reads shapes only, so it never syncs the GPU. Integer ids (B, S) count every element; a float
+    activation (B, S, D) counts B*S. None when the first input isn't a tensor.
+    """
+    x = kwargs.get("input_ids")
+    if x is None:
+        x = next((a for a in args if isinstance(a, torch.Tensor)), None)
+    if not isinstance(x, torch.Tensor):
+        return None
+    if not x.is_floating_point():
+        return x.numel()
+    return x.shape[0] * x.shape[1] if x.dim() >= 3 else x.shape[0]
 
 
 class Attach:
@@ -54,6 +83,9 @@ class Attach:
         self._times, self._t_last, self._cpu = [], None, None
         self._prof, self._step_rf, self._t_prof, self._cap = None, None, None, None
         self._profiling = False                        # True between profiler enter and exit
+        self.step_tokens = []                          # padded tokens of each CLEAN step (B1)
+        self._acc, self._traced_tokens = 0, None       # running count within the current step
+        self._root, self._root_hook, self._tok_hook = None, None, None
 
     # ---- lifecycle -------------------------------------------------------------------------
     def install(self):
@@ -63,13 +95,30 @@ class Attach:
         if self.peak_mem_bw_gb_s is None:
             self.peak_mem_bw_gb_s = measure_peak_bandwidth_gb_s(self.device)
         self._hook = register_optimizer_step_post_hook(self._on_optimizer_step)
+        self._root_hook = _module.register_module_forward_pre_hook(self._find_root)
+
+    def _find_root(self, mod, args):
+        """First module called = the model's outermost call. One-shot: attach the per-step token
+        counter to it, then remove this global hook, so the no-hook fast path is back for every
+        module before anything is timed. (The call in progress isn't counted: it's warmup.)"""
+        self._root = mod
+        self._tok_hook = mod.register_forward_pre_hook(self._count, with_kwargs=True)
+        self._root_hook.remove()
+        self._root_hook = None
+
+    def _count(self, mod, args, kwargs):
+        n = _padded_tokens(args, kwargs)
+        if n is not None:
+            self._acc += n
 
     def uninstall(self):
         """Leave the process as it was: hook removed, and a profiler still running (the run ended
         inside the profiled step) stopped rather than leaked."""
-        if self._hook is not None:
-            self._hook.remove()
-            self._hook = None
+        for name in ("_hook", "_root_hook", "_tok_hook"):
+            h = getattr(self, name)
+            if h is not None:
+                h.remove()
+                setattr(self, name, None)
         self._stop_profiler_quietly()
 
     def _stop_profiler_quietly(self):
@@ -106,6 +155,7 @@ class Attach:
                        peak_mem_bw_gb_s=self.peak_mem_bw_gb_s, device=self.device, error=error)
 
     def tokens_per_step(self):
+        """Mean padded tokens per clean step: the same steps the clean window timed (B1)."""
         return self.tokens
 
     # ---- step boundary ---------------------------------------------------------------------
@@ -119,9 +169,11 @@ class Attach:
     def _on_step(self):
         self._n += 1
         n, w, c = self._n, self.warmup, self.clean_steps
+        step_tok, self._acc = self._acc, 0             # tokens of the step that just ended
         if n < w:
             return
         if n > w + c:                                  # the profiled step ended: close `step`
+            self._traced_tokens = step_tok
             self._stop_profiled()                      # BEFORE syncing, or the GPU drain lands
             return                                     # in its host-dispatch time
         _sync(self.device)
@@ -134,6 +186,8 @@ class Attach:
         else:                                          # one clean step ended
             self._times.append(now - self._t_last)
             self._t_last = now
+            if self._tok_hook is not None:             # same step as the time just recorded
+                self.step_tokens.append(step_tok)
             if n == w + c:
                 self._stop_cpu()
                 self._start_profiled()
@@ -163,7 +217,14 @@ class Attach:
         found = derive.augment(trace)
         with open(self.trace_path, "w") as f:
             json.dump(trace, f)
-        self.tokens = found["tokens"]
+        if self.step_tokens:                           # B1: the timed steps' own tokens
+            self.tokens = sum(self.step_tokens) / len(self.step_tokens)
+            found["token_source"] = f"hook: mean of {len(self.step_tokens)} clean steps (padded)"
+        else:                                          # no model found: say so, don't guess
+            self.tokens = None
+            found["token_source"] = "unknown: no per-step count (trace count is one step only)"
+        found["traced_step_tokens"] = {"hook": self._traced_tokens, "trace": found.get("tokens")}
+        found["tokens"] = self.tokens
         self.micro_batches = found
 
         self._cap = Capture(status="ok", step_times_s=self._times, trace=self.trace_path,

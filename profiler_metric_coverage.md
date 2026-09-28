@@ -28,7 +28,16 @@ record.
 | M14 patched `_BaseDataLoaderIter.__next__` (`dataloader` name) | 🔴 | torch's own `enumerate(DataLoader)#…` span, re-emitted under the name `dataloader` in the exported trace | 🟢 |
 | M15 rewrapped optimizer class `step` (profiler window) | 🔴 | the public post-hook opens and closes the window directly, inside torch's `Optimizer.step` label. On CPU, that label for the profiled step is still present in the trace (whether its duration is complete is not yet checked) | 🟢 |
 
-**Tally now:** of the 38 measured fields, **38 🟢, 0 🟠, 0 🔴**. The derived spans are added to our
+**Update 2026-09-27 (decision B1):** tokens are again counted on **every clean step**, by a
+per-module forward pre-hook on the user's model (🟢, as M10 was), with the model found by a
+one-shot global hook during warmup (🟠, as M11 was, and removed before any timed step). The trace's
+`Input Dims` count is now only a cross-check for the traced step. Reason: the Measurement axiom
+(PR #14). One traced step's tokens over the clean window's time mixes populations. See
+`integration_plan.md` Appendix A B1.
+
+**Tally now:** of the 38 measured fields, **35 🟢, 3 🟠, 0 🔴**. The 🟠 are `flops`,
+`roofline_floor_s` and `mfu`, via tokens: they depend on the one-shot global hook, which runs only
+during warmup. Nothing is monkeypatched (0 🔴). The derived spans are added to our
 own exported trace, marked `args.derived = "attach.derive"`, so the frozen `diagnose()` reads
 them unchanged.
 

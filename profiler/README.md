@@ -231,6 +231,33 @@ for on-demand drill-down (open it in <https://ui.perfetto.dev>).
 - `capture.py` — the clean window (whole passes, per-step tokens) + CPU sampler (psutil) + memory + OOM handling + the reference batch, timed profiler-off then traced. *(needs torch)*
 - `diagnostic.py` — assemble the Observation (torch-free; the `Observation` dataclass lives here).
 - `__main__.py` — the CLI (`python -m profiler`).
+- `launch.py` / `attach.py` / `derive.py` / `nopatch.py` — the attached capture for user scripts (above).
+
+## Attached capture: user scripts
+
+`capture()` drives a runner. For a **user's own training script**, the same Observation comes from
+the **attached capture** instead, started by `python -m profiler.launch -- train.py …`
+(`backends/README.md`, "Script probes"):
+
+| File | Does |
+|---|---|
+| `launch.py` | runs the script unchanged in-process (`runpy`), with `Attach` installed first; writes `cap.json`; `ok` / `oom` / `error` like `capture()` |
+| `attach.py` | step boundary = torch's public optimizer post-hook; clean timing; **tokens counted on every clean step** by a per-module pre-hook on the model (padded `input_ids.numel()`, as the runners count); one profiled step with `record_shapes=True` |
+| `derive.py` | torch-free: forward / backward / dataloader spans and the micro-batch count, read from torch's own trace events (the script has no `record_function` labels) |
+| `nopatch.py` | guard: the run fails if any torch function was replaced or a global module hook is left registered |
+
+**How it differs from `capture()`, recorded in `population`** (`driver: "script"`):
+- **The clean window is a fixed stretch of the script's own loader** (`clean_window:
+  "fixed-position"`), not whole passes over Frame's sample. So `clean_passes` and `sample_hash`
+  are absent, and throughput isn't `same-rows` evidence (Measurement axiom, `loop/contracts.md`).
+- **The trace is one step of the script's loop** (`trace_basis: "traced-step"`), not a replayed
+  reference batch. So `reference_step_s`, `gpu_active_frac`, `gap_s` and `gap_frac` are null.
+- **Step time reads ~0.25% high** from where the per-step sync sits relative to the framework's own
+  bookkeeping (`bring_your_own_script.md`, experiment 6), so don't compare it with runner probes.
+- **Params are the optimizer's (trainable only).** MFU under LoRA / frozen weights reads far too low
+  until `design_improvements.md` §13.
+
+The full compatibility audit, and what's planned: `integration_plan.md`, Appendix A.
 
 ## Adapters
 

@@ -6,7 +6,11 @@ frozen ceilings the loop measured at Frame ride in on the config (`peak_flops` /
 so every probe is scored against the same denominator. Heavy imports (torch, the runner) are lazy.
 """
 import dataclasses
+import json
+import os
+import subprocess
 import sys
+import tempfile
 
 # framework name -> (module, runner class). Add a line per adapter.
 _RUNNERS = {
@@ -49,11 +53,74 @@ def _make_runner(framework):
     return getattr(importlib.import_module(mod), cls)()
 
 
+_REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+
+def _script_path(script):
+    """The user's training script: absolute, or relative to the repo root (the form ssh needs)."""
+    path = script if os.path.isabs(script) else os.path.join(_REPO, script)
+    if not os.path.isfile(path):
+        raise FileNotFoundError(f"script {script!r} not found (relative paths resolve from {_REPO})")
+    return path
+
+
+def _launch_argv(config, out):
+    """`python -m profiler.launch ... -- <script> <script_args>` for this probe."""
+    argv = [config.get("python") or sys.executable, "-m", "profiler.launch", "--out", out,
+            "--device", config["device"],
+            "--warmup", str(config.get("warmup", 3)), "--clean", str(config.get("clean_steps", 10))]
+    for flag, key in (("--peak-flops", "peak_flops"), ("--peak-bw", "peak_mem_bw_gb_s"),
+                      ("--dtype", "dtype")):
+        if config.get(key) is not None:
+            argv += [flag, str(config[key])]
+    return argv + ["--", _script_path(config["script"]), *map(str, config.get("script_args") or [])]
+
+
+def run_script(config):
+    """Bring-your-own-script probe: run the user's unchanged training script under
+    `profiler.launch` in its own process, read back the Capture it wrote, and diagnose it.
+
+    The script must build its optimizer and loop the usual way, run on one GPU, fetch batches
+    through a torch DataLoader, and stop by itself: the agent sets its step budget (`max_steps`
+    or equivalent) to at least warmup + clean_steps + 1 via `script_args`. Knobs reach the script
+    the same way (its own CLI flags / config file), never through this backend.
+    A process killed outright writes no result: that is an `error` Observation, not a crash here.
+    """
+    from profiler.capture import Capture
+    from profiler.diagnostic import diagnose
+
+    out = os.path.join(tempfile.mkdtemp(prefix="autotune_script_"), "cap.json")
+    argv = _launch_argv(config, out)
+    env = {**os.environ, **{str(k): str(v) for k, v in (config.get("env") or {}).items()}}
+    env["PYTHONPATH"] = _REPO + (os.pathsep + env["PYTHONPATH"] if env.get("PYTHONPATH") else "")
+    p = subprocess.run(argv, cwd=config.get("script_cwd") or _REPO, env=env,
+                       capture_output=True, text=True, timeout=config.get("timeout", 1800))
+    if os.path.exists(out):
+        with open(out) as f:
+            rec = json.load(f)
+        cap = Capture(**rec["capture"])
+    else:                                              # killed (OOM killer, SIGKILL, os._exit)
+        tail = (p.stderr or p.stdout or "").strip().splitlines()[-1:] or ["(no output)"]
+        cap = Capture(status="error", device=config["device"],
+                      error=f"launcher wrote no result (exit {p.returncode}): {tail[0]}")
+        rec = {}
+    obs = dataclasses.asdict(diagnose(cap, params=rec.get("params") or 0,
+                                      tokens=rec.get("tokens"), gpu=config.get("gpu", "local")))
+    obs["population"] = {**(obs.get("population") or {}), "script": config["script"],
+                         "script_args": list(map(str, config.get("script_args") or [])),
+                         "micro_batches": rec.get("micro_batches"),
+                         "script_error": rec.get("script_error")}
+    return obs
+
+
 def run(config):
-    """Run one probe here and return its Observation (a dict). Needs torch + the chosen runner."""
+    """Run one probe here and return its Observation (a dict). Needs torch + the chosen runner,
+    or, when `config["script"]` is set, the user's training script (`run_script`)."""
     from profiler.capture import capture
     from profiler.diagnostic import diagnose
 
+    if config.get("script"):
+        return run_script({**config, "device": _resolve_device(config)})
     config = {**config, "device": _resolve_device(config)}   # resolve ONCE — capture and the
     runner = _make_runner(config.get("framework", "torch"))  #   runner must agree on the device
     cap = capture(runner, config,

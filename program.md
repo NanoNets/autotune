@@ -49,6 +49,10 @@ Apply these for the whole session, not just one step below.
 
 Do these in order. Don't start experimenting until Step 3 is confirmed back to the user.
 
+**IF `run.toml` sets `script`** (the user brought their own training script): follow each step
+below as written, **plus** its "Script mode" line in the section after Step 5. Probes then run the
+user's script unchanged instead of a `frameworks/` runner (`backends/README.md`, "Script probes").
+
 ### Step 1 — Environment & access → `backends/README.md`
 
 - Identify local vs. remote (SSH). Credentials go in `.env`; non-secret config (model, dataset,
@@ -134,6 +138,60 @@ anything but the shipped defaults, "faster by X%" means nothing.
   every belief whose context matches this run: re-confirmed → bump its evidence; contradicted →
   narrow its context and split, never overwrite; proven wrong → delete it and say so. Skipping this
   is how `probes: 1` stays `probes: 1` forever and beliefs stop being opinions worth holding.
+
+---
+
+## Script mode: the per-step differences when `run.toml` sets `script`
+
+The user's training script is the thing being tuned. Treat it as theirs: **never edit its code.**
+Everything you change reaches it through its own command-line flags or config file, via
+`script_args`.
+
+- **Step 1: read the script before anything else.** Find, and write down in
+  `runs/<run_name>/research.md`:
+  - the framework (HF Trainer, TRL, Lightning, a plain loop);
+  - where its optimizer and DataLoader come from;
+  - its seed;
+  - which flag sets its **step budget** (e.g. `--max_steps`);
+  - which flags or config keys control each speed knob in `loop/throughput.md`, and which ones
+    must never change (learning rate, dataset, `max_len`, precision, LoRA rank, …).
+
+  IF it has no torch DataLoader, no torch optimizer, or no step-budget flag → stop and tell the
+  user; it can't be probed yet. Then run it once on the backend with the baseline `script_args`
+  plus a small step budget, and confirm it exits cleanly.
+- **Step 2: Frame the model and data it uses.** Set `model` / `dataset` in `run.toml` to what the
+  script loads, and build the Profile as usual.
+  - **The probe sample:** the script trains on its own data. Frame's `sample.jsonl` isn't a format a
+    user's framework can load yet, so script probes don't carry `sample_hash`. Keep the script's
+    data, seed and sampler identical across every probe.
+  - **The ceiling:** there's no OOM ceiling for scripts yet (`design_improvements.md` §10). Don't
+    raise the micro-batch above the baseline's value without the user's OK, and say so at Step 3.
+- **Step 3: confirm the script contract with the user:**
+  - the baseline command;
+  - the step-budget flag;
+  - the knob → flag mapping you found;
+  - the flags you'll never touch;
+  - that there's no ceiling.
+- **Step 4: every probe is the script with changed `script_args`.**
+  - The **baseline** is the script as-is.
+  - For every probe, set the step budget to at least `warmup + clean_steps + 1` plus a little slack,
+    and turn off logging, eval and checkpoint saving through the script's own flags, so no step pays
+    for them.
+  - A knob change is a flag change, applied in the script's own terms (grad accumulation is
+    derived, so `effective_batch` stays fixed: `loop/throughput.md`).
+  - Read `population.driver: "script"` on every Observation. Its `clean_window: "fixed-position"`
+    means the rows timed are the loader's next steps, not whole passes over a shared sample. So:
+    - **rank with care:** re-probe a would-be champion, interleaved with the incumbent, before
+      keeping it;
+    - **never compare a script probe's throughput with a runner probe's.**
+  - `population.trace_basis: "traced-step"` means GPU-active / idle aren't reported. Read the
+    phases and kernels instead.
+- **Step 5: script probes are observations, not belief evidence.**
+  - Their timings aren't `same-rows` and their trace durations aren't `same-reference-batch`
+    (Measurement axiom, corollary 7), so record what they showed in `knowledge.md`.
+  - Only **width-invariant** findings (kernel / gap counts, which kernels ran, dtypes) may update a
+    belief.
+  - Report the final config to the user as their script's own flags.
 
 ---
 

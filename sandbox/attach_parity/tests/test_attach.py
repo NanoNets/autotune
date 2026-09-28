@@ -62,3 +62,61 @@ def test_too_few_steps_never_finishes_and_uninstall_stops_the_profiler():
     assert not att._profiling
     with torch.profiler.profile(activities=[torch.profiler.ProfilerActivity.CPU]):
         pass                                                             # a new profiler can start
+
+
+# ---- B1: tokens are counted on every clean step (decision 2026-09-27) ----------------------
+
+def _variable_width_run(widths, accum=1, float_input=False):
+    """A loop whose batch width changes every step. Returns (att, per-step padded tokens)."""
+    torch.manual_seed(0)
+    before = nopatch.snapshot()
+    att = Attach(device="cpu", warmup=WARMUP, clean_steps=CLEAN, peak_flops=1.0, peak_mem_bw_gb_s=1.0)
+    att.install()
+    if float_input:
+        model = torch.nn.Linear(16, 16)
+    else:
+        model = torch.nn.Sequential(torch.nn.Embedding(50, 16), torch.nn.Linear(16, 50))
+    opt = torch.optim.AdamW(model.parameters())
+    expected = []
+    for w in widths:
+        for _ in range(accum):
+            x = torch.randn(4, w, 16) if float_input else torch.randint(0, 50, (4, w))
+            model(x).square().mean().backward() if float_input else \
+                model(x).logsumexp(-1).mean().backward()
+        opt.step()
+        opt.zero_grad()
+        expected.append(4 * w * accum)
+    nopatch.verify(before)                                               # still patch-free
+    return att, expected
+
+
+# steps 1-2 warmup, 3-5 clean, 6 traced (much narrower than the clean mean), 7 after
+WIDTHS = [8, 8, 30, 90, 60, 5, 8]
+
+
+def test_b1_tokens_come_from_the_clean_steps_not_the_traced_step():
+    att, expected = _variable_width_run(WIDTHS)
+    clean = expected[WARMUP:WARMUP + CLEAN]                               # steps 3-5
+    assert att.step_tokens == clean                                       # one count per timed step
+    assert att.tokens == sum(clean) / len(clean)                          # rate numerator = their mean
+    traced = att.micro_batches["traced_step_tokens"]
+    assert traced["hook"] == traced["trace"] == expected[WARMUP + CLEAN]  # hook and trace agree...
+    assert traced["trace"] < 0.2 * att.tokens                             # ...but one step would have
+    assert att.micro_batches["token_source"].startswith("hook: mean of 3")  # been ~10x off (the bug)
+
+
+def test_b1_grad_accum_sums_every_micro_batch_of_a_step():
+    att, expected = _variable_width_run(WIDTHS, accum=2)
+    assert att.step_tokens == expected[WARMUP:WARMUP + CLEAN]
+    assert att.micro_batches["forwards"] == att.micro_batches["backwards"] == 2
+
+
+def test_b1_float_activation_input_counts_rows_times_seq():
+    att, expected = _variable_width_run(WIDTHS, float_input=True)
+    assert att.step_tokens == expected[WARMUP:WARMUP + CLEAN]
+
+
+def test_b1_no_hook_left_on_the_model():
+    att, _ = _variable_width_run(WIDTHS)
+    assert att._tok_hook is None and att._root_hook is None
+    assert att._root is not None and len(att._root._forward_pre_hooks) == 0
