@@ -22,8 +22,9 @@ env/
 # Run config (fill run.toml from the committed run.toml.example template)
 run.toml
 
-# Claude Code local state
-.claude/
+# Track the repo's Claude Code skills (overrides a global .claude/ ignore)
+!.claude/
+.claude/settings.local.json
 
 # Local working docs (not shared)
 CLAUDE.md
