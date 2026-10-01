@@ -84,6 +84,56 @@ Everything a probe needs, in one dict: **run params** (`model`, `dataset`, `name
 **frozen ceilings** the loop measured once at Frame (`peak_flops`, `peak_mem_bw_gb_s`) so every probe
 is scored against the same denominator (not a per-probe re-measure).
 
+## Script probes (bring your own training script)
+
+Set `script` (and usually `script_args`) in the config, and the backend runs the **user's training
+script unchanged** instead of a `frameworks/` runner:
+
+```
+backends/local.py: run_script → python -m profiler.launch --out cap.json -- <script> <script_args>
+                              → the script runs in its own process, measured from the outside
+                              → cap.json → diagnose() → the same Observation a runner probe returns
+```
+
+ssh and modal reach this through `backends.local.run` on the box, so all three backends support it.
+
+```python
+from backends import run
+
+obs = run({
+    "backend": "ssh", "ssh": {"host": "gpu-box", "user": "ubuntu"}, "gpu": "A10",
+    "script": "runs/my_run/train.py",                        # repo-relative: same path on the box
+    "script_args": ["--config", "runs/my_run/train.yaml",    # the user's baseline flags...
+                    "--max_steps", "16"],                    # ...+ a step budget >= warmup + clean + 1
+    "dtype": "bfloat16", "warmup": 3, "clean_steps": 10,
+    "peak_flops": 8.9e13, "peak_mem_bw_gb_s": 445.0,         # frozen ceilings from Frame
+})
+print(obs["summary"], obs["population"]["driver"])           # ... "script"
+```
+
+| Key | Meaning |
+|---|---|
+| `script` | the training script. Absolute or repo-relative for `local`; **repo-relative for `ssh`**, which runs the same path after the code sync. A script under `runs/` (excluded from the sync) is pushed like `sample_file` |
+| `script_args` | its arguments: the baseline flags, plus the step budget and knob changes the agent sets per probe |
+| `script_cwd` | working directory for the script (default: the repo root) |
+| `python` | interpreter for the probe process (default: the current one) |
+| `warmup`, `clean_steps`, `peak_flops`, `peak_mem_bw_gb_s`, `dtype`, `timeout`, `env` | as for runner probes |
+
+**What the Observation says about itself:**
+- `population.driver: "script"`;
+- `clean_window: "fixed-position"` (not whole passes over Frame's sample);
+- `trace_basis: "traced-step"` (one step of the script's own loop, so `gpu_active_frac` / `gap_*`
+  are null);
+- the `script` and `script_args` it ran;
+- the micro-batch count seen per step;
+- any `script_error` raised after the measurement finished.
+
+Statuses match runner probes:
+- a CUDA OOM → `oom`;
+- another exception → `error` with its type and first line;
+- a killed process (no result written) → `error: launcher wrote no result`;
+- a step budget too small → `error: script ended after N optimizer steps; needs M`.
+
 ## Backends
 
 | Backend | What | Status |

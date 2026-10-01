@@ -45,3 +45,7 @@ runs/*
 
 # throwaway/dev scripts (live GPU validation harnesses, one-off probes)
 tmp_scripts/
+
+# Local parity harness for the bring-your-own-script work: experiments, frozen
+# baseline, raw results. Not shipped (see bring_your_own_script.md).
+sandbox/

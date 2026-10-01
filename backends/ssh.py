@@ -114,6 +114,16 @@ def _push_sample(s, sample_file):
         raise RuntimeError(f"rsync of {sample_file} to {s['target']} failed:\n{r.stderr.strip()}")
 
 
+def _check_script(script):
+    """A user's training script must be repo-relative, so it lands at the same path on the box."""
+    if os.path.isabs(script):
+        raise ValueError(f"script {script!r} must be relative to the repo root, so it resolves "
+                         "to the same path on the box (put it in the repo, e.g. under runs/<run>/)")
+    repo = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    if not os.path.isfile(os.path.join(repo, script)):
+        raise FileNotFoundError(f"script {script!r} not found under {repo}")
+
+
 # Runs on the box: read the config off argv, run the probe, frame the result in sentinels.
 _REMOTE = """
 import base64, json, os, sys
@@ -137,10 +147,14 @@ def payload_config(config):
 def run(config):
     """Run one probe on the remote box and return its Observation (a dict)."""
     s = _settings(config)
+    if config.get("script"):                          # bring-your-own-script: the box runs the
+        _check_script(config["script"])                #   same repo-relative path after the sync
     if s["sync"]:
         _sync(s)
         if config.get("sample_file"):                  # runs/ is excluded from the code sync
             _push_sample(s, config["sample_file"])
+        if (config.get("script") or "").startswith("runs/"):   # ...so a script kept there is pushed too
+            _push_sample(s, config["script"])
 
     payload = base64.b64encode(json.dumps(payload_config(config), default=str).encode()).decode()
 
