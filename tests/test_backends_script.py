@@ -104,3 +104,31 @@ def test_ssh_needs_a_repo_relative_script(tmp_path):
     with pytest.raises(FileNotFoundError):
         _check_script("runs/does-not-exist/train.py")
     _check_script("tests/test_backends_script.py")                  # any repo-relative file passes
+
+
+def test_script_files_must_exist_before_launching(tmp_path):
+    path = tmp_path / "train.py"
+    path.write_text(SCRIPT)
+    with pytest.raises(FileNotFoundError):
+        backends.run({"backend": "local", "script": str(path), "device": "cpu",
+                      "script_files": [str(tmp_path / "probes" / "exp1.yaml")]})
+
+
+def test_script_files_are_recorded_on_the_observation(tmp_path):
+    cfg = tmp_path / "exp1.yaml"
+    cfg.write_text("micro_batch: 4\n")
+    path = tmp_path / "train.py"
+    path.write_text(SCRIPT)
+    obs = backends.run({"backend": "local", "script": str(path), "device": "cpu",
+                        "script_args": ["--max-steps", "8"], "script_files": [str(cfg)],
+                        "warmup": 1, "clean_steps": 2, "peak_flops": 1e18, "peak_mem_bw_gb_s": 1e6})
+    assert obs["status"] == "ok", obs["error"]
+    assert obs["population"]["script_files"] == [str(cfg)]
+
+
+def test_ssh_checks_every_script_file_is_repo_relative(tmp_path):
+    from backends.ssh import run as ssh_run
+    with pytest.raises(ValueError, match="relative to the repo root"):
+        ssh_run({"backend": "ssh", "ssh": {"host": "unused"}, "sync": False,
+                 "script": "tests/test_backends_script.py",
+                 "script_files": [str(tmp_path / "exp1.yaml")]})

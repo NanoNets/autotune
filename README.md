@@ -178,17 +178,22 @@ anything is), and your script needs no autotune imports.
 - A **step budget** you can pass on the command line (e.g. `--max-steps`), so a probe runs ~15
   steps and exits by itself.
 - The settings you want tuned (micro-batch / grad accumulation, attention implementation,
-  gradient checkpointing, compile, …) reachable as **flags or a config file**. The agent sets them
-  in your script's own terms; there's no adapter to write.
+  gradient checkpointing, compile, …), ideally reachable as **flags or a config file**. Hardcoded
+  ones can be moved out with your permission. The agent sets them in your script's own terms;
+  there's no adapter to write. Examples of each case: `examples/byo_script/`.
 - A **fixed seed**, so every probe sees the same examples.
 
 **The workflow:**
 1. Put the script in the repo (e.g. `runs/<run_name>/train.py`). A repo-relative path is what lets
    the ssh backend run it on your GPU box.
-2. In `run.toml`, set `script` and the baseline `script_args` (see `run.toml.example`), alongside
-   the usual model / dataset / gpu / backend.
-3. Hand `program.md` to the agent. It reads your script, runs it once as-is (the baseline), then
-   probes variations by changing **only your script's own flags**, and records each probe in
+2. Point autotune at it: `/run-loop … script=<path>`, plus `script_configs=<path>[,<path>…]` if it
+   loads its settings from config files (a training YAML, say). Or set the same keys in
+   `run.toml`. Without `script_configs`, the settings are taken to live in the script itself.
+3. The agent reads your script and configs and maps where each speed setting lives. **If a
+   setting is hardcoded,** it asks before touching anything, and offers to move such settings into
+   a config file on a copy of your script, verified to train identically. It then runs the
+   baseline as-is, and probes variations through your script's own flags and **per-probe copies**
+   of your config files. Your files are never modified. Each probe is recorded in
    `runs/<run_name>/results.tsv`.
 4. You get back the fastest settings, expressed as your script's own flags, plus what was tried and
    why.

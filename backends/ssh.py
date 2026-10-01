@@ -115,7 +115,8 @@ def _push_sample(s, sample_file):
 
 
 def _check_script(script):
-    """A user's training script must be repo-relative, so it lands at the same path on the box."""
+    """A user's training script, or a file it reads (`script_files`), must be repo-relative, so it
+    lands at the same path on the box."""
     if os.path.isabs(script):
         raise ValueError(f"script {script!r} must be relative to the repo root, so it resolves "
                          "to the same path on the box (put it in the repo, e.g. under runs/<run>/)")
@@ -147,14 +148,18 @@ def payload_config(config):
 def run(config):
     """Run one probe on the remote box and return its Observation (a dict)."""
     s = _settings(config)
-    if config.get("script"):                          # bring-your-own-script: the box runs the
-        _check_script(config["script"])                #   same repo-relative path after the sync
+    shipped = []                                       # bring-your-own-script: the box runs the
+    if config.get("script"):                           #   same repo-relative paths after the sync
+        shipped = [config["script"], *(config.get("script_files") or [])]
+        for f in shipped:
+            _check_script(f)
     if s["sync"]:
         _sync(s)
         if config.get("sample_file"):                  # runs/ is excluded from the code sync
             _push_sample(s, config["sample_file"])
-        if (config.get("script") or "").startswith("runs/"):   # ...so a script kept there is pushed too
-            _push_sample(s, config["script"])
+        for f in shipped:                              # ...so script files kept there (a refactored
+            if f.startswith("runs/"):                  #   copy, per-probe configs) are pushed too
+                _push_sample(s, f)
 
     payload = base64.b64encode(json.dumps(payload_config(config), default=str).encode()).decode()
 

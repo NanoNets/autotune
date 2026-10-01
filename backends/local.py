@@ -80,6 +80,9 @@ def run_script(config):
     """Bring-your-own-script probe: run the user's unchanged training script under
     `profiler.launch` in its own process, read back the Capture it wrote, and diagnose it.
 
+    `script_files` (optional): other repo-relative files the script reads, e.g. the per-probe
+    config copies under `runs/<run>/probes/`. Here they must exist; the ssh backend also ships them.
+
     The script must build its optimizer and loop the usual way, run on one GPU, fetch batches
     through a torch DataLoader, and stop by itself: the agent sets its step budget (`max_steps`
     or equivalent) to at least warmup + clean_steps + 1 via `script_args`. Knobs reach the script
@@ -89,6 +92,8 @@ def run_script(config):
     from profiler.capture import Capture
     from profiler.diagnostic import diagnose
 
+    for f in config.get("script_files") or []:          # fail before launching, not mid-probe
+        _script_path(f)
     out = os.path.join(tempfile.mkdtemp(prefix="autotune_script_"), "cap.json")
     argv = _launch_argv(config, out)
     env = {**os.environ, **{str(k): str(v) for k, v in (config.get("env") or {}).items()}}
@@ -108,6 +113,7 @@ def run_script(config):
                                       tokens=rec.get("tokens"), gpu=config.get("gpu", "local")))
     obs["population"] = {**(obs.get("population") or {}), "script": config["script"],
                          "script_args": list(map(str, config.get("script_args") or [])),
+                         "script_files": list(config.get("script_files") or []),
                          "micro_batches": rec.get("micro_batches"),
                          "script_error": rec.get("script_error")}
     return obs
