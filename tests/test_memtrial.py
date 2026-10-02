@@ -145,6 +145,47 @@ def test_a_batch_that_is_not_the_worst_case_fails_the_trial(tmp_path, setup, arg
     assert t["status"] == "error" and why in t["error"]
 
 
+def test_a_model_called_with_keyword_inputs_is_checked(tmp_path):
+    """HF Trainer calls model(**batch): the one-shot global hook can't see kwargs, so the model's
+    own pre-hook must catch every later call, and a kwargs-only first call must not read as a
+    missing token tensor."""
+    script = tmp_path / "kw.py"
+    script.write_text(textwrap.dedent('''
+        import torch
+        class M(torch.nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.e, self.o = torch.nn.Embedding(64, 8), torch.nn.Linear(8, 64)
+            def forward(self, input_ids=None, labels=None):
+                return self.o(self.e(input_ids)).logsumexp(-1).mean()
+        m = M(); opt = torch.optim.AdamW(m.parameters())
+        for _ in range(10):
+            m(input_ids=torch.zeros(2, 8, dtype=torch.long)).backward(); opt.step(); opt.zero_grad()
+    '''))
+    p, t = _launch(tmp_path, script)
+    assert t["status"] == "ok", t
+    assert t["shapes_seen"] == [[2, 8]]
+
+
+def test_an_oom_in_the_first_kwargs_forward_still_counts_as_does_not_fit(tmp_path):
+    """Found on the A10: micro-batch 32 OOMed inside step 1's model(**batch), before any shape was
+    readable. That's still "doesn't fit" (marked unchecked): it can only make the ceiling lower."""
+    script = tmp_path / "kw_oom.py"
+    script.write_text(textwrap.dedent('''
+        import torch
+        class M(torch.nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.e = torch.nn.Embedding(64, 8)
+            def forward(self, input_ids=None):
+                raise torch.cuda.OutOfMemoryError("CUDA out of memory. Tried to allocate 3.00 GiB")
+        m = M(); opt = torch.optim.AdamW(m.parameters())
+        m(input_ids=torch.zeros(2, 8, dtype=torch.long))
+    '''))
+    p, t = _launch(tmp_path, script)
+    assert t["status"] == "oom" and t["shape_checked"] is False
+
+
 def test_a_frozen_model_called_first_is_not_the_one_checked(tmp_path, setup):
     script, rows = setup
     p, t = _launch(tmp_path, script, "--data_path", str(rows), "--bs", "2", "--reference_first")

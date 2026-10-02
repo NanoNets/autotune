@@ -313,7 +313,8 @@ def main(argv=None):
     ap.add_argument("--config", required=True, help="the candidate probe config (JSON file)")
     ap.add_argument("--run", required=True, help="the run directory, e.g. runs/<run>")
     ap.add_argument("--force", action="store_true", help="measure even if not stale")
-    ap.add_argument("--fresh", action="store_true", help="ignore the previous ceiling")
+    ap.add_argument("--fresh", action="store_true",
+                    help="measure from scratch, ignoring the previous ceiling (implies --force)")
     ap.add_argument("--steps", type=int, default=TRIAL_STEPS)
     a = ap.parse_args(argv)
 
@@ -333,7 +334,7 @@ def main(argv=None):
     if vocab and not config.get("script"):             # the embedding width: an id past it is a
         config.setdefault("vocab", vocab)              # device-side assert, not the OOM measured
     current = profile.get("ceiling")
-    if current and not a.force and not is_stale(current, config):
+    if current and not (a.force or a.fresh) and not is_stale(current, config):
         print(f"ceiling still valid: micro_batch <= {current['micro_batch_max']} at {seq_len} "
               f"(no memory knob moved)")
         print(json.dumps(current, default=str))

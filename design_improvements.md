@@ -213,8 +213,8 @@ discovered by a `ValueError` halfway through a booked GPU hour.
 
 ## 7. The memory ceiling: lean trials, divisors only, re-measured on memory-knob changes, and for user scripts
 
-**Status: decided and implemented 2026-10-02 (`frame/ceiling.py`, `frame/ceiling_rows.py`,
-`profiler/memtrial.py`); GPU verification in progress (`docs/verification/ceiling.md`).** This
+**Status: decided, implemented and verified on an A10, 2026-10-02 (`frame/ceiling.py`,
+`frame/ceiling_rows.py`, `profiler/memtrial.py`; `docs/verification/ceiling.md`, 22/22 rows).** This
 replaces the 2026-09-25 decision that stood here, and it adopts §1's divisor search (§1's
 memory-curve fit stays open). Today's process and its
 gaps are below so the change can be checked against them.

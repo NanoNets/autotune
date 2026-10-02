@@ -258,6 +258,11 @@ On top of the usual summary, report:
 - **Probe settings, every probe:** a step budget of at least `warmup + clean_steps + 1` plus a
   little slack; logging, eval and checkpoint saving off. Use flags, or the config copy, whichever
   holds them.
+- **Before a probe that moves a memory knob** (compile, checkpointing, attention, …), re-check the
+  ceiling with the **trial form** of that probe: your `ceiling_candidate.json` (Step 2) with the
+  same knob changed (its template or flag) and `memory_knobs` updated to the new values. Not the
+  probe config itself: a trial reads the ceiling rows, at `{micro_batch}` and accumulation 1.
+  A micro-batch / accumulation change alone needs no check.
 - **A knob change:**
   - **a flag** → change it in `script_args`;
   - **a config key** → copy the config to `runs/<run_name>/probes/exp<N>.<ext>`, change **only**

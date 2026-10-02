@@ -84,7 +84,10 @@ class MemoryTrial:
         self._shape_hook = mod.register_forward_pre_hook(self._see, with_kwargs=True)
         self._root_hook.remove()
         self._root_hook = None
-        self._see(mod, args, {})                          # this call counts too
+        # The global hook can't see kwargs (HF's `model(**batch)`), so this first call is checked
+        # only when its input is positional. Every later call goes through the model's own hook.
+        if _input_shape(args, {}) is not None:
+            self._see(mod, args, {})
 
     def _see(self, mod, args, kwargs):
         shape = _input_shape(args, kwargs)
@@ -105,17 +108,22 @@ class MemoryTrial:
             raise TrialDone()
 
     def result(self, status, error=None):
-        """The trial record. A wrong or unreadable batch shape overrides any status: the trial
-        then measured some other workload, so its memory says nothing about this ceiling."""
+        """The trial record. A wrong batch shape overrides any status: the trial then measured some
+        other workload, so its memory says nothing about this ceiling. An `ok` must have SEEN the
+        right shape. An `oom` before any shape was seen (the first forward, when the model is called
+        with kwargs only, which the one-shot global hook can't read) still counts as "doesn't fit",
+        marked `shape_checked: false`: an unchecked OOM can only make the ceiling too LOW, and the
+        smaller trials of the same search already checked the rows reach the model."""
         if self.memory is None:
             self.memory = _memory(self.device)
+        seen = any(self.shapes)
         if self.expect and status in ("ok", "oom"):
             if self.mismatch is not None:
                 status, error = "error", (
                     f"script fed {list(self.mismatch) if self.mismatch else 'no token tensor'}, "
                     f"not {list(self.expect)}: it ignored the ceiling rows, dropped / split / "
                     "packed them, or runs at another sequence length")
-            elif not any(self.shapes):
+            elif status == "ok" and not seen:
                 status, error = "error", "the batch shape couldn't be checked: no model input seen"
-        return {"status": status, "error": error, "steps": self.n,
+        return {"status": status, "error": error, "steps": self.n, "shape_checked": seen,
                 "shapes_seen": sorted({s for s in self.shapes if s}), **self.memory}
