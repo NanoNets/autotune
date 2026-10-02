@@ -18,7 +18,7 @@ length are off-limits, so a faster config is never a worse model.
  │   Frame   │ ──▶ │  Baseline  │ ──▶ │          Loop          │ ──▶ │       Learn       │
  │  size up  │     │  run your  │     │   change one thing,    │     │  record the run,  │
  │  the job  │     │   config   │     │  test, keep if faster  │     │   update beliefs  │
- └───────────┘     └────────────┘     └───┬────────────────▲───┘     └───────────────────┘
+ └───────────┘     └────────────┘     └───▲────────────────┬───┘     └───────────────────┘
                                           │     repeat     │
                                           └────────────────┘
 ```
