@@ -118,7 +118,7 @@ def build(model, dataset, hardware, versions, dtype="bfloat16", optimizer="adamw
     effective_batch: the human's target (carried, not searched). knobs: the framework's searchable
     surface, so the agent classifies safe/off-limits at Frame from what's actually tunable.
     max_len: the human-declared sequence length. Validated against the architecture here.
-    ceiling: the record from `frame.ceiling.find_ceiling` at max_len, or None if not measured.
+    ceiling: the record from `frame.ceiling` at max_len, or None if not measured.
     """
     peak_dtype = hardware.get("peak_dtype")
     if peak_dtype is not None and peak_dtype != dtype:  # a peak measured at another precision is
@@ -189,7 +189,8 @@ def framework_runner(framework):
 
 def frame(model, dataset, gpu, max_len, dtype="bfloat16", device="cuda", framework="hf",
           effective_batch=16, text_field="text", split="train", sample=1000, name=None,
-          runner=None, seed=0, on_trial=None, sample_path=None, sample_seed=0, max_scan=None):
+          runner=None, seed=0, on_trial=None, sample_path=None, sample_seed=0, max_scan=None,
+          ceiling_rows_path=None, ceiling_row_template=None, ceiling_rows_format="text"):
     """Live: measure the peak, load config + tokenizer, scan the dataset, measure the ceiling,
     assemble.
 
@@ -200,8 +201,10 @@ def frame(model, dataset, gpu, max_len, dtype="bfloat16", device="cuda", framewo
     step — a ceiling measured on a different workload describes that workload, not this job. No
     runner, or a non-cuda device, and the Profile carries `ceiling=None`, which the summary says
     out loud rather than implying a ceiling was checked.
-    effective_batch: the human's target. Doubles as the ceiling search's cap — above it
-    grad_accum would be < 1, so a larger micro_batch is not a legal config to test.
+    effective_batch: the human's target. The ceiling search tries only its divisors (micro_batch
+    must divide it), up to effective_batch itself.
+    ceiling_rows_path / ceiling_row_template / ceiling_rows_format: for a user's script, write the
+    over-length rows its ceiling trials read (`frame.ceiling_rows`), `effective_batch * 3` of them.
     sample / sample_path / sample_seed / max_scan: the PROBE SAMPLE (`frame.dataset.draw_sample`).
     `sample` rows, rounded down to a multiple of effective_batch, are drawn length-stratified from
     a random pool over the split. The pool's distribution becomes the Profile's dataset shape, and
@@ -227,15 +230,19 @@ def frame(model, dataset, gpu, max_len, dtype="bfloat16", device="cuda", framewo
                   device_name=m["device_name"], num_sms=m["num_sms"],
                   peak_mem_bw_gb_s=m["peak_mem_bw_gb_s"])
 
+    if ceiling_rows_path:                               # a user's script reads these in a trial
+        from frame.ceiling_rows import write_ceiling_rows
+        write_ceiling_rows(ceiling_rows_path, tok, max_len, effective_batch * 3,
+                           text_field=text_field, template=ceiling_row_template,
+                           fmt=ceiling_rows_format, seed=seed)
+
     ceiling = None
     if runner is not None and device == "cuda":
-        from frame.ceiling import find_ceiling
-        ceiling = find_ceiling(                         # reuses the peaks just measured, so no
-            runner,                                     # trial re-pays for them
-            {"device": device, "dtype": dtype, "model": model, "dataset": dataset},
-            seq_len=max_len, vocab=mi["vocab"], cap=effective_batch, seed=seed,
-            peak_flops=m["peak_flops"], peak_mem_bw_gb_s=m["peak_mem_bw_gb_s"],
-            on_trial=on_trial)
+        from frame.ceiling import find_ceiling, framework_defaults
+        ceiling = find_ceiling(                         # memory-only trials: no peaks re-measured
+            runner, {"device": device, "dtype": dtype, "model": model, "framework": framework},
+            seq_len=max_len, vocab=mi["vocab"], effective_batch=effective_batch, seed=seed,
+            on_trial=on_trial, defaults=framework_defaults(framework))
 
     return build(mi, ds, hw, versions(), dtype=dtype,
                  effective_batch=effective_batch, knobs=_framework_knobs(framework),

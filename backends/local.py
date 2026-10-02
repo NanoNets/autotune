@@ -97,20 +97,8 @@ def run_script(config):
         _script_path(f)
     out = os.path.join(tempfile.mkdtemp(prefix="autotune_script_"), "cap.json")
     argv = _launch_argv(config, out)
-    env = {**os.environ, **{str(k): str(v) for k, v in (config.get("env") or {}).items()}}
-    env["PYTHONPATH"] = _REPO + (os.pathsep + env["PYTHONPATH"] if env.get("PYTHONPATH") else "")
     timeout = config.get("timeout", 1800)
-    # Its own process group, so a timeout kills the script AND its children (DataLoader workers
-    # would otherwise outlive it and keep holding the GPU).
-    proc = subprocess.Popen(argv, cwd=config.get("script_cwd") or _REPO, env=env, text=True,
-                            stdout=subprocess.PIPE, stderr=subprocess.PIPE, start_new_session=True)
-    try:
-        stdout, stderr = proc.communicate(timeout=timeout)
-        timed_out = False
-    except subprocess.TimeoutExpired:                  # a hang (e.g. a worker deadlock) or simply
-        os.killpg(proc.pid, signal.SIGKILL)            # too long: an error Observation, never a
-        stdout, stderr = proc.communicate()            # crashed loop
-        timed_out = True
+    stdout, stderr, timed_out, returncode = _launch(argv, config)
     if timed_out:
         cap = Capture(status="error", device=config["device"],
                       error=f"script exceeded timeout of {timeout}s (killed)")
@@ -122,7 +110,7 @@ def run_script(config):
     else:                                              # killed (OOM killer, SIGKILL, os._exit)
         tail = (stderr or stdout or "").strip().splitlines()[-1:] or ["(no output)"]
         cap = Capture(status="error", device=config["device"],
-                      error=f"launcher wrote no result (exit {proc.returncode}): {tail[0]}")
+                      error=f"launcher wrote no result (exit {returncode}): {tail[0]}")
         rec = {}
     obs = dataclasses.asdict(diagnose(cap, params=rec.get("params") or 0,
                                       tokens=rec.get("tokens"), gpu=config.get("gpu", "local")))
@@ -138,12 +126,64 @@ def run_script(config):
     return obs
 
 
+def ceiling_trial(config):
+    """One memory-only ceiling trial (`probe_kind: "ceiling_trial"`, built by `frame.ceiling`):
+    `trial_steps` optimizer steps at `micro_batch`, then `{"status": ok|oom|error, "error",
+    "peak_gb", "reserved_gb", "total_gb", ...}`. No timing, no profiler, no Observation.
+
+    Our runner: worst-case synthetic batches, in this process. A user's script: its own launch
+    under `profiler.launch --memory-only`, reading Frame's ceiling rows through its own data setting
+    (`script_args` / `script_files` already point at them), and every batch must be
+    `[micro_batch, max_len]`."""
+    steps = int(config.get("trial_steps", 3))
+    if not config.get("script"):
+        from frame.ceiling import runner_trial
+        runner = _make_runner(config.get("framework", "torch"))
+        return runner_trial(runner, config, config["max_len"], config.get("vocab"), steps,
+                            config.get("seed", 0))(config["micro_batch"])
+    for f in config.get("script_files") or []:
+        _script_path(f)
+    out = os.path.join(tempfile.mkdtemp(prefix="autotune_trial_"), "trial.json")
+    argv = [config.get("python") or sys.executable, "-m", "profiler.launch", "--out", out,
+            "--device", config["device"], "--memory-only", "--steps", str(steps),
+            "--expect-shape", f"{config['micro_batch']},{config['max_len']}",
+            "--", _script_path(config["script"]), *map(str, config.get("script_args") or [])]
+    stdout, stderr, timed_out, code = _launch(argv, config)
+    if timed_out:
+        return {"status": "error", "error": f"trial exceeded timeout of {config.get('timeout', 1800)}s (killed)"}
+    if not os.path.exists(out):                        # killed outright: no memory answer
+        tail = (stderr or stdout or "").strip().splitlines()[-1:] or ["(no output)"]
+        return {"status": "error", "error": f"launcher wrote no result (exit {code}): {tail[0]}"}
+    with open(out) as f:
+        return json.load(f)["trial"]
+
+
+def _launch(argv, config):
+    """Run the launcher in its own process group; (stdout, stderr, timed_out, returncode)."""
+    env = {**os.environ, **{str(k): str(v) for k, v in (config.get("env") or {}).items()}}
+    env["PYTHONPATH"] = _REPO + (os.pathsep + env["PYTHONPATH"] if env.get("PYTHONPATH") else "")
+    # Its own process group, so a timeout kills the script AND its children (DataLoader workers
+    # would otherwise outlive it and keep holding the GPU).
+    proc = subprocess.Popen(argv, cwd=config.get("script_cwd") or _REPO, env=env, text=True,
+                            stdout=subprocess.PIPE, stderr=subprocess.PIPE, start_new_session=True)
+    try:
+        stdout, stderr = proc.communicate(timeout=config.get("timeout", 1800))
+        return stdout, stderr, False, proc.returncode
+    except subprocess.TimeoutExpired:                  # a hang (e.g. a worker deadlock) or simply
+        os.killpg(proc.pid, signal.SIGKILL)            # too long: an error result, never a
+        stdout, stderr = proc.communicate()            # crashed loop
+        return stdout, stderr, True, proc.returncode
+
+
 def run(config):
     """Run one probe here and return its Observation (a dict). Needs torch + the chosen runner,
-    or, when `config["script"]` is set, the user's training script (`run_script`)."""
+    or, when `config["script"]` is set, the user's training script (`run_script`). A
+    `probe_kind: "ceiling_trial"` config is a memory-only ceiling trial instead (`ceiling_trial`)."""
     from profiler.capture import capture
     from profiler.diagnostic import diagnose
 
+    if config.get("probe_kind") == "ceiling_trial":
+        return ceiling_trial({**config, "device": _resolve_device(config)})
     if config.get("script"):
         return run_script({**config, "device": _resolve_device(config)})
     config = {**config, "device": _resolve_device(config)}   # resolve ONCE — capture and the

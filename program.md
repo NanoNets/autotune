@@ -108,10 +108,13 @@ anything but the shipped defaults, "faster by X%" means nothing.
 - **ALWAYS** state the hypothesis's reasoning explicitly: what prior it's built on, what you
   expect, what would surprise you. Can't articulate why it should help → you're guessing → think
   more, don't spend the probe.
-- **ALWAYS** check the ceiling before proposing a `micro_batch`: it is NOT a run constant. IF the
-  Config moves a knob the ceiling was measured under (recompute, attn_kernel, optimizer, dtype,
-  sharding, **compile**) → the ceiling is stale → re-measure it (`frame/README.md`), then
-  hypothesize against the new bound. `compile` is in that list on measured evidence: fusing the
+- **ALWAYS** check the ceiling before running a probe: it is NOT a run constant. Write the
+  candidate config to `runs/<run_name>/candidate.json` and run
+  `python -m frame.ceiling --config runs/<run_name>/candidate.json --run runs/<run_name>`. IF the
+  config moves a memory knob the ceiling was stamped with (recompute, attention, optimizer, dtype,
+  sharding, chunked CE, the allocator setting, **compile**) it re-measures from the previous
+  ceiling, usually in 1-2 short trials; otherwise it runs nothing. Then choose the probe's
+  `micro_batch` against the bound it reports (`frame/README.md`). `compile` is in that list on measured evidence: fusing the
   cross-entropy cut peak memory 5.4GB and moved a measured ceiling from 2 to 4 (`experience/test_a10G.md`).
 - **NEVER** raise `micro_batch` above the ceiling because a probe reported spare `headroom_gb`.
   Under `padding="longest"` a probe's peak reflects the rows it drew, not the dataset's longest —
@@ -161,7 +164,10 @@ Read `script` and every file in `script_configs`. Write down in `runs/<run_name>
 - its seed;
 - **how each config file is loaded:** by a flag (e.g. `--config train.yaml`), a positional
   argument, or a **hardcoded path** in the code;
-- **which flag or config key sets the step budget** (e.g. `--max_steps`, `training.max_steps`).
+- **which flag or config key sets the step budget** (e.g. `--max_steps`, `training.max_steps`);
+- **where its data source is set:** a flag (`--data_path`), a config key (`dataset.path`), a
+  hardcoded path, or a hub id with no path setting (`load_dataset("org/name")`); and whether it
+  reads text rows or pre-tokenized ones (a separate preprocessing step).
 
 IF it has no torch DataLoader or no torch optimizer → stop and tell the user: it can't be probed
 yet. Otherwise run it once on the backend with its baseline inputs and a small step budget, and
@@ -174,8 +180,21 @@ Frame the model and data the script uses as usual (`model` / `dataset` in `run.t
 - **The probe sample:** the script trains on its own data. Frame's `sample.jsonl` isn't a format a
   user's framework can load yet, so script probes don't carry `sample_hash`. Keep the script's data,
   seed and sampler identical across every probe.
-- **The ceiling:** there's no OOM ceiling for scripts yet (`design_improvements.md` §7). Don't
-  raise the micro-batch above the baseline's value without the user's OK, and say so at Step 3.
+- **The ceiling** (`frame/README.md`, "User scripts"). Micro-batch is a lever for a script like
+  for our runner, bounded by the ceiling; only `effective_batch` is fixed.
+  1. Frame with `--ceiling-rows-out runs/<run_name>/ceiling_rows.jsonl` (plus
+     `--ceiling-row-template` for chat / prompt data, or `--ceiling-rows-format ids` for
+     pre-tokenized JSON; for a separate preprocessing step, run the user's own step on the rows).
+  2. Write the trial config, `runs/<run_name>/ceiling_candidate.json`: the baseline probe config,
+     with the script's data source pointed at the rows (a flag in `script_args`, or a config
+     template in `ceiling_templates`), `{micro_batch}` where the micro-batch goes, accumulation 1,
+     a step budget of at least 3, and `memory_knobs` (the script's current value for every memory
+     knob, under its own names). A hardcoded data source or a hub id only is a 2b item.
+  3. `python -m frame.ceiling --config runs/<run_name>/ceiling_candidate.json --run runs/<run_name>`.
+     A trial that fails on the batch shape means the rows didn't reach the model as
+     `[micro_batch, max_len]`: fix the pointer (or re-Frame at the script's real length), don't
+     work around it. IF the user declines the 2b edit for a hardcoded data source → no ceiling:
+     say so at Step 3, and keep the micro-batch at or below the baseline's unless the user OKs more.
 
 **2a. The knob audit.** For every speed knob in `loop/throughput.md` (micro-batch / grad
 accumulation, attention implementation, gradient checkpointing, compile, dataloader workers, …),
@@ -189,11 +208,13 @@ record in `research.md` **where it lives**:
 | **hardcoded** in the code | `TrainingArguments(per_device_train_batch_size=8)` | **not without an edit** (2b) |
 | absent | no way to set it | not tunable; note it |
 
+Record the **data source** the same way: the ceiling trials point it at the ceiling rows.
+
 Also record the **never-touch list:** learning rate, schedule, dataset, `max_len`, precision, seed,
 LoRA rank, and anything else that changes the model (`loop/throughput.md`).
 
 **2b. If anything needed is hardcoded, ask the user before Step 3.** That covers a speed knob, a
-config file's path, or the step budget. Ask once, listing every such item, and offer:
+config file's path, the step budget, or the data source (a hardcoded path, or a hub id only). Ask once, listing every such item, and offer:
 1. **Move them into a config file** (recommended): a copy of the script at `runs/<run_name>/train.py`
    that reads those values from `runs/<run_name>/train_config.yaml` (passed by a new flag), so every
    probe's settings live in a file on disk.
@@ -227,7 +248,7 @@ On top of the usual summary, report:
 - the knob map (flag / config key / excluded) and the never-touch list;
 - any edit you made, with its diff and the equivalence result;
 - the knobs left out of the search;
-- that there's no ceiling;
+- the measured ceiling, or that there's none (a hardcoded data source the user kept);
 - that script probes are provisional evidence (Step 4).
 
 ### Step 4: every probe is the script with changed inputs

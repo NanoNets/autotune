@@ -1,1 +1,2 @@
 seq_len: 512
+path: null   # JSON lines of {"text": ...}; null -> seeded random tokens
