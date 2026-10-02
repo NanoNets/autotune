@@ -13,14 +13,11 @@ length are off-limits, so a faster config is never a worse model.
 
 ## How it works
 
-- `program.md`: the agent's instructions, step by step. Point your agent here.
-- `frame/` **+** `profiler/`: the measurement code. Frame sizes up the job once (model, dataset,
-the card's real peak, the largest micro-batch that fits); the profiler measures each experiment
-and returns a diagnostic the agent reads (MFU, GPU-active time, data-wait, kernels, memory).
-- `beliefs/` **+** `experience/`: what earlier runs learned. The agent starts from it and writes
-back to it.
-
-The agent decides what to try; the code does all the measuring.
+1. **Frame:** size up the job once: the model, the data, the GPU's real peak, and the largest
+   micro-batch that fits.
+2. **Baseline:** run your config as-is.
+3. **Loop:** pick one change, test it on the GPU, keep it if it's faster, repeat.
+4. **Learn:** record the run and update the shared beliefs for next time.
 
 ## Quick start
 
