@@ -4,6 +4,9 @@
 > `program.md` does not route here and the loop never reads or writes this file. It's a scratchpad
 > for us to decide what to build next — the doctrine the agent follows lives in `program.md`,
 > `loop/`, and the per-directory READMEs.
+>
+> Paths into `sandbox/attach_parity/` below refer to git tag **`sandbox-archive`**: the harness was
+> removed from the tree on 2026-10-02 (its capture now lives in `profiler/attach.py` / `launch.py`).
 
 Open questions and proposed changes that are **not yet settled by evidence**. Each entry states the
 claim, why it might be wrong, and **what experiment would settle it** — so a future eval can close

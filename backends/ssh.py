@@ -114,8 +114,19 @@ def _push_sample(s, sample_file):
         raise RuntimeError(f"rsync of {sample_file} to {s['target']} failed:\n{r.stderr.strip()}")
 
 
+def _ship_run_files(s, files):
+    """Push script files kept under runs/ (excluded from the code sync): a refactored copy of the
+    user's script, per-probe configs. ALWAYS, sync or not: the agent writes a new per-probe config
+    for every probe, so with `sync = false` the box would otherwise run without it, or on a stale
+    copy. Files outside runs/ ride with the code sync."""
+    for f in files:
+        if f.startswith("runs/"):
+            _push_sample(s, f)
+
+
 def _check_script(script):
-    """A user's training script must be repo-relative, so it lands at the same path on the box."""
+    """A user's training script, or a file it reads (`script_files`), must be repo-relative, so it
+    lands at the same path on the box."""
     if os.path.isabs(script):
         raise ValueError(f"script {script!r} must be relative to the repo root, so it resolves "
                          "to the same path on the box (put it in the repo, e.g. under runs/<run>/)")
@@ -147,14 +158,16 @@ def payload_config(config):
 def run(config):
     """Run one probe on the remote box and return its Observation (a dict)."""
     s = _settings(config)
-    if config.get("script"):                          # bring-your-own-script: the box runs the
-        _check_script(config["script"])                #   same repo-relative path after the sync
+    shipped = []                                       # bring-your-own-script: the box runs the
+    if config.get("script"):                           #   same repo-relative paths after the sync
+        shipped = [config["script"], *(config.get("script_files") or [])]
+        for f in shipped:
+            _check_script(f)
     if s["sync"]:
         _sync(s)
         if config.get("sample_file"):                  # runs/ is excluded from the code sync
             _push_sample(s, config["sample_file"])
-        if (config.get("script") or "").startswith("runs/"):   # ...so a script kept there is pushed too
-            _push_sample(s, config["script"])
+    _ship_run_files(s, shipped)
 
     payload = base64.b64encode(json.dumps(payload_config(config), default=str).encode()).decode()
 
@@ -171,8 +184,10 @@ def run(config):
     remote = (f"cd {_sh_path(s['remote_dir'])} && {env_prefix}"
               f"{_sh_path(s['python'])} -c {shlex.quote(script)} {payload}")
 
+    # The box enforces `timeout` itself and returns an error Observation (backends/local.py). This
+    # one only guards a dead connection, so it waits longer: the box's answer must win the race.
     r = subprocess.run(_ssh_cmd(s) + [s["target"], remote],
-                       capture_output=True, text=True, timeout=config.get("timeout", 1800))
+                       capture_output=True, text=True, timeout=config.get("timeout", 1800) + 300)
     out = r.stdout
     if _BEGIN not in out or _END not in out:
         tail = (r.stderr or out)[-2000:]

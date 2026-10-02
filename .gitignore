@@ -22,8 +22,9 @@ env/
 # Run config (fill run.toml from the committed run.toml.example template)
 run.toml
 
-# Claude Code local state
-.claude/
+# Track the repo's Claude Code skills (overrides a global .claude/ ignore)
+!.claude/
+.claude/settings.local.json
 
 # Local working docs (not shared)
 CLAUDE.md
@@ -45,7 +46,3 @@ runs/*
 
 # throwaway/dev scripts (live GPU validation harnesses, one-off probes)
 tmp_scripts/
-
-# Local parity harness for the bring-your-own-script work: experiments, frozen
-# baseline, raw results. Not shipped (see bring_your_own_script.md).
-sandbox/

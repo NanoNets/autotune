@@ -47,6 +47,8 @@ Understand the situation, then set up the search.
      (`knowledge/beliefs.md`); research external priors (model card, tuning guides).
 4. **Build the SearchSpace** — project the canonical knobs onto what this framework/model/hardware supports. Classify each knob `safe`/`off_limits` (unsure → off_limits).
 5. **Seed** — the first Config is the training script's **default, as-is** settings, unmodified.
+   When the user brought their own script (`run.toml` `script`), "as-is" means their script and
+   config files exactly as given, or the verified copy from `program.md` "Script mode" Step 2c.
    Not a surrogate guess, and **not a prior's winning config**. It is the baseline every later
    Config is measured against, so the eventual "faster by X%" claim is against real shipped
    defaults; and the surrogate has no calibration data yet to seed anything with.

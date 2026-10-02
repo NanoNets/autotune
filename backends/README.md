@@ -115,6 +115,7 @@ print(obs["summary"], obs["population"]["driver"])           # ... "script"
 |---|---|
 | `script` | the training script. Absolute or repo-relative for `local`; **repo-relative for `ssh`**, which runs the same path after the code sync. A script under `runs/` (excluded from the sync) is pushed like `sample_file` |
 | `script_args` | its arguments: the baseline flags, plus the step budget and knob changes the agent sets per probe |
+| `script_files` | other repo-relative files the script reads, e.g. a per-probe config copy (`runs/<run>/probes/exp3.yaml`). Checked before launch; the ssh backend pushes any under `runs/` |
 | `script_cwd` | working directory for the script (default: the repo root) |
 | `python` | interpreter for the probe process (default: the current one) |
 | `warmup`, `clean_steps`, `peak_flops`, `peak_mem_bw_gb_s`, `dtype`, `timeout`, `env` | as for runner probes |

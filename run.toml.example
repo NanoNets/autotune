@@ -24,8 +24,12 @@ device  = "cuda"    # what the probe runs ON. "cuda" for any GPU box; single-GPU
 # probes run YOUR script unchanged instead of a frameworks/ runner. The path is relative to the repo
 # root (the ssh backend runs the same path on the box). script_args are the BASELINE arguments: the
 # agent appends a step budget and changes only your script's own flags between probes.
-# script      = "runs/my_run/train.py"
-# script_args = ["--config", "runs/my_run/train.yaml"]
+# script_configs (only with script) lists the config file(s) the script loads its settings from;
+# omit it when the settings live in the script itself (flags or hardcoded). The agent never edits
+# these files: each probe gets its own copy under runs/<run>/probes/.
+# script         = "runs/my_run/train.py"
+# script_configs = ["runs/my_run/train.yaml"]
+# script_args    = ["--config", "runs/my_run/train.yaml"]
 
 [scan]
 text_field = "text"    # which dataset column to tokenize

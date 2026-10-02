@@ -23,6 +23,8 @@ How the run ended decides what `--out` says, with the same statuses `capture()` 
   | any other exception, before         | error          | `<ExceptionType>: <first line of message>`   |
   | any other exception, after          | ok             | the Capture + `script_error` alongside it     |
   | normally, but too few steps         | error          | how many optimizer steps it reached          |
+  | torch left patched (nopatch guard)  | error          | overrides any status above, `ok` included    |
+  | invalid warmup / clean settings     | error          | before the script starts                     |
 
 The exception is re-raised after `--out` is written, so the process still exits non-zero and
 the full traceback still reaches stderr. A process killed outright (OOM killer, SIGKILL,
@@ -83,8 +85,12 @@ def main():
         raise SystemExit("no script given after --")
     script = os.path.abspath(theirs[0])
 
-    att = Attach(device=a.device, warmup=a.warmup, clean_steps=a.clean, dtype=a.dtype,
-                 peak_flops=a.peak_flops, peak_mem_bw_gb_s=a.peak_bw)
+    try:                                                         # bad settings: say so in --out,
+        att = Attach(device=a.device, warmup=a.warmup, clean_steps=a.clean, dtype=a.dtype,
+                     peak_flops=a.peak_flops, peak_mem_bw_gb_s=a.peak_bw)
+    except ValueError as e:                                      # not a crash with no result
+        _write(a.out, {"capture": {"status": "error", "error": f"invalid probe settings: {e}"}})
+        raise SystemExit(2)
     record = {}
 
     def on_done(cap):                                            # called from inside their step
@@ -120,7 +126,15 @@ def main():
         elif status == "error":                                  # the measurement stands
             record["script_error"] = error
             _write(a.out, record)
-        nopatch.verify(before)                                   # fails the run if torch was patched
+        try:
+            nopatch.verify(before)                               # fails the run if torch was patched
+        except SystemExit as guard:                              # ...and then it is not a measurement:
+            with open(a.out) as f:                               # overwrite whatever was written,
+                rec = json.load(f)                               # an `ok` included
+            rec["capture"]["status"] = "error"
+            rec["capture"]["error"] = str(guard)
+            _write(a.out, rec)
+            raise
 
 
 if __name__ == "__main__":

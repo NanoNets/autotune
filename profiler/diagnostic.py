@@ -152,9 +152,10 @@ def diagnose(capture, params, tokens, gpu):
     cv, mean_wall = timing["step_time_cv"], timing["step_time_mean_s"]
     step_tok = timing.setdefault("tokens_per_step", tokens)   # per-step counts, else the caller's
     trace = load_trace(capture.trace)
-    flops = training_flops(params, step_tok)           # the MEAN clean step: rates are totals
-    floor = step_time_floor_s(flops, peak)
-    mfu_v = mfu(flops, mean_wall, peak)
+    known = bool(step_tok and params)                  # tokens unknown (a script whose model input
+    flops = training_flops(params, step_tok) if known else None   # had no token tensor): no FLOP
+    floor = step_time_floor_s(flops, peak) if known else None     # count, so no MFU, rather
+    mfu_v = mfu(flops, mean_wall, peak) if known else None        # than a crash or a guess
     tok_s = step_tok / mean_wall if step_tok and mean_wall else None
 
     ph_s = {k: v / 1e6 for k, v in phase_times_us(trace).items()}   # all of them, not just PHASES

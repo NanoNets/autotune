@@ -19,9 +19,13 @@ NO MONKEYPATCHING. Only public APIs, used as designed:
     STEP (decision B1, 2026-09-27). It counts padded `input_ids.numel()` (shape metadata, no GPU
     sync), the same definition as OG's `frameworks/hf.py`. A hook on one module only; the rest of
     the model keeps torch's no-hook fast path.
-  - `register_module_forward_pre_hook` (global), ONE-SHOT during warmup: finds the model (the
-    first module called), attaches the per-module hook above, and removes itself before any
-    timed step.
+  - `register_module_forward_pre_hook` (global), ONE-SHOT during warmup: finds the model and
+    attaches the per-module hook above, then removes itself before any timed step. "The model" is
+    the first module called AFTER the first optimizer step whose parameters include the ones that
+    optimizer trains. That rules out modules that run first but aren't the model being trained: an
+    `nn.Module` transform in the data pipeline (no parameters), or a frozen reference / teacher
+    model (none of the trained ones). Hence warmup >= 2: step 1 identifies the trained parameters,
+    and step 2 finds the module that owns them.
   - `torch.profiler.profile(record_shapes=True)` + one `record_function("step")` of our own,
     for the one profiled step.
 Phases and the micro-batch count are recovered from the trace torch recorded (`derive.py`). The
@@ -58,6 +62,7 @@ from profiler.capture import (Capture, _MIN_SAMPLE_S, _cpu_stats, _default_trace
 # reference batch, so throughput and trace durations from these probes are not `same-rows` /
 # `same-reference-batch` evidence (integration_plan.md Appendix A: B2, B4).
 POPULATION = {"driver": "script", "clean_window": "fixed-position", "trace_basis": "traced-step"}
+MIN_WARMUP = 2      # step 1 identifies the trained parameters; step 2 finds the model that owns them
 
 
 def _padded_tokens(args, kwargs):
@@ -79,6 +84,11 @@ def _padded_tokens(args, kwargs):
 class Attach:
     def __init__(self, device="cpu", warmup=3, clean_steps=10, trace_path=None, dtype=None,
                  peak_flops=None, peak_mem_bw_gb_s=None):
+        if warmup < MIN_WARMUP:
+            raise ValueError(f"warmup={warmup}: needs >= {MIN_WARMUP} (step 1 identifies the trained "
+                             "parameters, step 2 finds the model that owns them)")
+        if clean_steps < 1:
+            raise ValueError(f"clean_steps={clean_steps}: needs >= 1")
         self.device, self.warmup, self.clean_steps = device, warmup, clean_steps
         self.trace_path = trace_path or _default_trace_path()
         dtype = dtype or torch.get_default_dtype()
@@ -94,6 +104,10 @@ class Attach:
         self.step_tokens = []                          # padded tokens of each CLEAN step (B1)
         self._acc, self._traced_tokens = 0, None       # running count within the current step
         self._root, self._root_hook, self._tok_hook = None, None, None
+        self._trained = set()                          # ids of the parameters the optimizer trains
+        self._step_bad = False                         # a call in this step had no token tensor
+        self._tokens_unknown = None                    # why tokens can't be reported, if they can't
+        self.model_trained = None                      # the model's checkpoint name, when it has one
 
     # ---- lifecycle -------------------------------------------------------------------------
     def install(self):
@@ -103,20 +117,28 @@ class Attach:
         if self.peak_mem_bw_gb_s is None:
             self.peak_mem_bw_gb_s = measure_peak_bandwidth_gb_s(self.device)
         self._hook = register_optimizer_step_post_hook(self._on_optimizer_step)
-        self._root_hook = _module.register_module_forward_pre_hook(self._find_root)
 
     def _find_root(self, mod, args):
-        """First module called = the model's outermost call. One-shot: attach the per-step token
-        counter to it, then remove this global hook, so the no-hook fast path is back for every
-        module before anything is timed. (The call in progress isn't counted: it's warmup.)"""
+        """The model: the first module called that owns parameters the optimizer trains. In a
+        forward pass the outermost call comes first, so that's the whole model, not a layer. A
+        module that owns none of them (a transform, a frozen reference or teacher model) is passed
+        over. One-shot: attach the per-step token counter, then remove this global hook, so the
+        no-hook fast path is back for every module before anything is timed. (The call in progress
+        isn't counted: it's warmup.)"""
+        if not any(id(p) in self._trained for p in mod.parameters()):
+            return
         self._root = mod
         self._tok_hook = mod.register_forward_pre_hook(self._count, with_kwargs=True)
         self._root_hook.remove()
         self._root_hook = None
+        cfg = getattr(mod, "config", None)              # HF models (and peft wrappers) carry the
+        self.model_trained = getattr(cfg, "_name_or_path", None) or None   # checkpoint they came from
 
     def _count(self, mod, args, kwargs):
         n = _padded_tokens(args, kwargs)
-        if n is not None:
+        if n is None:                                   # no token tensor: this step's count is
+            self._step_bad = True                       # unknown, not a smaller number
+        else:
             self._acc += n
 
     def uninstall(self):
@@ -159,7 +181,8 @@ class Attach:
         self.uninstall()
         return Capture(status=status, step_times_s=list(self._times), memory=_read_memory(self.device),
                        step_tokens=list(self.step_tokens), clean_steps_requested=self.clean_steps,
-                       population=dict(POPULATION), cpu=cpu, peak_flops=self.peak_flops,
+                       population={**POPULATION, "model_trained": self.model_trained},
+                       cpu=cpu, peak_flops=self.peak_flops,
                        peak_dtype=str(self.dtype).replace("torch.", ""),
                        peak_mem_bw_gb_s=self.peak_mem_bw_gb_s, device=self.device, error=error)
 
@@ -172,6 +195,8 @@ class Attach:
         if self._opt is None:                          # adopt the first optimizer; ignore others
             self._opt = opt
             self.params = sum(p.numel() for g in opt.param_groups for p in g["params"])
+            self._trained = {id(p) for g in opt.param_groups for p in g["params"]}
+            self._root_hook = _module.register_module_forward_pre_hook(self._find_root)
         if opt is self._opt and not self.done:
             self._on_step()
 
@@ -179,6 +204,7 @@ class Attach:
         self._n += 1
         n, w, c = self._n, self.warmup, self.clean_steps
         step_tok, self._acc = self._acc, 0             # tokens of the step that just ended
+        step_bad, self._step_bad = self._step_bad, False
         if n < w:
             return
         if n > w + c:                                  # the profiled step ended: close `step`
@@ -195,7 +221,11 @@ class Attach:
         else:                                          # one clean step ended
             self._times.append(now - self._t_last)
             self._t_last = now
-            if self._tok_hook is not None:             # same step as the time just recorded
+            if self._tok_hook is None:                 # same step as the time just recorded
+                self._tokens_unknown = self._tokens_unknown or "no module owning the trained parameters was called"
+            elif step_bad or step_tok == 0:
+                self._tokens_unknown = self._tokens_unknown or "the model's input carried no token tensor"
+            else:
                 self.step_tokens.append(step_tok)
             if n == w + c:
                 self._stop_cpu()
@@ -226,12 +256,12 @@ class Attach:
         found = derive.augment(trace)
         with open(self.trace_path, "w") as f:
             json.dump(trace, f)
-        if self.step_tokens:                           # B1: the timed steps' own tokens
+        if self._tokens_unknown or not self.step_tokens:   # say so; never a guessed or partial count
+            self.step_tokens, self.tokens = [], None
+            found["token_source"] = f"unknown: {self._tokens_unknown or 'no per-step count'}"
+        else:                                          # B1: the timed steps' own tokens
             self.tokens = sum(self.step_tokens) / len(self.step_tokens)
             found["token_source"] = f"hook: mean of {len(self.step_tokens)} clean steps (padded)"
-        else:                                          # no model found: say so, don't guess
-            self.tokens = None
-            found["token_source"] = "unknown: no per-step count (trace count is one step only)"
         found["traced_step_tokens"] = {"hook": self._traced_tokens, "trace": found.get("tokens")}
         found["tokens"] = self.tokens
         self.micro_batches = found
@@ -239,7 +269,8 @@ class Attach:
         self._cap = Capture(status="ok", step_times_s=self._times, trace=self.trace_path,
                             step_tokens=list(self.step_tokens),
                             clean_steps_requested=self.clean_steps,
-                            profiled_step_s=profiled_s, population=dict(POPULATION),
+                            profiled_step_s=profiled_s,
+                            population={**POPULATION, "model_trained": self.model_trained},
                             peak_flops=self.peak_flops,
                             peak_dtype=str(self.dtype).replace("torch.", ""),
                             peak_mem_bw_gb_s=self.peak_mem_bw_gb_s,
