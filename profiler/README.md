@@ -255,9 +255,9 @@ the **attached capture** instead, started by `python -m profiler.launch -- train
 - **Step time reads ~0.25% high** from where the per-step sync sits relative to the framework's own
   bookkeeping, so don't compare it with runner probes.
 - **Params are the optimizer's (trainable only).** MFU under LoRA / frozen weights reads far too low
-  until `design_improvements.md` §13.
+  until `design_improvements.md` §10.
 
-What's planned: `design_improvements.md` §10–§14.
+What's planned: `design_improvements.md` §7–§11.
 
 ## Adapters
 
