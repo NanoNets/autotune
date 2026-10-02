@@ -7,6 +7,8 @@
 >
 > Paths into `sandbox/attach_parity/` below refer to git tag **`sandbox-archive`**: the harness was
 > removed from the tree on 2026-10-02 (its capture now lives in `profiler/attach.py` / `launch.py`).
+> "BYO experiment N", "axiom audit B*N*" and "metric-coverage audit §N" cite the bring-your-own-script
+> experiments, their Measurement-axiom audit and their metric-coverage audit, also kept in that tag.
 
 Open questions and proposed changes that are **not yet settled by evidence**. Each entry states the
 claim, why it might be wrong, and **what experiment would settle it** — so a future eval can close
@@ -48,7 +50,7 @@ Only the ceiling ran it (`ceiling.tsv`, final block): 17.386 GB allocated / 20.7
 be raised on a probe's reported `headroom_gb` — under dynamic padding that headroom is an artifact
 of which rows were drawn.
 
-**Still to do:** promote this to a belief in `knowledge/` and delete the entry.
+**Still to do:** promote this to a belief in `beliefs/` and delete the entry.
 
 ---
 
@@ -208,7 +210,7 @@ never seen a real OOM, a real `peak_gb`, or real fragmentation.
 
 ## 10. The ceiling for a user's own training script
 
-**Context:** `bring_your_own_script.md`. When the loop tunes a user's `train.py` through the
+**Context:** bring your own script (`profiler/launch.py`). When the loop tunes a user's `train.py` through the
 launcher, `find_ceiling` (`frame/ceiling.py:109-116`) can't run as it does today. It drives OUR
 runner with `data="synthetic"`, and a user's script has no such switch. Without a ceiling,
 `micro_batch` is unbounded again, and every probe measures memory on whatever rows it happened to
@@ -254,7 +256,7 @@ the real ceiling is higher than the synthetic one.
    from the hooks), run the fwd/bwd/step trials ourselves on worst-case batches, in one launch.
    That keeps the script's model setup (autocast wrapper, checkpointing, attention
    implementation) and bypasses its loop and loss. Fine for memory, but it needs checking.
-3. Analytical estimate only (`frame/memory.py`). Weaker: `knowledge/synthetic-ceiling-
+3. Analytical estimate only (`frame/memory.py`). Weaker: `beliefs/synthetic-ceiling-
    underestimates-real-peak.md` says even the measured ceiling runs low.
 
 **Decided (2026-09-25): the synthetic-dataset config route.** A torch `DataLoader` is assumed, so
@@ -293,23 +295,23 @@ own allocator state, clocks and model load. So the between-launch spread is the 
 actually separates two probes, and it is not defined anywhere the loop reads.
 
 **What already exists (practice and observation, not a threshold):**
-- Champions are re-probed and "confirmed twice": 0.6% apart (`knowledge.md:21`), 0.04% (`:117`),
+- Champions are re-probed and "confirmed twice": 0.6% apart (`experience/test_a10G.md:11`), 0.04% (`experience/smollm2_1.7b_a100_wikitext.md:11`),
   0.31% (`:220`).
 - Between-run agreement was measured once, after the fact: "repeats of identical configs agreed
-  to 0.4-0.9%" while within-run cv was 0.29-0.37 (`knowledge.md:59-60`).
-- A "noise band" is used informally to call levers dead (`knowledge.md:146, 243, 259, 325`).
+  to 0.4-0.9%" while within-run cv was 0.29-0.37 (`experience/test_a10G.md:49-50`).
+- A "noise band" is used informally to call levers dead (`experience/smollm2_1.7b_a100_wikitext.md:40`, `experience/qwen3.5_2b_a100_wikitext.md:38, 54, 120`).
 - The contract's `reliability` field (`loop/contracts.md:70`) is within-probe only.
 
 **Why it matters: the two floors disagree, in both directions.**
 
 | Evidence | Within-run floor | Between-launch spread |
 |---|---|---|
-| `knowledge.md:59-60` (dynamic padding) | cv 0.29-0.37 | repeats 0.4-0.9%. **Within-run is far too loose** |
-| `bring_your_own_script.md` exp. 4b, SmolLM2-360M, fixed shapes | 0.15-0.16% | 0.5-0.9% round to round. **Within-run is ~4× too tight** |
+| `experience/test_a10G.md:49-50` (dynamic padding) | cv 0.29-0.37 | repeats 0.4-0.9%. **Within-run is far too loose** |
+| BYO experiment 4b, SmolLM2-360M, fixed shapes | 0.15-0.16% | 0.5-0.9% round to round. **Within-run is ~4× too tight** |
 | exp. 4b, Qwen2.5-0.5B | 0.17-0.18% | 0.2-0.4% |
 
 Too tight means a 0.4% "win" gets believed when it's launch-to-launch noise. The old-vs-new
-capture comparison (`bring_your_own_script.md` experiment 5) nearly made exactly that mistake:
+capture comparison (BYO experiment 5) nearly made exactly that mistake:
 5 rounds, one fixed order. Too loose means a real 2% gain gets thrown away as "inside noise".
 
 **Proposed:**
@@ -321,7 +323,7 @@ capture comparison (`bring_your_own_script.md` experiment 5) nearly made exactly
    This formalizes the existing "confirmed twice" habit and applies it before promotion, not
    just to the final champion.
 3. **Rank on the mean as well as the median.** Throughput is a mean;
-   `knowledge/median-step-time-overstates-skewed-throughput.md` already shows the median can
+   `beliefs/median-step-time-overstates-skewed-throughput.md` already shows the median can
    overstate it under skew.
 4. **Report both floors in the Observation's `reliability`:** within-run (steady-state inside
    one probe) and between-launch (whether two probes differ).
@@ -337,7 +339,7 @@ capture comparison (`bring_your_own_script.md` experiment 5) nearly made exactly
   within-run cv of about 0.15%.
 
 So between-launch comparisons also need **shuffled or interleaved order**, not just repeats. A
-fixed order turned a ~1.5 ms effect into an apparent ~4 ms one (`bring_your_own_script.md`,
+fixed order turned a ~1.5 ms effect into an apparent ~4 ms one (BYO
 experiment 5).
 
 **Experiment that would settle it:** the A/A/B run on the A10 (`new` vs `new` vs
@@ -353,19 +355,19 @@ more than 2× the within-run cv, adopt (1)-(2).
 nothing it reads says what each field **does not** measure. `program.md:56` tells it to "skim"
 `profiler/README.md`, whose 41-row table gives one-line meanings and a few traps. The
 **limitations** we've established are all in developer notes the agent never sees
-(`bring_your_own_script.md`, `profiler_metric_coverage.md`, this file). So the agent can make
+(the BYO experiment notes, the metric-coverage audit, this file). So the agent can make
 the mistakes those notes record.
 
 **Mistakes the notes document that an uninformed agent would repeat:**
 
 | Trap | Where it's recorded |
 |---|---|
-| Comparing host phase times across loops (Trainer syncs every micro-batch, which moves where the host waits) | `bring_your_own_script.md`, experiment 4 |
+| Comparing host phase times across loops (Trainer syncs every micro-batch, which moves where the host waits) | BYO experiment 4 |
 | Believing a win smaller than the between-launch spread (the within-run cv is ~4× too tight on long fixed-shape steps) | §11 |
-| Median step time overstating throughput under skew | `knowledge/median-step-time-overstates-skewed-throughput.md` |
-| Reading data-wait 0.0 as "not data-bound" when there's no torch `DataLoader` | `profiler_metric_coverage.md` §0 |
-| MFU counting pad tokens as work; MFU wrong under LoRA (trainable-only N) | `knowledge.md`, `profiler_metric_coverage.md` §5 |
-| A step time that reads ~0.25% high from a per-step sync placed before Trainer's bookkeeping (attached capture) | `bring_your_own_script.md`, experiment 6 |
+| Median step time overstating throughput under skew | `beliefs/median-step-time-overstates-skewed-throughput.md` |
+| Reading data-wait 0.0 as "not data-bound" when there's no torch `DataLoader` | metric-coverage audit §0 |
+| MFU counting pad tokens as work; MFU wrong under LoRA (trainable-only N) | `experience/test_a10G.md`, metric-coverage audit §5 |
+| A step time that reads ~0.25% high from a per-step sync placed before Trainer's bookkeeping (attached capture) | BYO experiment 6 |
 
 **Proposed: `profiler/metrics/`, the single source of truth for field semantics.**
 
@@ -390,7 +392,7 @@ profiler/metrics/
   41 would drift.
 - **One template per field:** *Measures* (what, unit, how computed, from which source) ·
   *Doesn't measure* (what it's easy to assume it means) · *Known biases / traps* · *Null when* ·
-  *Evidence* (the experiment or `knowledge/` belief behind each claim, linked, so a claim can be
+  *Evidence* (the experiment or `beliefs/` belief behind each claim, linked, so a claim can be
   re-checked or retired).
 - **Single source of truth:** `profiler/README.md`'s 41-row field table shrinks to a pointer, so
   the two can't drift.
@@ -410,7 +412,7 @@ profiler/metrics/
   can assert every dataclass field has an index row).
 
 **What would settle it:** after building it, replay a past run's decisions (e.g. the
-`knowledge.md` retrospectives) with the reference available. Count how many recorded
+`experience/` retrospectives) with the reference available. Count how many recorded
 misreadings the doc would have prevented. At minimum: the host-phase comparison, the
 inside-noise calls, and the MFU-with-padding reading.
 
@@ -419,10 +421,10 @@ inside-noise calls, and the MFU-with-padding reading.
 ## 13. MFU is wrong whenever weights are frozen (LoRA / PEFT); keep "model FLOPs", fix the count
 
 **Scope and owner:** a **separate branch, after the bring-your-own-script work lands**
-(`integration_plan.md`). Handed to a colleague; this entry is written to be read cold. Until it
+(merged in #17 / #18). Handed to a colleague; this entry is written to be read cold. Until it
 lands, MFU under LoRA is a documented known limitation of the BYO-script path.
 
-**The problem, measured.** `bring_your_own_script.md` experiment 7, 1× A10, peft 0.20.0, LoRA
+**The problem, measured.** BYO experiment 7, 1× A10, peft 0.20.0, LoRA
 r=16 on every attention / MLP projection:
 
 | Model | Trainable / total params | MFU reported | MFU with the corrected count |
@@ -451,9 +453,9 @@ correct. Two inputs are wrong, pulling in opposite directions:
   reached" (`:112`).
 - **Diagnosis:** "the 'is the GPU utilized well' signal" (`profiler/README.md:44`), with measured
   bandwidth for compute- vs memory-bound.
-- **Cross-run comparison:** every retrospective in `knowledge.md` reports it.
+- **Cross-run comparison:** every retrospective in `experience/` reports it.
 - **Not** within-run ranking. That's tokens/s or samples/s, and MFU already misled there under
-  static padding (`knowledge/static-padding-is-usually-the-bottleneck.md:39`).
+  static padding (`beliefs/static-padding-is-usually-the-bottleneck.md:39`).
 
 **Keep the abstraction: "model FLOPs", not "executed FLOPs".** MFU counts the math the model
 *requires*, by structure, whatever the implementation does. Counting FLOPs from the trace's matmul
@@ -466,7 +468,7 @@ for:
 **Proposed:**
 1. **Generalize the formula; don't replace it.**
    `model FLOPs / step = (2·N_total + 2·N_total + 2·N_trainable) · D = (4·N_total + 2·N_trainable) · D`.
-   With every weight trainable, this is **exactly 6ND**, so every past MFU in `knowledge.md` stays
+   With every weight trainable, this is **exactly 6ND**, so every past MFU in `experience/` stays
    comparable. Under LoRA it gives the corrected column above. `training_flops(params, tokens)`
    becomes `training_flops(total, trainable, tokens)`.
 2. **Report N_total and N_trainable separately** (Observation `provenance`, or new fields; check
@@ -484,7 +486,7 @@ for:
    HFU − MFU is the recompute / redundant work, useful for judging gradient checkpointing. It is
    never the objective.
 4. **Known, separate, not fixed here:** D counts **padded** tokens (`frameworks/hf.py:264`,
-   `derive.py`), so MFU still counts pad as work under static padding (`knowledge.md:57-58`).
+   `derive.py`), so MFU still counts pad as work under static padding (`experience/test_a10G.md:47-48`).
    Worth its own entry if the objective moves to real tokens.
 
 **Why it might be wrong:**
@@ -513,7 +515,7 @@ Suggested branch: `mfu-frozen-weights`, cut from `main` after the BYO-script bra
 **Status:** a proposal to change PR #14's clean-window policy. **Not adopted**: PR #14's rule
 (the clean window covers whole passes over the sample, starting at a pass boundary;
 `loop/contracts.md`, Measurement axiom corollary 4) stays in force until this is settled. Raised
-2026-09-27 while auditing the bring-your-own-script path (`integration_plan.md`, Appendix A, B2).
+2026-09-27 while auditing the bring-your-own-script path (axiom audit B2).
 
 **The claim:** the axiom's goal is that two configs are compared **on the same examples**. Timing
 every row of the sample is one way to guarantee that, and an expensive one. Under a fixed seed it
@@ -568,7 +570,7 @@ claimed only when they match, or when the option above makes them provably the s
 Adopt the short window if rankings agree and noise is within the floor.
 
 **Interaction:** OG and user-script probes should share one clean-window rule, or their throughput
-isn't comparable (`integration_plan.md` Appendix A, B5).
+isn't comparable (axiom audit B5).
 
 ---
 

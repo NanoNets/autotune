@@ -253,11 +253,11 @@ the **attached capture** instead, started by `python -m profiler.launch -- train
 - **The trace is one step of the script's loop** (`trace_basis: "traced-step"`), not a replayed
   reference batch. So `reference_step_s`, `gpu_active_frac`, `gap_s` and `gap_frac` are null.
 - **Step time reads ~0.25% high** from where the per-step sync sits relative to the framework's own
-  bookkeeping (`bring_your_own_script.md`, experiment 6), so don't compare it with runner probes.
+  bookkeeping, so don't compare it with runner probes.
 - **Params are the optimizer's (trainable only).** MFU under LoRA / frozen weights reads far too low
   until `design_improvements.md` §13.
 
-The full compatibility audit, and what's planned: `integration_plan.md`, Appendix A.
+What's planned: `design_improvements.md` §10–§14.
 
 ## Adapters
 

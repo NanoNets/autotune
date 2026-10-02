@@ -94,16 +94,17 @@ the training script as-is, unmodified (see `loop/loop.md` Frame §5) — log it 
 before proposing any change. **NEVER** start from a prior's winning config: measured against
 anything but the shipped defaults, "faster by X%" means nothing.
 
-- IF Frame matched a previous run in `knowledge.md` (`loop/loop.md` Frame §3) → run that run's
+- IF Frame matched a previous run in `experience/` (`loop/loop.md` Frame §3) → run that run's
   winning config as **experiment 2**, right after the baseline. It re-validates the prior on this
   hardware and banks the biggest known jump before searching. IF it fails to reproduce → that
   contradiction outranks any hypothesis you had queued; chase it.
-- **ALWAYS**, before proposing a hypothesis: read `knowledge/beliefs.md` + the belief files whose
-  context matches (`knowledge/README.md`), and this run's full `results.tsv` (`runs/README.md`).
+- **ALWAYS**, before proposing a hypothesis: read `beliefs/index.md` + the belief files whose
+  context matches (`beliefs/README.md`), and this run's full `results.tsv` (`runs/README.md`).
   A probe costs ~5 min of real GPU time — think, don't guess.
-- `knowledge.md` is read ONCE, at Frame — "has this configuration been run before" is a framing
-  question, not a per-hypothesis one, and the file grows with every run. Re-open it only when a
-  result contradicts the prior Frame matched.
+- `experience/` is read ONCE, at Frame, through `experience/index.md`: open only the entries whose
+  `Context:` line matches. "Has this configuration been run before" is a framing question, not a
+  per-hypothesis one, and the log grows with every run. Re-open an entry only when a result
+  contradicts the prior Frame matched.
 - **ALWAYS** state the hypothesis's reasoning explicitly: what prior it's built on, what you
   expect, what would surprise you. Can't articulate why it should help → you're guessing → think
   more, don't spend the probe.
@@ -111,8 +112,7 @@ anything but the shipped defaults, "faster by X%" means nothing.
   Config moves a knob the ceiling was measured under (recompute, attn_kernel, optimizer, dtype,
   sharding, **compile**) → the ceiling is stale → re-measure it (`frame/README.md`), then
   hypothesize against the new bound. `compile` is in that list on measured evidence: fusing the
-  cross-entropy cut peak memory 5.4GB and moved a measured ceiling from 2 to 4 (`knowledge.md`,
-  test_a10G).
+  cross-entropy cut peak memory 5.4GB and moved a measured ceiling from 2 to 4 (`experience/test_a10G.md`).
 - **NEVER** raise `micro_batch` above the ceiling because a probe reported spare `headroom_gb`.
   Under `padding="longest"` a probe's peak reflects the rows it drew, not the dataset's longest —
   the ceiling is the bound, the observed peak is not. Dynamic padding is safe *because*
@@ -129,12 +129,13 @@ anything but the shipped defaults, "faster by X%" means nothing.
   cards) rather than treat it as a stopping condition. Websearch findings go to
   `runs/<run_name>/research.md` (`runs/README.md`).
 
-### Step 5 — End-of-run review → `knowledge/README.md`
+### Step 5 — End-of-run review → `experience/README.md`, then `beliefs/README.md`
 
 - Review the full `results.tsv` + `research.md`.
-- Append a dated entry to `knowledge.md`: findings, surprises, open hypotheses for next time.
+- Write a dated entry to `experience/<run_name>.md` (findings, surprises, open hypotheses for next
+  time) and append its line, `Context:` verbatim, to `experience/index.md` (`experience/README.md`).
 - Promote only what's **net-new** — re-confirmed facts stay in `research.md`.
-- **ALWAYS curate the existing beliefs, don't just write new ones** (`knowledge/README.md`). Re-read
+- **ALWAYS curate the existing beliefs, don't just write new ones** (`beliefs/README.md`). Re-read
   every belief whose context matches this run: re-confirmed → bump its evidence; contradicted →
   narrow its context and split, never overwrite; proven wrong → delete it and say so. Skipping this
   is how `probes: 1` stays `probes: 1` forever and beliefs stop being opinions worth holding.
@@ -257,7 +258,7 @@ On top of the usual summary, report:
 ### Step 5: script probes are observations, not belief evidence
 
 - Their timings aren't `same-rows` and their trace durations aren't `same-reference-batch`
-  (Measurement axiom, corollary 7), so record what they showed in `knowledge.md`.
+  (Measurement axiom, corollary 7), so record what they showed in the run's `experience/` entry.
 - Only **width-invariant** findings (kernel / gap counts, which kernels ran, dtypes) may update a
   belief.
 - **Report the winner in the user's own terms:** the flags to pass and/or a diff against their

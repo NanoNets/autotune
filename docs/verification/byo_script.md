@@ -90,7 +90,7 @@ sample rather than the script's data.
   PyTorch loop). TRL, Lightning and ms-swift's Python entry point weren't run.
 - **Each scenario ran 1–3 probes,** enough to exercise the workflow, not a tuning session.
 - **All script probes are provisional evidence by design** (`population.driver: "script"`; PR #17,
-  "Known gaps"). Nothing here was promoted to `knowledge/`.
+  "Known gaps"). Nothing here was promoted to `beliefs/` (then `knowledge/`).
 
 ## After the code review (2026-10-02)
 

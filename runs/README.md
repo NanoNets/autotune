@@ -62,9 +62,9 @@ Anything found via websearch during this run (model card details, papers, tuning
 fixed shape — free-form notes, created on first write.
 
 This file is *not* durable memory on its own. At Step 5's end-of-run review, it gets read
-alongside `results.tsv` and anything net-new (not already covered by an existing `knowledge.md`
-entry or belief) gets promoted into `knowledge.md` — see `knowledge/README.md`. A finding that just
+alongside `results.tsv` and anything net-new (not already covered by an existing `experience/`
+entry or belief) gets promoted into the run's `experience/` entry — see `experience/README.md`. A finding that just
 re-confirms something already known stays here; it doesn't get re-added upstream. This keeps
-`knowledge.md` a signal-dense run log instead of a transcript of every search made along the way.
-(It is append-only — never edited once written. Curation happens in `knowledge/`, where beliefs are
-amended and superseded; see `knowledge/README.md`.)
+`experience/` a signal-dense run log instead of a transcript of every search made along the way.
+(It is append-only — never edited once written. Curation happens in `beliefs/`, where beliefs are
+amended and superseded; see `beliefs/README.md`.)

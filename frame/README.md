@@ -27,7 +27,7 @@ load is a setup failure, not an experiment result.
   `loop/throughput.md` even apply — e.g. `expert_parallel` is meaningless on a dense model, GQA
   changes the memory/throughput tradeoff of recompute and batch knobs.
 - **Where to get it, in order:**
-  1. `knowledge.md` and `knowledge/beliefs.md` (see `knowledge/README.md`) — someone may have
+  1. `experience/index.md` and `beliefs/index.md` (see their READMEs) — someone may have
      already profiled this exact model (or its architecture family) on similar hardware. Don't
      re-derive what's already known. This is the *architecture* lookup; the full-configuration
      match (model · dataset · hardware · dtype · `effective_batch` · `max_len`) happens in the same
@@ -37,9 +37,9 @@ load is a setup failure, not an experiment result.
   3. Websearch — the model card, paper, or announcement, especially for a newer or less
      documented model. Don't guess at architecture details from the name alone.
 - Whatever websearch turns up, write it into `runs/<run_name>/research.md` as you find it (see
-  `runs/README.md`) — that's the landing zone, not `knowledge.md` directly. If this is a new model
+  `runs/README.md`) — that's the landing zone, not `experience/` directly. If this is a new model
   this repo hasn't seen before, the architecture summary you build here is exactly the kind of
-  thing worth promoting into a durable `knowledge.md` entry (or belief) at Step 5's end-of-run
+  thing worth promoting into the run's `experience/` entry (or a belief) at Step 5's end-of-run
   review, so the next run against it starts from an answer, not from scratch.
 
 **`max_len`** (named in `run.toml`, REQUIRED):
@@ -148,7 +148,7 @@ and `16` is eliminated *before* the loop spends a 5-minute probe watching it cra
   sharding and **`compile`** all move it. `compile` is not an obvious member of that list but was
   measured moving a ceiling from 2 to 4: Inductor fuses the cross-entropy and never materializes
   the fp32 logits copies, cutting peak memory 5.4GB
-  (`knowledge/compile-cuts-memory-not-just-time.md`). Before trusting a ceiling, compare the
+  (`beliefs/compile-cuts-memory-not-just-time.md`). Before trusting a ceiling, compare the
   Config against the record's `config` (`frame.ceiling.is_stale`). Moved → **re-measure**, don't
   extrapolate. Turning on `recompute`
   can easily take a ceiling of 11 to 32; the search space is meant to widen on that evidence.
