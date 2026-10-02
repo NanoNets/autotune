@@ -1,245 +1,83 @@
-# autotune
+<h1 align="center">autotune</h1>
 
-> Find the fastest training config for your hardware — automatically, without touching model quality.
+<p align="center">
+  <img src="docs/assets/progress_test_a10G.png" alt="An autotune run on an A10: 4.3 to 108.6 samples/s in 23 experiments" width="800">
+</p>
 
-**Status: early. Rebuilding from scratch, profiler-first.** This is a working skeleton, not a finished tool.
-**Single-GPU only for now** — multi-GPU/parallelism is planned (see "The plan," §4) but not yet built.
+The idea: give an AI agent your training job and a GPU, and let it find the fastest configuration
+overnight. It profiles a real training step, works out where the time goes, changes one setting,
+measures again on the GPU, keeps or discards, and repeats. You wake up to a log of experiments and
+a faster config. The run above took Qwen2.5-0.5B on an A10 from 4.3 to 108.6 samples/s.
 
-autotune is a research loop that profiles a real training step, sees where the time is going against
-the hardware's roofline, and searches the configuration space for the settings that maximize throughput
-— for any model, GPU, and framework. It only ever changes settings that affect *speed*, never ones that
-change the model you get, so a faster config is never a worse model.
+The agent only touches settings that change **speed** (micro-batch, attention kernel, compile,
+gradient checkpointing, padding, dataloader). Learning rate, precision, effective batch and sequence
+length are off-limits, so a faster config is never a worse model.
 
-The intelligence is an LLM agent following the markdown in `loop/`; the measurement is deterministic
-code in `profiler/`. **The agent decides; the code measures.**
+## How it works
 
-## Where it's at
+- **`program.md`**: the agent's instructions, step by step. Point your agent here.
+- **`frame/` + `profiler/`**: the measurement code. Frame sizes up the job once (model, dataset,
+  the card's real peak, the largest micro-batch that fits); the profiler measures each experiment
+  and returns a diagnostic the agent reads (MFU, GPU-active time, data-wait, kernels, memory).
+- **`beliefs/` + `experience/`**: what earlier runs learned. The agent starts from it and writes
+  back to it.
 
-We build the measurement tools first, validate them by hand, then encode the agent. The profiler,
-Frame, the HF runner and the local/ssh/modal backends are built and TDD-tested. Frame **measures**
-the OOM ceiling — the largest `micro_batch` that runs at the `max_len` you declare — on manufactured
-worst-case batches rather than hoping the dataset supplies one, so `micro_batch` is bounded by
-evidence before the search starts.
+The agent decides what to try; the code does all the measuring.
 
-**First full run is in** (`test_a10G`, Qwen2.5-0.5B on an A10): 23 experiments, **4.3 → 108.6
-samples/s (25x)**, MFU 28.7% → 58.6%. The dominant win wasn't a kernel — it was not computing
-padding. See `experience/test_a10G.md` for the write-up and `beliefs/` for the beliefs it produced.
+## Quick start
 
-Next: the surrogate + frontier in `search/`, so the loop ranks candidates instead of hand-searching.
-
-## How a run works
-
-`program.md` is the playbook the agent follows. It **routes** — each step points at the md that owns
-the procedure. This is what actually happens at each one, and what lands on disk.
-
-```
-  YOU: run.toml          model · dataset · gpu · effective_batch · max_len · backend
-       │
-       ▼
-  ┌─ STEP 1 ─ Environment ──────────────────────────── backends/README.md ─┐
-  │  pick where probes run: local (this box) · ssh (your GPU box) · modal  │
-  │  agree a run name                                    → runs/<name>/    │
-  └───────────────────────────────────────────────────────────────────────┘
-       ▼
-  ┌─ STEP 2 ─ Frame, once ──────────────────────────────── frame/README.md ┐
-  │  model.py     HF config, no weights   → params · attention · vocab     │
-  │  dataset.py   tokenize a sample       → p50 / p90 / p99 lengths        │
-  │  hardware.py  measured on the card    → peak FLOP/s · bandwidth · mem  │
-  │  memory.py    analytical              → weights + grads + optimizer    │
-  │  ceiling.py   REAL probes, worst case → max micro_batch at max_len     │
-  │                                → runs/<name>/profile.json · ceiling.tsv│
-  └───────────────────────────────────────────────────────────────────────┘
-       ▼
-  ┌─ STEP 3 ─ Confirm ──────────────────────────────────── runs/README.md ─┐
-  │  agent reports summary + notes + the measured ceiling                  │
-  │  YOU approve  ─────────────────────────▶  results.tsv created          │
-  │  (last human checkpoint — "NEVER stop" applies from here)              │
-  └───────────────────────────────────────────────────────────────────────┘
-       ▼
-  ┌─ STEP 4 ─ The loop, unattended ───────────────────────── loop/loop.md ─┐
-  │  exp 1   BASELINE — shipped defaults, unmodified (never skipped)       │
-  │  exp 2   REPLAY   — a matched prior from experience/, if any           │
-  │  exp 3+  HYPOTHESIZE ─▶ TEST ─▶ OBSERVE ─▶ LEARN ─┐   ~5 min each      │
-  │             ▲                                     │   until you stop   │
-  │             └─────────────────────────────────────┘   it               │
-  │                   → results.tsv row + obs_N.json, per experiment       │
-  └───────────────────────────────────────────────────────────────────────┘
-       ▼
-  ┌─ STEP 5 ─ Review ─────────── experience/README.md · beliefs/README.md ─┐
-  │  → experience/<run>.md  dated run entry + index line (append-only)     │
-  │  → beliefs/*.md         beliefs + index line (curated, context-keyed)  │
-  └───────────────────────────────────────────────────────────────────────┘
-```
-
-### What each step reads and writes
-
-| Step | Runs | Reads | Writes |
-|---|---|---|---|
-| 1 Environment | `backends/{local,ssh,modal}.py` | `run.toml`, `.env` | `runs/<name>/` |
-| 2 Frame | `frame/` (+ one `capture` per ceiling trial) | hub config, dataset sample, the card | `profile.json`, `ceiling.tsv` |
-| 3 Confirm | — | `profile.json` | `results.tsv` (header) |
-| 4 Loop | `backends.run` → `profiler.capture` → `profiler.diagnostic` | `beliefs.md`, `results.tsv` | `results.tsv` row, `obs_N.json`, `research.md` |
-| 5 Review | `runs/progress.py` | `results.tsv`, `research.md` | `experience/<run>.md` + `experience/index.md`, `beliefs/*.md` + `beliefs/index.md`, `progress.png` |
-
-### The two memories
-
-Different questions, different read cadence, **opposite** mutation rules — see `experience/README.md` and `beliefs/README.md`.
-
-- **`experience/`** — *has this configuration been run before?* Read **once, at Frame**, matched on
-  each entry's `Context:` line. **Append-only**: a past entry is dated evidence, never edited.
-- **`beliefs/`** — *what do we believe about this lever?* Read **every hypothesis**, filtered by
-  `context` match. **Curated**: amended, superseded, deleted as evidence lands.
-
-### Why the two memories matter
-
-```
-  ┌────────────────────────────────┐   ┌────────────────────────────────┐
-  │  beliefs/        BELIEFS       │   │  experience/     EXPERIENCE    │
-  │                                │   │                                │
-  │  an engineer's opinion —       │   │  what actually happened —      │
-  │  what someone who has done     │   │  dated runs, real numbers,     │
-  │  this before would tell you    │   │  baseline → best, config by    │
-  │  before you start              │   │  config                        │
-  │                                │   │                                │
-  │  "tf32 is inert under bf16 —   │   │  "Qwen 0.5B on an A10:         │
-  │   don't spend the probe"       │   │   4.3 → 108.6 samples/s"       │
-  └───────────────┬────────────────┘   └───────────────┬────────────────┘
-                  │                                    │
-                  └────────────────┬───────────────────┘
-                                   ▼
-                 ┌───────────────────────────────────────┐
-                 │              THE AGENT                │
-                 │                                       │
-                 │   frames the job · hypothesizes ·     │
-                 │   probes · learns                     │
-                 │                                       │
-                 │   starts from opinion + experience,   │
-                 │   never from zero                     │
-                 └───────────────────┬───────────────────┘
-                                     │
-      ┌──────────────────────────────┴──────────────────────────────┐
-      │              every run writes back to both                  │
-      ▼                                                             ▼
-  OPINIONS EVOLVE                              EXPERIENCE ACCUMULATES
-    re-confirmed  → probes 1 → 2 → 7             one more dated entry
-    contradicted  → split by context,            a past run is never
-                    never overwritten            edited — it is evidence
-    proven wrong  → deleted
-```
-
-A belief behind seven runs on four card types is a different object from the same sentence behind
-one. **More contributors means sharper opinions and wider experience** — and because it's all
-markdown, contributing memory is a pull request, reviewed like code.
-
-### The invariants a dev should know
-
-- **The agent decides; the code measures.** Every number comes from a real probe.
-- **Only speed knobs are searchable.** `max_len`, `effective_batch`, precision, LR are off-limits —
-  that's what makes "faster" a strict win, never a trade (`loop/throughput.md`).
-- **The baseline is experiment 1, always.** A prior may be replayed as experiment 2, never as the
-  baseline — measured against anything but shipped defaults, "+X%" means nothing.
-- **Two ledgers.** Memory feasibility is measured on synthetic worst-case batches → `ceiling.tsv`.
-  Throughput is measured on real data → `results.tsv`. Synthetic probes never enter the frontier.
-
-## Getting started
-
-Requires [uv](https://docs.astral.sh/uv/).
+**Requirements:** a single NVIDIA GPU (local, over SSH, or on Modal), Python 3.11+,
+[uv](https://docs.astral.sh/uv/).
 
 ```bash
-uv sync                                  # creates .venv (Python 3.12), installs torch + pytest
-uv run pytest                            # run the test suite
-cp run.toml.example run.toml             # then fill it in — this is the input to Step 1
+git clone https://github.com/NanoNets/autotune && cd autotune
+uv sync
+uv run pytest
 ```
 
-`run.toml` is the whole human-facing surface: model, dataset, gpu, backend, and the two constants
-the loop may never change — `effective_batch` and `max_len`. Secrets go in `.env` (see
-`.env.example`). Then hand `program.md` to an agent and it walks Steps 1-5 above.
+## Running the agent
 
-Smoke-test the machinery without a GPU or a config:
-
-```bash
-uv run python -m profiler --device cpu --gpu A10G   # capture → trace → diagnose (MFU is
-                                                    # meaningless on CPU; it proves the pipe runs)
-```
-
-The roofline / trace / diagnostic logic is pure-python; only the capture engine needs torch.
-
-## Bring your own training script *(early; single GPU)*
-
-By default autotune trains through its own runners (`frameworks/`). You can instead point it at
-**your own training script**: an HF Trainer script, TRL, a hand-written PyTorch loop. autotune runs
-it unchanged and measures it from the outside. Nothing in torch is patched (a guard fails the run if
-anything is), and your script needs no autotune imports.
-
-**What the script needs:**
-- It runs as `python train.py <args>` on **one GPU**, with a **torch optimizer** and a **torch
-  `DataLoader`** (HF Trainer, TRL, ms-swift's Python entry point, Lightning, and plain loops all
-  qualify).
-- A **step budget** you can pass on the command line (e.g. `--max-steps`), so a probe runs ~15
-  steps and exits by itself.
-- The settings you want tuned (micro-batch / grad accumulation, attention implementation,
-  gradient checkpointing, compile, …), ideally reachable as **flags or a config file**. Hardcoded
-  ones can be moved out with your permission. The agent sets them in your script's own terms;
-  there's no adapter to write. Examples of each case: `examples/byo_script/`.
-- A **fixed seed**, so every probe sees the same examples.
-
-**The workflow:**
-1. Put the script in the repo (e.g. `runs/<run_name>/train.py`). A repo-relative path is what lets
-   the ssh backend run it on your GPU box.
-2. Point autotune at it: `/run-loop … script=<path>`, plus `script_configs=<path>[,<path>…]` if it
-   loads its settings from config files (a training YAML, say). Or set the same keys in
-   `run.toml`. Without `script_configs`, the settings are taken to live in the script itself.
-3. The agent reads your script and configs and maps where each speed setting lives. **If a
-   setting is hardcoded,** it asks before touching anything, and offers to move such settings into
-   a config file on a copy of your script, verified to train identically. It then runs the
-   baseline as-is, and probes variations through your script's own flags and **per-probe copies**
-   of your config files. Your files are never modified. Each probe is recorded in
-   `runs/<run_name>/results.tsv`.
-4. You get back the fastest settings, expressed as your script's own flags, plus what was tried and
-   why.
-
-Under the hood: `backends/local.py` runs `python -m profiler.launch -- <script> <args>`. It times
-the optimizer steps, profiles one step, reads phases and token counts from torch's own trace, and
-returns the same Observation a runner probe produces (`profiler/README.md`, "Attached capture").
-
-**Not there yet** (tracked in `design_improvements.md` §7–§11):
-- **Script probes are provisional evidence.** Their clean window is a fixed stretch of steps, not
-  whole passes over Frame's sample, so under the Measurement axiom they don't count as `same-rows`
-  comparisons, and no belief is promoted from their timings.
-- **No OOM ceiling for scripts yet**: the agent won't raise the micro-batch above your baseline
-  without asking you.
-- GPU-active / idle fractions are not reported (no replayable reference batch).
-- MFU reads far too low under LoRA / frozen weights.
-- Multi-GPU and installed commands (e.g. `swift sft`, not a `.py` file) aren't supported.
-
-## Layout
+Open the repo in [Claude Code](https://claude.com/claude-code) and use the bundled skill:
 
 ```
-program.md     the playbook the agent follows — routes to the md owning each step        [built]
-loop/          the design — start here (contracts · loop spine · throughput objective)   [built]
-profiler/      the measurement instrument (roofline · trace · capture · diagnostic · CLI)  [built]
-frame/         profile the setup · measure the OOM ceiling · build the search space       [built]
-frameworks/    runner adapters — hf (real) · torch (toy)                                   [built]
-backends/      where a probe runs — local · ssh · modal                                    [built]
-experience/    cross-run memory: the run log, one file per run + index                     [live]
-beliefs/       cross-run memory: the beliefs, one file per claim + index                   [live]
-runs/          per-run outputs (gitignored) — profile · ceiling · results · observations   [built]
-tests/         TDD                                                                         [built]
-
-search/        surrogate · frontier · memory plumbing                                      [scaffold]
+/run-loop my_run model=Qwen/Qwen2.5-0.5B dataset=Salesforce/wikitext:wikitext-2-raw-v1 \
+          max_len=2048 effective_batch=16 host=ubuntu@<gpu-box> gpu=A10
 ```
 
-Every dir has a README describing what it holds; `[scaffold]` ones describe what they *will*. The
-design lives in `loop/`: read `loop/loop.md` for how the loop works and `loop/contracts.md` for the
-data shapes. Open dev questions — things not yet settled by evidence — are in
-`design_improvements.md` (dev notes; deliberately **not** part of the agent's prompt hierarchy).
+It sizes up the job, shows you a summary to confirm, then runs unattended until you stop it.
+Results land in `runs/my_run/`. To tune **your own training script** (HF Trainer, TRL, a plain
+PyTorch loop) instead, add `script=path/to/train.py`; it runs unchanged. See
+[`examples/byo_script/`](examples/byo_script/). Later, `/run-loop my_run resume` picks up where it
+stopped.
 
-## The plan
+No Claude Code? Fill in `run.toml` and point any coding agent at `program.md`.
 
-1. **Profiler** *(done)* — single-step profile + roofline. Local, no GPU needed to build.
-2. **Frame** *(done)* — profile model / hardware / env / dataset; measure the OOM ceiling.
-3. **Intelligence** *(now)* — surrogate + frontier. Cross-run memory is live (`beliefs/`);
-   candidate ranking in `search/` is not.
-4. **Distributed** — parallelism as a search space, multi-GPU.
+## Our contributions
 
-Read `loop/loop.md` for how the loop works and `loop/contracts.md` for the data shapes.
+- **Measured, not assumed.** The card's peak FLOP/s and bandwidth are benchmarked on the device,
+  so MFU is right on any GPU. Every comparison uses the same data rows and the same instrument, and
+  impossible readings are thrown out.
+- **A memory ceiling that's measured.** Real batches rarely hit the maximum length, so a config can
+  pass every test and crash hours into training. autotune runs worst-case batches up front, and
+  re-checks whenever a memory setting changes.
+- **A memory that compounds.** `experience/` keeps one record per run; `beliefs/` keeps claims like
+  "tf32 does nothing under bf16", each tied to the model family, card and data it was proven on.
+  The next run starts from them, and contributing what your run learned is a pull request.
+
+## Project structure
+
+```
+program.md     agent instructions
+frame/         sizes up the job, measures the memory ceiling
+profiler/      measures each experiment
+backends/      where experiments run: local, ssh, modal
+frameworks/    the built-in Hugging Face runner
+beliefs/       shared beliefs from past runs
+experience/    one record per past run
+examples/      example training scripts to tune
+loop/          design notes and data contracts
+```
+
+## Platform support
+
+Single NVIDIA GPU for now. Multi-GPU and a learned model that ranks candidates are next.
