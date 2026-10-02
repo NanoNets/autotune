@@ -202,7 +202,7 @@ Under the hood: `backends/local.py` runs `python -m profiler.launch -- <script> 
 the optimizer steps, profiles one step, reads phases and token counts from torch's own trace, and
 returns the same Observation a runner probe produces (`profiler/README.md`, "Attached capture").
 
-**Not there yet** (tracked in `design_improvements.md` §10–§14):
+**Not there yet** (tracked in `design_improvements.md` §7–§11):
 - **Script probes are provisional evidence.** Their clean window is a fixed stretch of steps, not
   whole passes over Frame's sample, so under the Measurement axiom they don't count as `same-rows`
   comparisons, and no belief is promoted from their timings.

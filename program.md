@@ -174,7 +174,7 @@ Frame the model and data the script uses as usual (`model` / `dataset` in `run.t
 - **The probe sample:** the script trains on its own data. Frame's `sample.jsonl` isn't a format a
   user's framework can load yet, so script probes don't carry `sample_hash`. Keep the script's data,
   seed and sampler identical across every probe.
-- **The ceiling:** there's no OOM ceiling for scripts yet (`design_improvements.md` §10). Don't
+- **The ceiling:** there's no OOM ceiling for scripts yet (`design_improvements.md` §7). Don't
   raise the micro-batch above the baseline's value without the user's OK, and say so at Step 3.
 
 **2a. The knob audit.** For every speed knob in `loop/throughput.md` (micro-batch / grad

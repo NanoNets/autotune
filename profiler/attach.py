@@ -4,7 +4,7 @@
 `record_function`. A user's script (swift, TRL, a hand-written loop) offers neither. `Attach`
 inverts control: the user's loop runs as-is (started by `profiler/launch.py`), and it produces the
 same `Capture` that `capture()` does, so `diagnose()` is unchanged. What it doesn't measure yet:
-`profiler/README.md`, "Attached capture", and `design_improvements.md` §10–§14.
+`profiler/README.md`, "Attached capture", and `design_improvements.md` §7–§11.
 
     att = Attach(device="cuda", peak_flops=..., peak_mem_bw_gb_s=...)
     att.install()              # before the user builds the optimizer
