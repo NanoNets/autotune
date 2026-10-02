@@ -90,4 +90,4 @@ probe's row sample must represent the dataset's length distribution, or throughp
 workload the run will not train on. Static padding hid this entirely. It is a mechanism argument
 with an unmeasured effect size, so it sits in `beliefs/` to be sharpened or retired by the next
 run that uses dynamic padding — not in the playbook. The deeper fix (draw the sample to match the
-distribution rather than enlarging a head slice) is `design_improvements.md` 1b.
+distribution rather than enlarging a head slice) has since been built: `frame/dataset.py:draw_sample`.

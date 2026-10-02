@@ -30,7 +30,8 @@ links: [[static-padding-is-usually-the-bottleneck]], [[micro-batch-interacts-wit
 > reasons it now matters more, not less: `length_grouped=True` deliberately clusters the longest
 > rows together, and the run's OOM failures
 > ([[synthetic-ceiling-underestimates-real-peak]]) were precisely about batches the probe's sample
-> never draws. The fix remains `design_improvements.md` 1b — draw to match the distribution.
+> never draws. The fix, drawing to match the distribution, has since been built: Frame draws a
+> length-stratified sample (`frame/dataset.py:draw_sample`).
 
 Under `padding="max_length"` every batch is `seq_len` wide whichever rows the loader drew, so
 throughput is independent of the sample. Under `padding="longest"` batch width **is** the rows
@@ -72,7 +73,7 @@ Three things the measurement added that the mechanism argument did not predict:
 - **Enlarging the head slice does not converge.** tokens/step at 1000 / 2000 / 4000 went
   2057 / 1719 / 1810 — non-monotone. `_usable_texts` takes the first N usable rows, so a bigger N is
   still a head slice of an ordered file. Confirms the "worse than sample size" note above: the fix is
-  a stratified draw (`design_improvements.md` 1b), not a bigger number.
+  a stratified draw (since built: `frame/dataset.py:draw_sample`), not a bigger number.
 
 **What it cost when ignored:** this run's headline read 28.2x before the correction and 11.0x after,
 and the probe sample was one of the two compounding causes (the other is

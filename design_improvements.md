@@ -19,75 +19,7 @@ the owning md, then delete the entry from here.
 
 ---
 
-## 1. ~~The synthetic ceiling may be redundant~~ — SETTLED: it is load-bearing
-
-**Status: closed by `test_a10G`.** Kept here until the finding is folded into a belief.
-
-The doubt was: the ceiling was argued for on the grounds that real batches rarely hold a `max_len`
-row, but `frameworks/hf.py` shipped `padding="max_length"`, so every real batch was *already*
-worst-case shaped. On that loader the ceiling was a determinism-and-cost win, not a safety one.
-
-**The run removed that loader.** Static padding turned out to be the dominant bottleneck, and the
-winning config uses `padding="longest"` — which is exactly the condition this entry named as making
-the ceiling load-bearing. The evidence arrived in the same run that raised the doubt.
-
-The sharper form of the argument, which the original entry missed: it is not only that shapes vary,
-it is that **a probe sees a sample and the sample's maximum is not the population's maximum.**
-
-| | |
-|---|---|
-| Rows scanned | 256 (`sample`), giving p50 10 · p99 374 · **max 520** |
-| Declared `max_len` | **2048** |
-| Widest batch any of 23 experiments ran | ~520 tok |
-| Widest batch the full dataset can produce | **2048** — one long row pads its whole batch |
-
-So `[8, 2048]` — the batch the shipped config *will* meet in training — was never run by any probe.
-Only the ceiling ran it (`ceiling.tsv`, final block): 17.386 GB allocated / 20.721 GB reserved of
-22.1 GB, fits at `micro_batch=8`, **OOMs at 9**. The shipped config is safe, and safe by one.
-
-**Doctrine that came out of it** (now in `loop/throughput.md`, `frame/README.md`, `program.md`):
-`padding="longest"` is safe **iff `micro_batch <= ceiling(max_len)`**, and `micro_batch` must NEVER
-be raised on a probe's reported `headroom_gb` — under dynamic padding that headroom is an artifact
-of which rows were drawn.
-
-**Still to do:** promote this to a belief in `beliefs/` and delete the entry.
-
----
-
-## 1b. The probe sample should be drawn to match the length distribution
-
-**Status: open. Raised by `test_a10G`; the stopgap (raise `sample` until the tail agrees) is
-doctrine, this is the real fix.**
-
-`HFRunner._build_loader` takes the **first** `sample` usable rows (`_usable_texts` breaks at the
-cap). Under `padding="max_length"` that was harmless — every batch was `seq_len` wide regardless.
-Under `padding="longest"` batch width *is* the rows drawn, so a head-of-file slice measures a
-workload the run won't train on. `test_a10G` measured its 25x on 256 rows whose max was ~520, while
-real training meets rows up to the 2048 truncation cap.
-
-Raising `sample` helps but is the blunt instrument: it costs memory and setup time linearly, and a
-head slice can still miss the tail entirely if the file is ordered.
-
-**Options, cheapest first:**
-
-| Approach | Cost | Catch |
-|---|---|---|
-| Raise `sample` until the loader's p50/p90/p99/max match frame's scan | linear memory/time | still a head slice; ordered files defeat it |
-| Reservoir-sample the stream instead of taking the head | ~free | needs a pass, but `scan()` already streams |
-| Stratify by length: keep the observed p50/p90/p99 proportions | cheap | the honest fix — reproduces the distribution, not just its size |
-
-**Experiment to settle it:** measure the winning config's samples/s at `sample` = 256, 1k, 4k, and
-against a stratified draw. If throughput falls monotonically and then flattens, the flat point is
-the sample size that represents the dataset — and the gap from 256 quantifies how overstated the
-25x is.
-
-**Related:** `frame/dataset.py scan()` already computes exactly the distribution the loader should
-be matched against, and `frame/profile.py` already flags `max_len` >> p99. The check is one
-comparison away from free.
-
----
-
-## 2. Replace the bisection with divisors + a memory curve
+## 1. Replace the bisection with divisors + a memory curve
 
 **Status: open. Proposed, not implemented — `search()` still bisects.**
 
@@ -114,32 +46,15 @@ Fewer probes, an actionable answer, more information. Per `program.md`'s Simplic
 (*"removing something and getting equal or better results is a great outcome"*), that's a keep.
 
 **Experiment to settle it:** fit `peak_gb` vs `micro_batch` from a real ceiling run and check
-linearity (R²). The fit predicts `allocated`; OOM fires on `reserved` + fragmentation, so also
+linearity (R²). Three real ceiling runs are already on disk (`runs/test_a10G`,
+`runs/smollm2_1.7b_a100_wikitext`, `runs/qwen3.5_2b_a100_wikitext`, each `ceiling.tsv`), so this
+needs no GPU time. The fit predicts `allocated`; OOM fires on `reserved` + fragmentation, so also
 record how far the predicted ceiling sits from the measured one. If the residual is small and
 stable, drop `search()`.
 
 ---
 
-## 3. Does `micro_batch_max` ever bind?
-
-**Status: open.**
-
-Two bounds constrain `micro_batch`, and only the smaller one matters:
-
-- `micro_batch <= effective_batch` — **arithmetic**, free, already enforced twice
-  (`frameworks/hf.py:80`, `find_ceiling(cap=...)`).
-- `micro_batch <= ceiling` — **physical**, needs measurement.
-
-The measured ceiling only earns its cost when it comes in **below** `effective_batch`. When it
-doesn't, `capped: true` is already reporting exactly that, and the measurement bought nothing.
-
-**Experiment to settle it:** across a few realistic (model, card, max_len) triples, record how often
-the ceiling lands below `effective_batch`. If it rarely does at the sizes this repo targets, demote
-the ceiling from a Frame-time step to something the agent calls only when a config OOMs.
-
----
-
-## 4. Flag a low-composite `effective_batch` to the human
+## 2. Flag a low-composite `effective_batch` to the human
 
 **Status: open, cheap, advisory only.**
 
@@ -156,7 +71,7 @@ existing padding flag in `frame/profile.py:_notes`.
 
 ---
 
-## 5. Divisibility wastes headroom
+## 3. Divisibility wastes headroom
 
 **Status: open, low priority.**
 
@@ -171,19 +86,19 @@ loss by `grad_accum` uniformly (`frameworks/hf.py`), so uneven batches would be 
 
 ---
 
-## 6. Second ceiling at the dataset p99 — the packing signal
+## 4. Second ceiling at the dataset p99 — the packing signal
 
 **Status: open. One extra call, not wired.**
 
 `find_ceiling(..., seq_len=p99)` alongside the `max_len` one. The **gap between the two ceilings
 estimates what `packing` is worth** on this job, before spending a probe on it.
 
-Deferred at implementation time as a nice-to-have. Note that entry 1 weakens it too: under static
+Deferred at implementation time as a nice-to-have. Only meaningful under `padding="longest"`: under
 `padding="max_length"` a p99 ceiling describes a regime the adapter never runs in.
 
 ---
 
-## 7. Fragmentation is not reproduced by fixed-shape probing
+## 5. Fragmentation is not reproduced by fixed-shape probing
 
 **Status: known limitation, recorded not fixed.**
 
@@ -196,25 +111,112 @@ it survives. This is what `loop/loop.md`'s extended probe is for.
 
 ---
 
-## 8. The ceiling has never run on a GPU
+## 6. `AutoModelForCausalLM` + a flat config are an unstated single-modality assumption
 
-**Status: blocking. Everything above is unvalidated until this is done.**
+**Status: open, partly fixed.** Defect 1 (nested configs) is fixed on `main` (`9227a26`,
+`frame/model.py:_flatten`), and Qwen3.5-2B has since been run end to end
+(`experience/qwen3.5_2b_a100_wikitext.md`). Defects 2 and 3 are open. Raised by the A100/H100 PoC
+model selection. The table below is the state **before** that fix.
 
-`search()` is unit-tested pure, and the live path is walked on CPU against a *simulated*
-`torch.cuda.OutOfMemoryError`. Off-GPU every trial's memory field is `None`, so the bisection has
-never seen a real OOM, a real `peak_gb`, or real fragmentation.
+Two places assume, without saying so, that a checkpoint is a text-only model with a flat config:
 
-**This is the first experiment to run.** See "Initial experiments" below.
+- `frame/model.py:internals` reads `num_hidden_layers` / `hidden_size` off the **top level** of the
+  config mapping.
+- `frameworks/hf.py:135` loads through `AutoModelForCausalLM`.
+
+Modern checkpoints are increasingly natively multimodal and nest their dims under `text_config` /
+`vision_config`. Run against the six models the PoC wants (`transformers` 5.15.1):
+
+| Checkpoint | Config shape | `internals()` | `AutoModelForCausalLM` → | Failure |
+|---|---|---|---|---|
+| `SmolLM2-1.7B-Instruct` | flat | ✅ 1.711 B | `LlamaForCausalLM` | — |
+| `Llama-3.2-3B-Instruct` | flat | ✅ | `LlamaForCausalLM` | — |
+| `Qwen/Qwen3.5-2B` | nested | ❌ `TypeError` | `Qwen3_5ForCausalLM` | **Frame dies at Step 2** |
+| `Qwen/Qwen3.5-9B` | nested | ❌ `TypeError` | `Qwen3_5ForCausalLM` | Frame dies at Step 2 |
+| `SmolVLM2-2.2B-Instruct` | nested | ❌ `TypeError` | **`None`** → `ValueError` | dies twice |
+| `gemma-3-4b-it` | nested (gated, unverified) | ❌ expected | `Gemma3ForConditionalGeneration` | **silent** |
+
+`internals()` fails as `head_dim = hidden // heads` with both operands `None` — `_get` finds neither
+alias at the top level and its `default=None` propagates. The control case is clean: on the flat
+SmolLM2 config the analytical count is 1,711,276,032 against a real 1,711,376,384, 0.006% out.
+
+**Three distinct defects, in increasing order of how bad they are:**
+
+1. ~~**Frame crashes on a nested config.**~~ **Fixed** (`frame/model.py:_flatten` reads
+   `text_config` as the base and overlays the top level).
+2. **No class to load.** `smolvlm` maps to `None` in `MODEL_FOR_CAUSAL_LM_MAPPING_NAMES`, and no
+   `SmolVLMForCausalLM` exists anywhere in `transformers` — the module exports only
+   `SmolVLMForConditionalGeneration`, `SmolVLMModel` and `SmolVLMVisionTransformer`. Loud, but
+   expensive to fix; that's §6b.
+3. **The quiet one.** `gemma3` maps to `Gemma3ForConditionalGeneration` in the **CausalLM** table —
+   it is the one model type where the causal and image-text-to-text entries are the *same class*. So
+   the auto-class hands back the full multimodal model, vision tower included, and **nothing raises**.
+   On a text-only batch that buys: AdamW state for ~0.4 B params that receive zero gradient every
+   step; an inflated `N` in `roofline.training_flops`'s `6·N·D`, so **MFU reads high** and isn't
+   comparable to the flat-config models; and a depressed measured ceiling for a reason unrelated to
+   the model under test.
+
+Defect 3 is the one worth the entry. `test_a10G`'s ceiling lesson was that *the probe that never
+ran the real shape is the dangerous one*; this is the same failure in a different place: **a wrong
+number that looks right beats a crash for cost every time.**
+
+The gap underneath all three: the README's contract is "any model, GPU, and framework," but the
+code's contract is "any dense text model with a flat config." That's an undeclared precondition, not
+a bug list. **Frame is where preconditions belong** — it should establish or refuse, loudly, rather
+than let the runner discover it at loop step 1, and certainly rather than let the number come out
+wrong.
+
+**Proposal, cheapest first:**
+
+| Fix | Cost | Buys |
+|---|---|---|
+| ~~`internals` descends into `text_config` when present~~ | **done** | Qwen3.5 and Gemma frame correctly |
+| Flag modality in the Profile notes. `internals()` already reports `modality` (`vision_config` present → `multimodal`); nothing reads it yet | ~5 lines | `frame/profile.py:_notes` tells the agent before it tunes |
+| Honour an explicit `model_class` in the run config, falling back to the auto-class | ~10 lines | `Gemma3ForCausalLM` on Gemma; any `*ForConditionalGeneration` with a text-only sibling |
+| Refuse at Frame when modality isn't text and no text-only class exists | ~10 lines | SmolVLM fails at Step 2 **with a reason**, not at loop step 1 |
+
+**Experiment to settle it:** run Frame only (Step 2, no loop) against all six PoC checkpoints and
+record three things — (a) does `internals()` return; (b) does the analytical param count agree with
+`sum(p.numel())` from a real load; (c) on Gemma, how far apart are the measured ceiling and the MFU
+between the auto-class load and an explicit `Gemma3ForCausalLM` load. (c) is the one that matters:
+it puts a number on what the vision tower costs, and decides whether defect 3 is worth code or just
+a Profile note.
 
 ---
 
-## 10. The ceiling for a user's own training script
+## 6b. Multimodal is a missing axis, not a missing model
+
+**Status: open. Scoping, not a claim. Proposed as a milestone — deliberately *not* a PoC row.**
+
+The tempting read of §6 defect 2 is "add a second load path and SmolVLM works." It doesn't. The whole
+measurement chain assumes a batch is `(input_ids, attention, labels)`:
+
+| Component | What it assumes | What a VLM does instead |
+|---|---|---|
+| `frame/dataset.py:scan` | one text column; p50/p90/p99 are token counts | most of the sequence is image tokens from a processor — the reported distribution describes the wrong thing |
+| `_build_loader` / `_pad_batch` | emits ids + mask + labels | also needs `pixel_values` |
+| `_synthetic_batch` | worst case = every row exactly `seq_len` | worst case is *also* image count and resolution — a second dimension the ceiling never probes |
+| the knobs | `padding`, `length_grouped`, `packing` — text-shape levers | resolution, tiling, vision-tower freezing; and **freezing is a quality boundary**, so it's off-limits under `loop/throughput.md`, not a knob |
+| `roofline.training_flops` | `6·N·D`, N = params, D = tokens | the vision tower runs per *image*, not per token — 6ND is the wrong estimate before the vision tower is even counted |
+
+So a VLM is a new **modality axis** cutting through Frame, the loader, the ceiling and the roofline —
+comparable in size to the multi-GPU axis the README already defers, and it should be scheduled like
+one. Worth noting that `frame/model.py` already reports a `modality` field: it is the only part of
+the chain that anticipated this, and right now nothing reads it.
+
+**Nothing to settle by experiment** — this is scoping. The cheap precursor is §6's fourth row: once
+Frame declines non-text checkpoints with a reason, the axis gets built deliberately instead of
+discovered by a `ValueError` halfway through a booked GPU hour.
+
+---
+
+## 7. The ceiling for a user's own training script
 
 **Context:** bring your own script (`profiler/launch.py`). When the loop tunes a user's `train.py` through the
-launcher, `find_ceiling` (`frame/ceiling.py:109-116`) can't run as it does today. It drives OUR
+launcher, `find_ceiling` (`frame/ceiling.py`, its `fits()` trial) can't run as it does today. It drives OUR
 runner with `data="synthetic"`, and a user's script has no such switch. Without a ceiling,
 `micro_batch` is unbounded again, and every probe measures memory on whatever rows it happened to
-draw. That is exactly the failure §1 settled the ceiling exists to prevent. This is the most
+draw. That is exactly the failure the ceiling exists to prevent (`frame/README.md`). This is the most
 important gap in the user-script path.
 
 **The claim that it can't be measured was too strong.** With a torch `DataLoader`, the worst
@@ -271,11 +273,11 @@ worst-case batches in exactly the real format. No patching.
   over-length rows.
 
 **Prerequisite, done:** the launcher reports a CUDA OOM as `status: "oom"`, with memory at
-failure. `frame/ceiling.py:126-133` refuses `error` as a memory answer, and reads only `oom`
-as "doesn't fit". Tested on CPU (`sandbox/attach_parity/tests/test_launcher.py`, 8 cases) and
-with a real OOM on the A10 (SmolLM2-360M, micro-batch 64).
+failure. `find_ceiling` refuses `error` as a memory answer, and reads only `oom` as "doesn't
+fit". Tested on CPU (`tests/test_launch.py`) and with a real OOM on the A10 (SmolLM2-360M,
+micro-batch 64; and `docs/verification/byo_script.md` row 14).
 
-**Experiment that would settle it:** in `sandbox/attach_parity/`, on one model and config,
+**Experiment that would settle it:** on one model and config, through `profiler/launch.py`,
 compare three ceilings:
 - (a) today's synthetic `find_ceiling`;
 - (b) the dataset-aware worst case, one launch per trial;
@@ -286,7 +288,7 @@ than `micro_batch` rows at `max_len`. If (c) matches (b), option 2 wins on cost.
 
 ---
 
-## 11. Define the noise floor between launches, not within one
+## 8. Define the noise floor between launches, not within one
 
 **The claim:** the loop decides "within the noise floor" (`loop/loop.md:83`, `:106`), but the only
 noise floor it measures is the **within-run** coefficient of variation (`step_time_cv`, from one
@@ -349,7 +351,7 @@ more than 2× the within-run cv, adopt (1)-(2).
 
 ---
 
-## 12. Give the agent a metric reference: what each probe field measures, and what it doesn't
+## 9. Give the agent a metric reference: what each probe field measures, and what it doesn't
 
 **The claim:** the agent's decisions are only as good as its reading of the Observation, and today
 nothing it reads says what each field **does not** measure. `program.md:56` tells it to "skim"
@@ -363,7 +365,7 @@ the mistakes those notes record.
 | Trap | Where it's recorded |
 |---|---|
 | Comparing host phase times across loops (Trainer syncs every micro-batch, which moves where the host waits) | BYO experiment 4 |
-| Believing a win smaller than the between-launch spread (the within-run cv is ~4× too tight on long fixed-shape steps) | §11 |
+| Believing a win smaller than the between-launch spread (the within-run cv is ~4× too tight on long fixed-shape steps) | §8 |
 | Median step time overstating throughput under skew | `beliefs/median-step-time-overstates-skewed-throughput.md` |
 | Reading data-wait 0.0 as "not data-bound" when there's no torch `DataLoader` | metric-coverage audit §0 |
 | MFU counting pad tokens as work; MFU wrong under LoRA (trainable-only N) | `experience/test_a10G.md`, metric-coverage audit §5 |
@@ -398,11 +400,11 @@ profiler/metrics/
   the two can't drift.
 - **Routed where it's used:** a pointer at the Observe step of `loop/loop.md` (where the agent
   interprets an Observation), not only at `program.md` step 1's "skim".
-- **Capture modes:** document the runner capture (`capture()`) that exists today. When the
-  attached capture (user scripts) is promoted out of the sandbox, add its differences per field
+- **Capture modes:** both are live: the runner capture (`capture()`) and the attached capture
+  for user scripts (`profiler/attach.py`). Document the attached capture's differences per field
   (padded tokens, trainable-only params, trace-derived phases, DataLoader-only data-wait, the
-  timing method). Until then they stay in developer notes, so the agent never reasons about a
-  mode it can't use.
+  timing method, unknown tokens when the model input has no token tensor). Today they're only
+  summarized in `profiler/README.md`, "Attached capture".
 
 **Why it might be wrong:**
 - More reading for the agent at the point of decision. The index must stay short enough to scan,
@@ -418,10 +420,10 @@ inside-noise calls, and the MFU-with-padding reading.
 
 ---
 
-## 13. MFU is wrong whenever weights are frozen (LoRA / PEFT); keep "model FLOPs", fix the count
+## 10. MFU is wrong whenever weights are frozen (LoRA / PEFT); keep "model FLOPs", fix the count
 
-**Scope and owner:** a **separate branch, after the bring-your-own-script work lands**
-(merged in #17 / #18). Handed to a colleague; this entry is written to be read cold. Until it
+**Scope and owner:** a **separate branch**, now unblocked: the bring-your-own-script work it waited
+on has merged (#17, #18). Handed to a colleague; this entry is written to be read cold. Until it
 lands, MFU under LoRA is a documented known limitation of the BYO-script path.
 
 **The problem, measured.** BYO experiment 7, 1× A10, peft 0.20.0, LoRA
@@ -437,10 +439,10 @@ A 0.5% MFU tells the agent the GPU is idle, and sends it after problems that don
 **Where the error is.** The pipeline is: probe measures N, D, step time and peak → 6·N·D
 (`profiler/roofline.py:17`) → MFU = FLOPs / time / peak (`:25-29`). The reporting arithmetic is
 correct. Two inputs are wrong, pulling in opposite directions:
-1. **N, on the probe side (the big error).** The sandbox measurement takes N from the
-   optimizer's `param_groups` (`sandbox/attach_parity/attach.py:115`), i.e. trainable params only.
-   OG runners count every parameter (`frameworks/hf.py:156`), so this is new with the BYO-script
-   path.
+1. **N, on the probe side (the big error).** The attached capture takes N from the
+   optimizer's `param_groups` (`profiler/attach.py`, `self.params`), i.e. trainable params only.
+   OG runners count every parameter (`frameworks/hf.py`, `self.params`), so this is new with the
+   BYO-script path.
 2. **The 6 in 6ND (the smaller error).** 6 = 2 (forward) + 2 (gradients back through
    activations) + 2 (weight gradients). Frozen weights skip the last 2. With N_total plugged into
    6ND, SmolLM2 + LoRA reads ≈22.5%: ~1.5× high.
@@ -474,7 +476,7 @@ for:
 2. **Report N_total and N_trainable separately** (Observation `provenance`, or new fields; check
    `tests/test_diagnostic.py:179-189`, which pins the README's field count).
    - **N_trainable:** exact today, from the optimizer (public API).
-   - **N_total, OG runners:** they already know it (`frameworks/hf.py:156`); pass it through as a
+   - **N_total, OG runners:** they already know it (`frameworks/hf.py`, `self.params`); pass it through as a
      declared input.
    - **N_total, user scripts, patch-free:** sum the weight shapes of the matmul ops
      (`aten::linear` / `aten::addmm` / `aten::mm`, `Input Dims`) in **one forward pass** of the
@@ -499,18 +501,19 @@ for:
 - Attention's own FLOPs (~12·layers·d_model·seq per token) are ignored, as today
   (`profiler/roofline.py:5`). That's a separate refinement.
 
-**What would settle it:** in `sandbox/attach_parity/hf/`:
+**What would settle it:** on a GPU, with the experiment 4b / 7 Trainer scripts
+(`sandbox/attach_parity/hf/` in tag `sandbox-archive`):
 1. **Full fine-tune** (experiment 4b configs): the new formula must equal 6ND within a few
    percent, using the trace-derived N_total. That validates the N_total extraction.
 2. **LoRA** (experiment 7 configs): MFU lands at ≈15% / ≈20%, not 0.5%.
 3. **Gradient checkpointing on vs off:** MFU must not rise when checkpointing slows training, while
    HFU does. That demonstrates the model-vs-hardware distinction.
 
-Suggested branch: `mfu-frozen-weights`, cut from `main` after the BYO-script branch merges.
+Suggested branch: `mfu-frozen-weights`, cut from `main`.
 
 ---
 
-## 14. Compare the same examples without timing a whole pass
+## 11. Compare the same examples without timing a whole pass
 
 **Status:** a proposal to change PR #14's clean-window policy. **Not adopted**: PR #14's rule
 (the clean window covers whole passes over the sample, starting at a pass boundary;
@@ -560,42 +563,15 @@ claimed only when they match, or when the option above makes them provably the s
   the sampler.
 - (a) relies on HF implementation details.
 
-**What would settle it:** in the sandbox, on one model with `padding="longest"`:
+**What would settle it:** on one model with `padding="longest"`:
 1. Short-window vs whole-pass ranking over several non-sampler knobs: does the order of configs
    agree?
 2. Length-grouped vs ungrouped under (a): log the example IDs in the window for both, and check
    they're the same set.
-3. The between-launch noise of a short window vs a whole pass (§11).
+3. The between-launch noise of a short window vs a whole pass (§8).
 
 Adopt the short window if rankings agree and noise is within the floor.
 
 **Interaction:** OG and user-script probes should share one clean-window rule, or their throughput
 isn't comparable (axiom audit B5).
 
----
-
-# Initial experiments — where do we currently stand?
-
-The goal is **not** to tune anything. It's to find out which of the claims above survive contact
-with a real card. Run them in order; each one gates the next.
-
-Setup: `backend = "modal"`, `gpu = "A10G"`, `Qwen/Qwen2.5-0.5B`, `wikitext-2-raw-v1`,
-`effective_batch = 16`, `max_len = 2048`. Log to `runs/<name>/ceiling.tsv`, never `results.tsv`.
-
-| # | Experiment | Answers | Settles |
-|---|---|---|---|
-| **E0** | Run `find_ceiling` once on a real A10G with `HFRunner` | Does it run at all? Do `peak_gb` / `oom_at` / `frag_gb` populate? | **8** (blocking) |
-| **E1** | Same run — fit `peak_gb` vs `micro_batch` | Is the memory curve linear? How far is the predicted ceiling from the measured one? | **2** |
-| **E2** | Ceiling on synthetic vs ceiling on real rows, same config | Do they agree? (They should, under `padding="max_length"`) | **1** |
-| **E3** | E2 again with pad-to-longest instead of `padding="max_length"` | Does the real ceiling become unstable once padding is dynamic? | **1** |
-| **E4** | Ceiling with `gradient_checkpointing` on vs off | How far does one memory lever move it? Does the staleness rule earn its cost? | **3** |
-| **E5** | Sweep (model, max_len) — 0.5B/1.5B × 1024/2048/4096 | How often does the ceiling land *below* `effective_batch`? | **3** |
-
-**E0 is the gate.** Nothing else is interpretable until the search has seen a real OOM.
-
-**E2/E3 are the ones that decide whether this feature was worth building.** If E2 shows agreement
-and E3 shows no instability, the honest conclusion is that the ceiling is a determinism-and-cost
-win rather than a safety one, and `frame/README.md` should stop claiming otherwise.
-
-These are dev experiments, run by hand to size up the current state — not a tuning session, so
-they don't follow `program.md`'s loop. Delete an entry above once its experiment has settled it.

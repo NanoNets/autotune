@@ -78,8 +78,8 @@ of the config here, see the measurement findings below.
 
 - **A stratified probe sample, not a bigger head slice.** `sample` 1000/2000/4000 never converged
   (tokens/step 2057 / 1719 / 1810, non-monotone), so no head slice of an ordered file is
-  representative at any size. The fix is `design_improvements.md` 1b — draw to match the
-  distribution. Until then every dynamic-padding samples/s in this repo is sample-conditional.
+  representative at any size. The fix is to draw to match the distribution (since built:
+  `frame/dataset.py:draw_sample`). Until then every dynamic-padding samples/s in this repo is sample-conditional.
 - **Throughput should be reported as total tokens / total time.** `step_time_mean_s` was added at the
   backend as a stopgap; the profiler's own `mfu`, `gpu_active_frac` and `roofline_floor_s` are still
   computed from the median and still print impossible values under skew.
