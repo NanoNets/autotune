@@ -3,8 +3,8 @@
 `capture()` drives a runner: it calls `step()` itself, and the runner wraps its phases in
 `record_function`. A user's script (swift, TRL, a hand-written loop) offers neither. `Attach`
 inverts control: the user's loop runs as-is (started by `profiler/launch.py`), and it produces the
-same `Capture` that `capture()` does, so `diagnose()` is unchanged. Design and evidence:
-`bring_your_own_script.md`; what it does and doesn't measure yet: `integration_plan.md` Appendix A.
+same `Capture` that `capture()` does, so `diagnose()` is unchanged. What it doesn't measure yet:
+`profiler/README.md`, "Attached capture", and `design_improvements.md` §10–§14.
 
     att = Attach(device="cuda", peak_flops=..., peak_mem_bw_gb_s=...)
     att.install()              # before the user builds the optimizer
@@ -60,7 +60,7 @@ from profiler.capture import (Capture, _MIN_SAMPLE_S, _cpu_stats, _default_trace
 # probe (Measurement axiom, `loop/contracts.md`, corollary 5). The clean window is NOT yet whole
 # passes over Frame's sample, and the trace is one step of the script's own loop, not a replayed
 # reference batch, so throughput and trace durations from these probes are not `same-rows` /
-# `same-reference-batch` evidence (integration_plan.md Appendix A: B2, B4).
+# `same-reference-batch` evidence (`profiler/README.md`, "Attached capture").
 POPULATION = {"driver": "script", "clean_window": "fixed-position", "trace_basis": "traced-step"}
 MIN_WARMUP = 2      # step 1 identifies the trained parameters; step 2 finds the model that owns them
 

@@ -33,7 +33,7 @@ else is `key=value` or a bare flag. Unknown keys: stop and say which ones, don't
 | `budget=<Nh>` or `budget=<N>x` | *(placeholder, not built)* | Reserved for a wall-clock (`8h`) or experiment-count (`40x`) limit. Accept it, echo it in the Step 3 summary as "noted, not enforced in v1", and otherwise ignore it. "NEVER stop" still applies |
 | `resume` | Skips Steps 1–3 | Needs an existing `runs/<run_name>/results.tsv`. See §3 |
 | `review` | Runs Step 5 only | Needs an existing `runs/<run_name>/results.tsv` |
-| `smoke` | `device` | Sets `device = "cpu"` for a pipeline smoke test. Say in the Step 3 summary that its MFU means nothing and no result gets promoted to `knowledge/` |
+| `smoke` | `device` | Sets `device = "cpu"` for a pipeline smoke test. Say in the Step 3 summary that its MFU means nothing and no result gets promoted to `beliefs/` |
 
 `resume`, `review` and `smoke` exclude each other.
 

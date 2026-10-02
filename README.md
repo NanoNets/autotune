@@ -23,7 +23,7 @@ evidence before the search starts.
 
 **First full run is in** (`test_a10G`, Qwen2.5-0.5B on an A10): 23 experiments, **4.3 → 108.6
 samples/s (25x)**, MFU 28.7% → 58.6%. The dominant win wasn't a kernel — it was not computing
-padding. See `knowledge.md` for the write-up and `knowledge/` for the beliefs it produced.
+padding. See `experience/test_a10G.md` for the write-up and `beliefs/` for the beliefs it produced.
 
 Next: the surrogate + frontier in `search/`, so the loop ranks candidates instead of hand-searching.
 
@@ -58,16 +58,16 @@ the procedure. This is what actually happens at each one, and what lands on disk
        ▼
   ┌─ STEP 4 ─ The loop, unattended ───────────────────────── loop/loop.md ─┐
   │  exp 1   BASELINE — shipped defaults, unmodified (never skipped)       │
-  │  exp 2   REPLAY   — a matched prior from knowledge.md, if any          │
+  │  exp 2   REPLAY   — a matched prior from experience/, if any           │
   │  exp 3+  HYPOTHESIZE ─▶ TEST ─▶ OBSERVE ─▶ LEARN ─┐   ~5 min each      │
   │             ▲                                     │   until you stop   │
   │             └─────────────────────────────────────┘   it               │
   │                   → results.tsv row + obs_N.json, per experiment       │
   └───────────────────────────────────────────────────────────────────────┘
        ▼
-  ┌─ STEP 5 ─ Review ─────────────────────────────── knowledge/README.md ──┐
-  │  → knowledge.md   dated run entry (append-only history)                │
-  │  → knowledge/*.md beliefs (curated, context-keyed priors)              │
+  ┌─ STEP 5 ─ Review ─────────── experience/README.md · beliefs/README.md ─┐
+  │  → experience/<run>.md  dated run entry + index line (append-only)     │
+  │  → beliefs/*.md         beliefs + index line (curated, context-keyed)  │
   └───────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -79,22 +79,22 @@ the procedure. This is what actually happens at each one, and what lands on disk
 | 2 Frame | `frame/` (+ one `capture` per ceiling trial) | hub config, dataset sample, the card | `profile.json`, `ceiling.tsv` |
 | 3 Confirm | — | `profile.json` | `results.tsv` (header) |
 | 4 Loop | `backends.run` → `profiler.capture` → `profiler.diagnostic` | `beliefs.md`, `results.tsv` | `results.tsv` row, `obs_N.json`, `research.md` |
-| 5 Review | `runs/progress.py` | `results.tsv`, `research.md` | `knowledge.md`, `knowledge/*.md`, `progress.png` |
+| 5 Review | `runs/progress.py` | `results.tsv`, `research.md` | `experience/<run>.md` + `experience/index.md`, `beliefs/*.md` + `beliefs/index.md`, `progress.png` |
 
 ### The two memories
 
-Different questions, different read cadence, **opposite** mutation rules — see `knowledge/README.md`.
+Different questions, different read cadence, **opposite** mutation rules — see `experience/README.md` and `beliefs/README.md`.
 
-- **`knowledge.md`** — *has this configuration been run before?* Read **once, at Frame**, matched on
+- **`experience/`** — *has this configuration been run before?* Read **once, at Frame**, matched on
   each entry's `Context:` line. **Append-only**: a past entry is dated evidence, never edited.
-- **`knowledge/`** — *what do we believe about this lever?* Read **every hypothesis**, filtered by
+- **`beliefs/`** — *what do we believe about this lever?* Read **every hypothesis**, filtered by
   `context` match. **Curated**: amended, superseded, deleted as evidence lands.
 
 ### Why the two memories matter
 
 ```
   ┌────────────────────────────────┐   ┌────────────────────────────────┐
-  │  knowledge/      BELIEFS       │   │  knowledge.md    EXPERIENCE    │
+  │  beliefs/        BELIEFS       │   │  experience/     EXPERIENCE    │
   │                                │   │                                │
   │  an engineer's opinion —       │   │  what actually happened —      │
   │  what someone who has done     │   │  dated runs, real numbers,     │
@@ -202,8 +202,7 @@ Under the hood: `backends/local.py` runs `python -m profiler.launch -- <script> 
 the optimizer steps, profiles one step, reads phases and token counts from torch's own trace, and
 returns the same Observation a runner probe produces (`profiler/README.md`, "Attached capture").
 
-**Not there yet** (tracked in `integration_plan.md`, Appendix A, and `design_improvements.md`
-§10–§14):
+**Not there yet** (tracked in `design_improvements.md` §10–§14):
 - **Script probes are provisional evidence.** Their clean window is a fixed stretch of steps, not
   whole passes over Frame's sample, so under the Measurement axiom they don't count as `same-rows`
   comparisons, and no belief is promoted from their timings.
@@ -222,7 +221,8 @@ profiler/      the measurement instrument (roofline · trace · capture · diagn
 frame/         profile the setup · measure the OOM ceiling · build the search space       [built]
 frameworks/    runner adapters — hf (real) · torch (toy)                                   [built]
 backends/      where a probe runs — local · ssh · modal                                    [built]
-knowledge/     cross-run memory — knowledge.md log + belief files + index                  [live]
+experience/    cross-run memory: the run log, one file per run + index                     [live]
+beliefs/       cross-run memory: the beliefs, one file per claim + index                   [live]
 runs/          per-run outputs (gitignored) — profile · ceiling · results · observations   [built]
 tests/         TDD                                                                         [built]
 
@@ -238,7 +238,7 @@ data shapes. Open dev questions — things not yet settled by evidence — are i
 
 1. **Profiler** *(done)* — single-step profile + roofline. Local, no GPU needed to build.
 2. **Frame** *(done)* — profile model / hardware / env / dataset; measure the OOM ceiling.
-3. **Intelligence** *(now)* — surrogate + frontier. Cross-run memory is live (`knowledge/`);
+3. **Intelligence** *(now)* — surrogate + frontier. Cross-run memory is live (`beliefs/`);
    candidate ranking in `search/` is not.
 4. **Distributed** — parallelism as a search space, multi-GPU.
 

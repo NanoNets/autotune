@@ -109,7 +109,7 @@ times. An *instrument* is either the **clean window** (profiler off) or the **tr
 7. **A belief is promoted only on evidence that satisfies this axiom.** Each comparison behind it
    must be *same-rows* (clean window, whole passes), *same-reference-batch* (trace durations), or
    *width-invariant* (counts and provenance), and every rate must come from totals. Anything else
-   is recorded in the run's `knowledge.md` entry as an observation, never as belief evidence, and
+   is recorded in the run's `experience/` entry as an observation, never as belief evidence, and
    the belief's `evidence` names which basis it rests on.
 
 Why: every impossible reading in the smollm2 and qwen3.5 A100 runs broke this — one profiled
@@ -121,7 +121,7 @@ length grouping are what make it necessary.
 ---
 
 ## Belief
-One durable thing learned. A markdown file in `knowledge/`, one claim each.
+One durable thing learned. A markdown file in `beliefs/`, one claim each.
 
 | Field | Meaning |
 |---|---|
