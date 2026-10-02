@@ -77,28 +77,19 @@ No Claude Code? Fill in `run.toml` and point any coding agent at `program.md`.
 - **A memory ceiling that's measured.** Real batches rarely hit the maximum length, so a config can
   pass every test and crash hours into training. autotune runs worst-case batches up front, and
   re-checks whenever a memory setting changes.
-- **A memory that compounds.** **Experience** is the indexed record of every run; **beliefs**
-  evolve. Each run reads both and writes back to both:
+- **A memory that compounds.**
 
 ```
     run N                          shared memory                        run N+1
  ┌─────────┐  writes a record   ┌──────────────────┐   run before?    ┌─────────┐
  │  frame  │ ─────────────────▶ │ experience/      │ ───────────────▶ │  frame  │
- │  probe  │                    │ one per run,     │  replay a match  │  probe  │
- │  learn  │                    │ never edited     │                  │  learn  │
+ │  probe  │                    │ indexed record   │  replay a match  │  probe  │
+ │  learn  │                    │ of every run     │                  │  learn  │
  │         │  confirms, splits  ├──────────────────┤ priors for each  │         │
  │         │  or deletes claims │ beliefs/         │    hypothesis    │         │
- │         │ ─────────────────▶ │ one per claim,   │ ───────────────▶ │         │
- └─────────┘                    │ curated          │                  └────┬────┘
-                                └──────────────────┘                       │
-                                                          writes back, and so on
+ │         │ ─────────────────▶ │ evolving claims  │ ───────────────▶ │         │
+ └─────────┘                    └──────────────────┘                  └─────────┘
 ```
-
-  `experience/` is what happened: one dated record per run, never edited, with an index the next
-  run searches for a match. `beliefs/` is what we think, and it changes: claims like "tf32 does
-  nothing under bf16", each tied to the model family, card and data it was shown on, get stronger,
-  narrower or deleted as runs confirm or contradict them. Contributing what your run learned is a
-  pull request.
 
 ## Project structure
 
