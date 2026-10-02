@@ -9,8 +9,10 @@
 > §10–§13.
 
 >
-> **`sandbox/attach_parity/` is a local, untracked harness** (gitignored). The experiments below ran
-> there; paths into it describe where the code and raw results live on the machine that ran them.
+> **`sandbox/attach_parity/` has been removed** (2026-10-02): the patch-free capture it proved now
+> lives in `profiler/attach.py` / `launch.py` / `derive.py` / `nopatch.py`. Its code, frozen baseline
+> and raw results are kept in the git tag **`sandbox-archive`** (`git checkout sandbox-archive --
+> sandbox/`). Paths into `sandbox/` below refer to that tag.
 ---
 
 ## Terms
@@ -110,7 +112,7 @@ Measurement axiom, and `frame/ceiling.py: search()`.
 | D3 | CUDA-event timing | adopt in Phase S, or defer | **Adopt in Phase S.** One re-baselining, and experiment 6's design validates it |
 | D4 | Gradient checkpointing / `torch.compile` | blockers for Phase 8 deletion, or documented limitations | **Must pass before Phase 8 deletes anything; not needed to start** |
 | D5 | Data-wait with no DataLoader | `null`, or keep 0.0 | **`null`.** Note that PR #14's `diagnose()` still reads `ph_s.get("dataloader", 0.0)` |
-| D6 | `sandbox/attach_parity/vendor/` | keep, or delete | **Re-freeze it from `2c4c135` in Phase S** (the new baseline); delete in Phase 8 |
+| ~~D6~~ | ~~`sandbox/attach_parity/vendor/`~~ | **Decided 2026-10-02: deleted** with the rest of `sandbox/` (kept in tag `sandbox-archive`) | Phase S rebuilds a parity harness against current `main`, with its own frozen copy of OG |
 | **D7** *(new)* | **Trace basis for user scripts** (can't replay a batch) | (a) fractions over the traced step's **own profiler-on wall**: same batch, same instrument, reads slightly low from profiler overhead, never impossible; (b) no GPU-active / gap for user scripts at all (`null`) | **(a)**, recorded as `trace_basis: "traced-step"`. `batch_key` = a hash of the traced step's input shapes (weaker than OG's row identity), so cross-probe trace durations compare only at matching shapes |
 | **D8** *(new)* | **Whole passes for user scripts** | the probe config points the script's data setting at Frame's `sample.jsonl`; a pass = one epoch; sandbox measurement counts optimizer steps and aligns the clean window to epoch boundaries (e.g. warm up for exactly one pass) | Needs the sample size to be a multiple of samples per step (Frame already rounds, e.g. 1000 → 992). **Check:** frameworks reshuffle per epoch (HF Trainer seeds by epoch). That's fine for throughput (the axiom allows re-batching the same rows), but it means no two passes share a traced batch. **The audit adds:** `sample.jsonl` isn't framework-readable (a meta header line, `{"row","text","tokens"}` rows), so Frame must also write the drawn rows in the user dataset's own schema (Appendix A, S3); and the rows actually trained must be cross-checked against the file (S5) |
 
@@ -144,8 +146,9 @@ optional cleanup).
 promoted must satisfy PR #14's rules, and be proven against PR #14's OG, before it touches
 `profiler/`.
 
-- **Re-freeze the baseline:** `vendor/` ← `profiler/` + `frameworks/` + `frame/synthetic.py` at
-  `2c4c135` (D6). Keep the old copy only in git history.
+- **Rebuild a parity harness first.** `sandbox/` was removed on 2026-10-02 (tag `sandbox-archive`),
+  so Phase S starts by making a fresh one: the live `profiler/launch.py` against a frozen copy of
+  OG (`profiler/` + `frameworks/` + `frame/synthetic.py`) taken from `main` at that point (D6).
 - **Clean window:** whole passes over the probe sample (D8), with tokens counted over exactly the
   timed steps (D1).
 - **Trace:** `trace_basis` recorded (D7). Fractions over the traced step's own wall for scripts.

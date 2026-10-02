@@ -12,8 +12,10 @@ those fields obtained, and at what cost?
   included, because several fields are computed from them.
 
 >
-> **`sandbox/attach_parity/` is a local, untracked harness** (gitignored). The experiments below ran
-> there; paths into it describe where the code and raw results live on the machine that ran them.
+> **`sandbox/attach_parity/` has been removed** (2026-10-02): the patch-free capture it proved now
+> lives in `profiler/attach.py` / `launch.py` / `derive.py` / `nopatch.py`. Its code, frozen baseline
+> and raw results are kept in the git tag **`sandbox-archive`** (`git checkout sandbox-archive --
+> sandbox/`). Paths into `sandbox/` below refer to that tag.
 ---
 
 ## 0. Update 2026-09-25: the patch-free rewrite

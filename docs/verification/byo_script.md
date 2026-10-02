@@ -92,6 +92,31 @@ sample rather than the script's data.
 - **All script probes are provisional evidence by design** (`population.driver: "script"`; PR #17,
   "Known gaps"). Nothing here was promoted to `knowledge/`.
 
+## After the code review (2026-10-02)
+
+Six fixes landed after the matrix above ran. They change failure paths and two labels, not the
+measurement of a clean run, so the throughput numbers above stand. What changed, and how it is
+covered:
+
+| # | Fix | Covered by (CPU) |
+|---|---|---|
+| 1 | A script that runs past `timeout` is killed with its process group (DataLoader workers included) and comes back as an `error` Observation, instead of crashing the loop. Over ssh, the outer timeout is 300 s longer, so the box's error reaches the loop | `test_a_hung_script_is_an_error_observation_not_a_crashed_loop` |
+| 2 | The monkeypatch guard ran after `cap.json` was written, so a patched run could still read `ok`. It now overwrites the status with `error` | `test_a_patched_torch_overrides_ok_with_an_error` |
+| 3 | The model is the first module called that owns the optimizer's parameters, not the first module called. A parameter-free transform or a frozen reference / teacher model run first is skipped. Needs `warmup >= 2`; a lower value is an `error` before the script starts | `test_tokens_are_counted_on_the_model_being_trained[transform_first, reference_first]`, `test_invalid_probe_settings_are_an_error_observation`, `test_invalid_settings_write_an_error_before_the_script_runs` |
+| 4 | `population.model_trained` (the checkpoint name off the model's config) and `model_matches_config` (against Frame's `model`) | `test_the_trained_model_is_checked_against_the_declared_one[match, mismatch, undeclared]` |
+| 5 | A step whose model input had no token tensor (e.g. `model(batch_dict)`) makes tokens **unknown** for the probe, rather than an undercount. `diagnose()` then reports no FLOPs / MFU instead of crashing; this crash was found by the new test | `test_a_model_called_with_a_dict_has_unknown_tokens_not_a_guess` |
+| 6 | Script files under `runs/` are pushed even with `sync = false`, so a new per-probe config always reaches the box | `test_ssh_pushes_run_files_even_without_a_code_sync` |
+
+Full suite: **202 tests**, CPU, 2026-10-02: 201 passed. The one failure is `tests/test_capture.py::test_cpu_signal_survives_a_window_too_short_to_sample`, which fails the same way on a clean `origin/main` checkout (a CPU-sampler timing assertion in OG `capture.py`, untouched here).
+
+**Not yet re-run on a GPU.** The box used above was no longer reachable on 2026-10-02. The slice to
+re-run on the next box: rows 2, 3, 4, 10, 12 and 14, plus one scenario with a frozen reference model
+called before the trained one. Expect the same throughput (fixes 1–6 don't touch a clean step) and
+`model_matches_config: true`.
+
+`sandbox/` was removed in the same change. The parity harness these experiments came from is in git
+tag `sandbox-archive`.
+
 ## Raw records
 
 `runs/byo_t01` … `runs/byo_t14` on the machine that ran this (gitignored): `research.md` (the

@@ -114,6 +114,16 @@ def _push_sample(s, sample_file):
         raise RuntimeError(f"rsync of {sample_file} to {s['target']} failed:\n{r.stderr.strip()}")
 
 
+def _ship_run_files(s, files):
+    """Push script files kept under runs/ (excluded from the code sync): a refactored copy of the
+    user's script, per-probe configs. ALWAYS, sync or not: the agent writes a new per-probe config
+    for every probe, so with `sync = false` the box would otherwise run without it, or on a stale
+    copy. Files outside runs/ ride with the code sync."""
+    for f in files:
+        if f.startswith("runs/"):
+            _push_sample(s, f)
+
+
 def _check_script(script):
     """A user's training script, or a file it reads (`script_files`), must be repo-relative, so it
     lands at the same path on the box."""
@@ -157,9 +167,7 @@ def run(config):
         _sync(s)
         if config.get("sample_file"):                  # runs/ is excluded from the code sync
             _push_sample(s, config["sample_file"])
-        for f in shipped:                              # ...so script files kept there (a refactored
-            if f.startswith("runs/"):                  #   copy, per-probe configs) are pushed too
-                _push_sample(s, f)
+    _ship_run_files(s, shipped)
 
     payload = base64.b64encode(json.dumps(payload_config(config), default=str).encode()).decode()
 
@@ -176,8 +184,10 @@ def run(config):
     remote = (f"cd {_sh_path(s['remote_dir'])} && {env_prefix}"
               f"{_sh_path(s['python'])} -c {shlex.quote(script)} {payload}")
 
+    # The box enforces `timeout` itself and returns an error Observation (backends/local.py). This
+    # one only guards a dead connection, so it waits longer: the box's answer must win the race.
     r = subprocess.run(_ssh_cmd(s) + [s["target"], remote],
-                       capture_output=True, text=True, timeout=config.get("timeout", 1800))
+                       capture_output=True, text=True, timeout=config.get("timeout", 1800) + 300)
     out = r.stdout
     if _BEGIN not in out or _END not in out:
         tail = (r.stderr or out)[-2000:]

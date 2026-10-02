@@ -14,7 +14,7 @@ import textwrap
 import pytest
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-WARMUP, CLEAN = 1, 2                                  # profiled step = optimizer step 4
+WARMUP, CLEAN = 2, 2                                  # profiled step = optimizer step 5
 
 SCRIPT = textwrap.dedent('''
     import sys, torch
@@ -59,7 +59,7 @@ def test_normal_run_is_ok(tmp_path):
 
 
 def test_oom_before_profiled_step_is_oom_and_keeps_clean_steps(tmp_path):
-    p, rec = run(tmp_path, fail_at=2, kind="oom")                # during the clean window
+    p, rec = run(tmp_path, fail_at=3, kind="oom")                # during the clean window
     cap = rec["capture"]
     assert p.returncode != 0                                     # re-raised: exits non-zero
     assert "OutOfMemoryError" in p.stderr                        # full traceback still on stderr
@@ -97,7 +97,7 @@ def test_early_exit(tmp_path, kind, expect):
     cap = rec["capture"]
     assert cap["status"] == "error"
     if expect == "too few":                                      # sys.exit(0) is a normal end...
-        assert cap["error"] == "script ended after 2 optimizer steps; needs 4"   # ...but too early
+        assert cap["error"] == "script ended after 2 optimizer steps; needs 5"   # ...but too early
     else:
         assert cap["error"] == expect
 
@@ -106,4 +106,31 @@ def test_too_few_steps_is_error(tmp_path):
     p, rec = run(tmp_path, fail_at=0, kind="none", steps=3)
     assert p.returncode == 0
     assert rec["capture"]["status"] == "error"
-    assert rec["capture"]["error"] == "script ended after 3 optimizer steps; needs 4"
+    assert rec["capture"]["error"] == "script ended after 3 optimizer steps; needs 5"
+
+
+def test_a_patched_torch_overrides_ok_with_an_error(tmp_path):
+    """The guard runs after the result is written, so a failure must rewrite it: a run that left
+    torch patched isn't a measurement, whatever status it reached."""
+    script = tmp_path / "train.py"
+    script.write_text(SCRIPT + "\ntorch.nn.modules.module.register_module_forward_hook(lambda *a: None)\n")
+    out = tmp_path / "cap.json"
+    p = subprocess.run([sys.executable, "-m", "profiler.launch", "--out", str(out),
+                        "--device", "cpu", "--warmup", str(WARMUP), "--clean", str(CLEAN),
+                        "--peak-flops", "1", "--peak-bw", "1", "--", str(script), "0", "none", "8"],
+                       capture_output=True, text=True, cwd=REPO)
+    cap = json.loads(out.read_text())["capture"]
+    assert p.returncode != 0
+    assert cap["status"] == "error"
+    assert cap["error"].startswith("monkeypatch guard")
+
+
+def test_invalid_settings_write_an_error_before_the_script_runs(tmp_path):
+    out = tmp_path / "cap.json"
+    p = subprocess.run([sys.executable, "-m", "profiler.launch", "--out", str(out),
+                        "--device", "cpu", "--warmup", "1", "--clean", str(CLEAN), "--",
+                        str(tmp_path / "never_run.py")], capture_output=True, text=True, cwd=REPO)
+    cap = json.loads(out.read_text())["capture"]
+    assert p.returncode == 2
+    assert cap == {"status": "error", "error": "invalid probe settings: warmup=1: needs >= 2 "
+                   "(step 1 identifies the trained parameters, step 2 finds the model that owns them)"}

@@ -8,6 +8,7 @@ so every probe is scored against the same denominator. Heavy imports (torch, the
 import dataclasses
 import json
 import os
+import signal
 import subprocess
 import sys
 import tempfile
@@ -98,16 +99,30 @@ def run_script(config):
     argv = _launch_argv(config, out)
     env = {**os.environ, **{str(k): str(v) for k, v in (config.get("env") or {}).items()}}
     env["PYTHONPATH"] = _REPO + (os.pathsep + env["PYTHONPATH"] if env.get("PYTHONPATH") else "")
-    p = subprocess.run(argv, cwd=config.get("script_cwd") or _REPO, env=env,
-                       capture_output=True, text=True, timeout=config.get("timeout", 1800))
-    if os.path.exists(out):
+    timeout = config.get("timeout", 1800)
+    # Its own process group, so a timeout kills the script AND its children (DataLoader workers
+    # would otherwise outlive it and keep holding the GPU).
+    proc = subprocess.Popen(argv, cwd=config.get("script_cwd") or _REPO, env=env, text=True,
+                            stdout=subprocess.PIPE, stderr=subprocess.PIPE, start_new_session=True)
+    try:
+        stdout, stderr = proc.communicate(timeout=timeout)
+        timed_out = False
+    except subprocess.TimeoutExpired:                  # a hang (e.g. a worker deadlock) or simply
+        os.killpg(proc.pid, signal.SIGKILL)            # too long: an error Observation, never a
+        stdout, stderr = proc.communicate()            # crashed loop
+        timed_out = True
+    if timed_out:
+        cap = Capture(status="error", device=config["device"],
+                      error=f"script exceeded timeout of {timeout}s (killed)")
+        rec = {}
+    elif os.path.exists(out):
         with open(out) as f:
             rec = json.load(f)
         cap = Capture(**rec["capture"])
     else:                                              # killed (OOM killer, SIGKILL, os._exit)
-        tail = (p.stderr or p.stdout or "").strip().splitlines()[-1:] or ["(no output)"]
+        tail = (stderr or stdout or "").strip().splitlines()[-1:] or ["(no output)"]
         cap = Capture(status="error", device=config["device"],
-                      error=f"launcher wrote no result (exit {p.returncode}): {tail[0]}")
+                      error=f"launcher wrote no result (exit {proc.returncode}): {tail[0]}")
         rec = {}
     obs = dataclasses.asdict(diagnose(cap, params=rec.get("params") or 0,
                                       tokens=rec.get("tokens"), gpu=config.get("gpu", "local")))
@@ -116,6 +131,10 @@ def run_script(config):
                          "script_files": list(config.get("script_files") or []),
                          "micro_batches": rec.get("micro_batches"),
                          "script_error": rec.get("script_error")}
+    trained, declared = obs["population"].get("model_trained"), config.get("model")
+    # Frame profiled `model`; the script may train something else. Say so rather than mix the two.
+    obs["population"]["model_matches_config"] = (None if not (trained and declared)
+                                                 else trained.rstrip("/") == declared.rstrip("/"))
     return obs
 
 
