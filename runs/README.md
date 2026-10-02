@@ -28,15 +28,17 @@ loop from re-running something already tried.
 
 ## `ceiling.tsv` — the memory ledger, kept apart from the throughput one
 
-Ceiling trials (`frame/README.md`) run on **synthetic** max_len batches and answer *does it fit*,
-never *how fast*. Scoring them as experiments would rank throughput on fake data. They get their
-own file:
+Ceiling trials (`frame/README.md`) run on worst-case `max_len` batches (synthetic for our runner,
+Frame's `ceiling_rows.jsonl` for a user's script) and answer *does it fit*, never *how fast*.
+Scoring them as experiments would rank throughput on fake data. They get their own file, which
+`python -m frame.ceiling` appends to:
 
 ```
 seq_len	micro_batch	status	peak_gb	reserved_gb	config	note
 ```
 
-- One row per trial, written as the search runs. `config` — the memory knobs it was measured under.
+- One row per trial. `config`: every memory knob it was measured under, defaults included.
+  `note`: `CEILING` / `oom_at`, and `fresh` or `re-measure from <n>`.
 - **NEVER** put a ceiling trial in `results.tsv`, and never on the frontier.
 - Re-run the search when a memory knob moves; append the new trials, don't overwrite the old ones —
   the two ceilings side by side are the evidence for what that knob bought.

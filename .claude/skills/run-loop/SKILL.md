@@ -61,8 +61,10 @@ else is `key=value` or a bare flag. Unknown keys: stop and say which ones, don't
 - **`resume`:** `runs/<run_name>/` has to exist with `results.tsv` and `profile.json`. Re-check that
   the box is reachable and `torch.cuda.is_available()` (the box changes between runs). Read the full
   `results.tsv`, `research.md` and `ceiling.tsv`, then say in one short summary where the run stands:
-  best experiment, last experiment, and what was queued next. The ceiling is stale if the current
-  best config moves a knob it was measured under (`program.md` Step 4); re-measure it then. Continue
+  best experiment, last experiment, and what was queued next. Before the next probe, check the
+  ceiling with `python -m frame.ceiling --config <candidate> --run runs/<run>` (`program.md` Step 4):
+  it re-measures only if a memory knob moved. A `profile.json` from before 2026-10-02 stamps only
+  `dtype`, so it reads as stale once and gets one re-measure. Continue
   Step 4, numbering experiments after the last row. If `run.toml` no longer matches the run's
   `profile.json` on model, dataset, `max_len` or `effective_batch`, stop and say so. That is a new
   run, not a resume.
