@@ -27,7 +27,7 @@ else is `key=value` or a bare flag. Unknown keys: stop and say which ones, don't
 | `effective_batch=<N>` | `run.toml` `effective_batch` | Human-owned constant. Write it, never tune it |
 | `host=<user>@<ip>` | `backend`, `[ssh] host/user` | Sets `backend = "ssh"` and fills `[ssh]`. The credential stays in `.env` |
 | `local` | `backend` | Sets `backend = "local"` |
-| `gpu=<key>` | `run.toml` `gpu` | Must be a key in `profiler/roofline.py` `GPU_SPECS` |
+| `gpu=<label>` | `run.toml` `gpu` | A label for the record (e.g. `A10`, `A100`). Never looked up: the peak is measured on the card |
 | `script=<path>` | `run.toml` `script` | **Optional.** The user's own training script; probes then run it unchanged instead of our `frameworks/` runners (`program.md`, "Script mode"). Absent → our runners, as before. Repo-relative (the ssh backend runs the same path on the box) |
 | `script_configs=<path>[,<path>…]` | `run.toml` `script_configs` | **Only with `script`.** The config file(s) the script loads its settings from (a training YAML, a JSON, …), comma-separated. Absent → the settings live in the script itself (its flags, or hardcoded) |
 | `budget=<Nh>` or `budget=<N>x` | *(placeholder, not built)* | Reserved for a wall-clock (`8h`) or experiment-count (`40x`) limit. Accept it, echo it in the Step 3 summary as "noted, not enforced in v1", and otherwise ignore it. "NEVER stop" still applies |

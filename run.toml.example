@@ -6,7 +6,7 @@
 model           = "Qwen/Qwen2.5-0.5B"     # HF hub id or local path
 dataset         = "Salesforce/wikitext"   # HF hub id or local path
 name            = "wikitext-2-raw-v1"     # dataset config/subset; omit if the dataset has none
-gpu             = "A10G"                  # a key in profiler/roofline.py GPU_SPECS (A100 / H100 / A10G / L4)
+gpu             = "A10G"                  # a label for the record; never looked up (the peak is measured on the card)
                                            # single GPU only for now — frame/ has no multi-GPU support yet
 effective_batch = 16                      # human-owned target; off-limits, the loop only factorizes it (loop/throughput.md)
 max_len         = 2048                    # REQUIRED. the sequence length your application needs.
