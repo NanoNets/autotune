@@ -37,7 +37,26 @@ uv run pytest
 
 ## Running the agent
 
-Open the repo in [Claude Code](https://claude.com/claude-code) and use the bundled skill:
+Open the repo in [Claude Code](https://claude.com/claude-code). The bundled skill,
+[`.claude/skills/run-loop/SKILL.md`](.claude/skills/run-loop/SKILL.md), takes the whole run in one
+line:
+
+```
+/run-loop <run_name> model=<hf_id> dataset=<hf_id>[:<config>] max_len=<N> effective_batch=<N>
+          host=<user>@<ip> | local    gpu=<label>
+          [script=<path> [script_configs=<path>,...]]    [resume | review | smoke]
+```
+
+| Argument | Meaning |
+|---|---|
+| `model`, `dataset` | Hugging Face ids (`:config` picks a dataset subset) |
+| `max_len`, `effective_batch` | your training's sequence length and batch size; never changed |
+| `host` / `local` | where experiments run: a GPU box over SSH, or this machine |
+| `gpu` | a label for the record (the peak is measured on the card) |
+| `script`, `script_configs` | tune your own training script (and the config files it loads) instead of the built-in runner |
+| `resume` / `review` / `smoke` | continue a stopped run / write up a finished one / a CPU dry run |
+
+For example:
 
 ```
 /run-loop my_run model=Qwen/Qwen2.5-0.5B dataset=Salesforce/wikitext:wikitext-2-raw-v1 \
@@ -45,10 +64,8 @@ Open the repo in [Claude Code](https://claude.com/claude-code) and use the bundl
 ```
 
 It sizes up the job, shows you a summary to confirm, then runs unattended until you stop it.
-Results land in `runs/my_run/`. To tune **your own training script** (HF Trainer, TRL, a plain
-PyTorch loop) instead, add `script=path/to/train.py`; it runs unchanged. See
-[`examples/byo_script/`](examples/byo_script/). Later, `/run-loop my_run resume` picks up where it
-stopped.
+Results land in `runs/my_run/`. Your own script (HF Trainer, TRL, a plain PyTorch loop) runs
+unchanged; see [`examples/byo_script/`](examples/byo_script/).
 
 No Claude Code? Fill in `run.toml` and point any coding agent at `program.md`.
 
@@ -60,9 +77,26 @@ No Claude Code? Fill in `run.toml` and point any coding agent at `program.md`.
 - **A memory ceiling that's measured.** Real batches rarely hit the maximum length, so a config can
   pass every test and crash hours into training. autotune runs worst-case batches up front, and
   re-checks whenever a memory setting changes.
-- **A memory that compounds.** `experience/` keeps one record per run; `beliefs/` keeps claims like
-  "tf32 does nothing under bf16", each tied to the model family, card and data it was proven on.
-  The next run starts from them, and contributing what your run learned is a pull request.
+- **A memory that compounds.** Every run reads what earlier runs learned and writes back to it:
+
+```
+    run N                          shared memory                        run N+1
+ ┌─────────┐  writes a record   ┌──────────────────┐   run before?    ┌─────────┐
+ │  frame  │ ─────────────────▶ │ experience/      │ ───────────────▶ │  frame  │
+ │  probe  │                    │ one per run,     │  replay a match  │  probe  │
+ │  learn  │                    │ never edited     │                  │  learn  │
+ │         │  confirms, splits  ├──────────────────┤ priors for each  │         │
+ │         │  or deletes claims │ beliefs/         │    hypothesis    │         │
+ │         │ ─────────────────▶ │ one per claim,   │ ───────────────▶ │         │
+ └─────────┘                    │ curated          │                  └────┬────┘
+                                └──────────────────┘                       │
+                                                          writes back, and so on
+```
+
+  `experience/` is what happened: one dated record per run, never edited. `beliefs/` is what we
+  think: claims like "tf32 does nothing under bf16", each tied to the model family, card and data it
+  was shown on, strengthened or narrowed as runs confirm or contradict it. Contributing what your
+  run learned is a pull request.
 
 ## Project structure
 
