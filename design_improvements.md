@@ -21,7 +21,8 @@ the owning md, then delete the entry from here.
 
 ## 1. Replace the bisection with divisors + a memory curve
 
-**Status: open. Proposed, not implemented — `search()` still bisects.**
+**Status: the divisor search is decided as part of §7 (2026-10-02). The memory-curve fit is still
+open.**
 
 `find_ceiling` brackets by doubling and bisects to the exact ceiling (`1,2,4,8,16,12,10,11` = 8
 trials). Two problems:
@@ -210,82 +211,88 @@ discovered by a `ValueError` halfway through a booked GPU hour.
 
 ---
 
-## 7. The ceiling for a user's own training script
+## 7. The memory ceiling: lean trials, divisors only, re-measured on memory-knob changes, and for user scripts
 
-**Context:** bring your own script (`profiler/launch.py`). When the loop tunes a user's `train.py` through the
-launcher, `find_ceiling` (`frame/ceiling.py`, its `fits()` trial) can't run as it does today. It drives OUR
-runner with `data="synthetic"`, and a user's script has no such switch. Without a ceiling,
-`micro_batch` is unbounded again, and every probe measures memory on whatever rows it happened to
-draw. That is exactly the failure the ceiling exists to prevent (`frame/README.md`). This is the most
-important gap in the user-script path.
+**Status: decided, implemented and verified on an A10, 2026-10-02 (`frame/ceiling.py`,
+`frame/ceiling_rows.py`, `profiler/memtrial.py`; `docs/verification/ceiling.md`, 22/22 rows).** This
+replaces the 2026-09-25 decision that stood here, and it adopts §1's divisor search (§1's
+memory-curve fit stays open). Today's process and its
+gaps are below so the change can be checked against them.
 
-**The claim that it can't be measured was too strong.** With a torch `DataLoader`, the worst
-case is reachable through public attributes (torch 2.13 `dataloader.py`):
-- `loader.dataset` (`:300`)
-- `loader.collate_fn` (`:421`)
-- `loader.batch_size` (`:409`)
+**Today.** Frame runs `find_ceiling` once (`frame/profile.py`) when `--ceiling` is set. Each trial is
+a full `capture()` (2 warmup + 2 timed + 1 profiled step) on our runner with `data="synthetic"`, and
+the search doubles then bisects (4-8 trials). Gaps:
+- **The stamp is nearly empty.** Frame passes only `{device, dtype, model, dataset}`, so the
+  record's `config` holds only `dtype`, and `is_stale` reads a change of compile, checkpointing or
+  attention as **not stale**.
+- **Nothing calls `is_stale`.** Re-measuring is a rule the agent has to remember (`program.md`
+  Step 4).
+- **There is no re-measure command.** Past runs used an ad-hoc, gitignored
+  `tmp_scripts/ceiling_recheck.py` (24, 21 and 33 trials across the three real runs).
+- **User scripts have no ceiling.** `find_ceiling` needs our runner's `data="synthetic"` switch,
+  so `program.md` holds a script's micro-batch at its baseline value, and the limit is found by a
+  probe that runs out of memory (`experience/my_byo_yaml.md`: micro-batch 32).
 
-**A dataset-aware worst case** follows from them:
-1. Measure every row's length (`len(input_ids)`, cheap on an Arrow-backed HF dataset).
-2. Take the `micro_batch` longest rows, truncated at `max_len`.
-3. Pass them through the script's own `collate_fn`.
+**The design.**
 
-That gives the widest batch *this* dataset can produce, in exactly the format the model sees. When
-fewer than `micro_batch` rows reach `max_len`, it is narrower than `[micro_batch, max_len]`, so
-the real ceiling is higher than the synthetic one.
+| | Today | Decided |
+|---|---|---|
+| A trial | a full `capture()`: 5 steps, timed and profiled | **memory-only: 2-3 optimizer steps**, no timing, no profiler. Reports `ok` / `oom` and the peak (`max_memory_allocated` / `max_memory_reserved`). Step 1 can't be the answer: AdamW allocates its state during step 1's `opt.step()`, so the steady-state peak first appears at step 2. Step 3 covers CUDA-graph pools (compile `reduce-overhead` / `max-autotune`) and early allocator growth |
+| Which micro-batches | doubling, then bisect (e.g. lands on 11) | **divisors of `effective_batch` only**, ascending, stop at the first OOM (at most 5 trials for 16, 6 for 32). Each trial runs at accumulation 1: accumulation doesn't change the peak |
+| The stamp | `dtype` only | **every memory knob, defaults included** (resolved from the runner's or script's effective config), so any change is detected |
+| When | once at Frame; re-measures by hand | **once at Frame, then before any probe whose config moves a memory knob** away from the stamp (`is_stale`). Micro-batch, accumulation and other non-memory knobs never trigger one |
+| A re-measure | from scratch | **from the previous ceiling**: after a change that frees memory, try the next divisor up until one fails; after one that adds memory, step down until one fits. Usually 1-2 trials |
+| Who runs it | Frame code, or the agent's own script | **one entry point** for both, with results appended to `runs/<run>/ceiling.tsv` and the Profile's ceiling replaced |
+| `effective_batch` | fixed | fixed |
 
-**A synthetic `max_len` probe is also a data change, not a new mechanism.** Either:
-- **Config:** the agent writes a small file of rows that tokenize past `max_len` and points the
-  probe's YAML at it (swift / axolotl / LLaMA-Factory take dataset paths). No patching;
-  framework-specific file format.
-- **Batch substitution:** during a ceiling probe, the loader yields the worst-case batch instead
-  of real ones. Framework-agnostic, but it alters data. Acceptable only for a memory probe the
-  contract already marks `probe_kind: synthetic_ceiling` and never scores for throughput.
+A trial and a probe are different things: a ceiling run is a set of trials (at most ~5 at Frame,
+1-2 for a re-measure) and none of them is ever a `results.tsv` row. A trial's extra cost over a
+probe's startup (process start, model load, compile if on) is only its 2-3 steps.
 
-**What makes it hard:**
+**User scripts.** Micro-batch is a lever for a script like for our runner, bounded by the
+ceiling; only `effective_batch` is fixed. That replaces `program.md`'s "don't raise the micro-batch
+above the baseline" rule. A trial is one launch of the script in a **memory-only launcher mode**
+(the same 2-3 steps), on a synthetic data file the script reads through its own data setting:
+- **The data file.** Frame writes `runs/<run>/ceiling_rows.jsonl` once per run:
+  `effective_batch × 3` rows, each encoding to at least `max_len` tokens with the model's tokenizer
+  (random ids decoded to text, special tokens excluded, re-encoded to check), so the script's own
+  truncation cuts every row to exactly `max_len`. The rows use the user dataset's schema: the long
+  text goes in the tokenized column (`--text-field`); for chat or prompt/completion data the agent
+  gives Frame a one-row template from the real data. Plain JSON lines with no header, which
+  `load_dataset("json", data_files=...)` and framework dataset-path options read directly.
+- **Pointing the script at it.** The knob audit (`program.md` Step 2a) also records where the
+  script's data source is set:
 
-| Situation | Problem |
-|---|---|
-| Streaming / `IterableDataset` | no `len`, no random access. Finding the longest rows means one full pass (cacheable, possibly unbounded) |
-| Tokenization in `__getitem__` / `collate_fn` | length is only known after the transform, so the scan runs it on every row |
-| Length isn't what sets memory | images per row (multimodal), routing (MoE) |
-| Getting the loader object | public for HF (`train_dataloader` is passed to `TrainerCallback`s). In a raw loop, only via the iterator's private `_dataset` / `_collate_fn` or a patched `DataLoader.__iter__` |
-| **Cost: one launch per trial** | the bisection needs ~2·log₂(n) trials. Our runner survives an OOM in-process; a user's script doesn't (the exception escapes `trainer.train()`). So each trial is a separate launch, and each launch reloads the checkpoint with `from_pretrained`. That's minutes per trial for a 7B model |
+  | Data source | A trial points at the file through |
+  |---|---|
+  | a flag | `script_args` |
+  | a config key | a per-trial config copy, `runs/<run>/probes/ceiling_mbN.yaml` (data path, micro-batch N, accumulation 1, 3 steps) |
+  | hardcoded, or a hub id only (`load_dataset("org/name")`) | the Step 2b question, as for any hardcoded setting: move it to a config or a flag, on a copy |
+  | declined | no ceiling; said at Step 3, and an OOM probe stays the only way to find the limit |
 
-**Options, cheapest measurement first:**
-1. Separate launch per trial, bisection seeded by the dataset-aware worst case (fewer trials).
-2. **In-process trials.** After the script has built its model and optimizer (both reachable
-   from the hooks), run the fwd/bwd/step trials ourselves on worst-case batches, in one launch.
-   That keeps the script's model setup (autocast wrapper, checkpointing, attention
-   implementation) and bypasses its loop and loss. Fine for memory, but it needs checking.
-3. Analytical estimate only (`frame/memory.py`). Weaker: `beliefs/synthetic-ceiling-
-   underestimates-real-peak.md` says even the measured ceiling runs low.
+  The file goes in `script_files`, so the ssh backend pushes it (it is under `runs/`).
+- **Pre-tokenized or cached data** (Arrow / `.bin` from a separate preprocessing step): Frame
+  writes the ceiling rows in that format, or the agent runs the user's preprocessing on
+  `ceiling_rows.jsonl`, whichever the script's pipeline allows.
+- **Each trial checks the file was used.** The launcher's per-module token hook sees every model
+  input; every step must be `[N, max_len]`, or the trial fails naming the shape it saw. That
+  catches a data setting the script ignored, a framework that drops or splits over-length rows,
+  packing, and a script whose real sequence length differs from `run.toml`'s (then the ceiling is
+  measured at the script's length).
 
-**Decided (2026-09-25): the synthetic-dataset config route.** A torch `DataLoader` is assumed, so
-the probe config points the script's own data setting at a small synthetic file of rows that
-tokenize past `max_len`. The framework's own template, collator and loader then build
-worst-case batches in exactly the real format. No patching.
-- One launch per bisection trial: an OOM ends a user's run.
-- When the ceiling goes stale, re-measure **from the previous ceiling** (step up if it still
-  fits, down if it OOMs; typically 1–3 trials), not from scratch.
-- Every trial checks its batch shape from the trace (`Input Dims` of the embedding) and fails
-  loudly unless it's `[micro_batch, max_len]`. This catches frameworks that drop or split
-  over-length rows.
+**Why it might be wrong:**
+- 2-3 steps may understate fragmentation more than 5 did; that's §5's limitation, not new, and
+  `card_frac` still drives the margin note.
+- Some frameworks build their dataset in a separate preprocessing pass the probe config can't
+  redirect; those take the pre-tokenized route above.
+- Under compile, every trial pays compilation, so a re-measure that starts from the previous
+  ceiling matters more there.
 
-**Prerequisite, done:** the launcher reports a CUDA OOM as `status: "oom"`, with memory at
-failure. `find_ceiling` refuses `error` as a memory answer, and reads only `oom` as "doesn't
-fit". Tested on CPU (`tests/test_launch.py`) and with a real OOM on the A10 (SmolLM2-360M,
-micro-batch 64; and `docs/verification/byo_script.md` row 14).
-
-**Experiment that would settle it:** on one model and config, through `profiler/launch.py`,
-compare three ceilings:
-- (a) today's synthetic `find_ceiling`;
-- (b) the dataset-aware worst case, one launch per trial;
-- (c) the same, in-process.
-
-It settles it if (b) and (c) agree with each other and are ≥ (a) wherever the dataset has fewer
-than `micro_batch` rows at `max_len`. If (c) matches (b), option 2 wins on cost.
-
+**What would settle it:** the A10 matrix (to be recorded in `docs/verification/`): the new search
+reproduces `test_a10G`'s measured ceilings (2, compile 4, checkpointing 8, at `max_len` 2048) as
+divisor answers, 2-3 steps give the same answer as 5, re-measures land in 1-2 trials, and a script
+ceiling matches the probe OOM already observed for SmolLM2-360M at seq 512 (micro-batch 16 fits,
+32 does not).
 ---
 
 ## 8. Define the noise floor between launches, not within one

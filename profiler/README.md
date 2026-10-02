@@ -245,6 +245,7 @@ the **attached capture** instead, started by `python -m profiler.launch -- train
 | `attach.py` | step boundary = torch's public optimizer post-hook; clean timing; **tokens counted on every clean step** by a per-module pre-hook on the model (padded `input_ids.numel()`, as the runners count); one profiled step with `record_shapes=True` |
 | `derive.py` | torch-free: forward / backward / dataloader spans and the micro-batch count, read from torch's own trace events (the script has no `record_function` labels) |
 | `nopatch.py` | guard: the run fails if any torch function was replaced or a global module hook is left registered |
+| `memtrial.py` | `launch.py --memory-only`: a ceiling trial. Counts optimizer steps, stops the script after N (default 3), reads the allocator's peaks, and checks every model input is `[micro_batch, max_len]`. No timing, no profiler |
 
 **How it differs from `capture()`, recorded in `population`** (`driver: "script"`):
 - **The clean window is a fixed stretch of the script's own loader** (`clean_window:

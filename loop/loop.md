@@ -72,8 +72,9 @@ Propose the next Config.
 - Keep a **frontier**, not one best: roles — best (throughput), lean (memory), diverse (different strategy). **Cross over** complementary winners.
 - Every Config carries a rationale and an expected outcome.
 - **Check the ceiling is still valid** before proposing a `micro_batch`. It was measured under one
-  set of memory knobs (recompute, attn_kernel, optimizer, dtype, sharding) and is stale the moment
-  one moves. Stale → re-measure, then hypothesize against the new bound. A ceiling that widens on
+  set of memory knobs (recompute, attention, optimizer, dtype, sharding, compile, chunked CE) and is
+  stale the moment one moves. Stale → re-measure from the previous ceiling
+  (`python -m frame.ceiling`, `frame/README.md`), then hypothesize against the new bound. A ceiling that widens on
   `recompute` is a *result*, not an inconvenience.
 
 

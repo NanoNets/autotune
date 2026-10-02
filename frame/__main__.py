@@ -6,9 +6,14 @@ Prints the one-line summary, any notes, and the full Profile JSON. Needs transfo
 the OOM ceiling is measured at. Without it there is no worst case to measure against.
 
 `--ceiling` measures that ceiling with `--framework`'s real runner — it loads real weights and
-runs a real fwd/bwd/opt on worst-case batches, so the number is one to tune against. It costs
-~2*log2(n) short trials. Without the flag the Profile carries `ceiling: null`, and the summary
-says so rather than implying a ceiling was checked.
+runs a real fwd/bwd/opt on worst-case batches, so the number is one to tune against. Each trial
+is 3 optimizer steps at one divisor of `--effective-batch` (at most ~5 trials). Without the flag
+the Profile carries `ceiling: null`, and the summary says so rather than implying a ceiling was
+checked.
+
+`--ceiling-rows-out runs/<run>/ceiling_rows.jsonl` writes the over-length rows a user's script
+reads in its ceiling trials (`frame/ceiling_rows.py`); its ceiling is then measured through the
+backend with `python -m frame.ceiling` (`frame/README.md`).
 """
 import argparse
 import dataclasses
@@ -43,6 +48,12 @@ def main():
     ap.add_argument("--ceiling", action="store_true",
                     help="measure the OOM ceiling at --max-len using --framework's real runner")
     ap.add_argument("--seed", type=int, default=0, help="seed for the synthetic batches")
+    ap.add_argument("--ceiling-rows-out", default=None,
+                    help="user script: write its ceiling-trial rows here, e.g. runs/<run>/ceiling_rows.jsonl")
+    ap.add_argument("--ceiling-row-template", default=None,
+                    help='one row as JSON with "{TEXT}" where the long text goes (chat / prompt data)')
+    ap.add_argument("--ceiling-rows-format", default="text", choices=("text", "ids"),
+                    help="text rows (default) or pre-tokenized input_ids rows")
     a = ap.parse_args()
 
     runner = None
@@ -60,7 +71,11 @@ def main():
               framework=a.framework, effective_batch=a.effective_batch,
               text_field=a.text_field, split=a.split, sample=a.sample, name=a.name,
               runner=runner, seed=a.seed, on_trial=on_trial, sample_path=a.sample_out,
-              sample_seed=a.sample_seed, max_scan=a.max_scan)
+              sample_seed=a.sample_seed, max_scan=a.max_scan,
+              ceiling_rows_path=a.ceiling_rows_out, ceiling_row_template=a.ceiling_row_template,
+              ceiling_rows_format=a.ceiling_rows_format)
+    if a.ceiling_rows_out:
+        print(f"frame: ceiling rows written to {a.ceiling_rows_out} (point the script's data at it)")
     if a.sample_out:
         print(f"frame: probe sample written to {a.sample_out} (pass it to probes as sample_file)")
     print(p.summary)

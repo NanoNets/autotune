@@ -8,7 +8,7 @@ ceiling on real data is hoping to hit the worst case; this manufactures it.
 
 Activation memory is a function of SHAPE, not of content, so the worst case can be built from
 nothing: every sequence exactly `seq_len`, attention mask all ones (no padding, no early exit,
-full attention matrix). No dataset, no tokenizer, no dataloader — which is what makes bisecting
+full attention matrix). No dataset, no tokenizer, no dataloader — which is what makes searching
 the ceiling cheap enough to do before the loop starts.
 
 `spec(...)` is pure (shape + validation); `random_batch(...)` is the torch shell.

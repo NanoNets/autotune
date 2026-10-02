@@ -1,6 +1,6 @@
 """A plain PyTorch training loop (no Trainer): argparse flags, a torch DataLoader, grad accumulation.
 
-  python torch_flags.py --max-steps 100 --micro-batch 8 --grad-accum 4
+  python torch_flags.py --max-steps 100 --micro-batch 8 --grad-accum 4 [--data-path rows.jsonl]
 """
 import argparse
 import os
@@ -11,7 +11,7 @@ from torch.utils.data import DataLoader
 from transformers import AutoModelForCausalLM
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from _data import RandomTokens  # noqa: E402
+from _data import JsonlText, RandomTokens, pad_collate, tokenizer_for  # noqa: E402
 
 
 def main():
@@ -23,12 +23,18 @@ def main():
     ap.add_argument("--seq-len", type=int, default=512)
     ap.add_argument("--workers", type=int, default=0)
     ap.add_argument("--attn", default="sdpa")
+    ap.add_argument("--data-path", default=None, help="JSON lines of {\"text\": ...}; unset -> random")
     a = ap.parse_args()
     torch.manual_seed(42)
     model = AutoModelForCausalLM.from_pretrained(a.model, dtype=torch.bfloat16,
                                                  attn_implementation=a.attn).cuda()
-    loader = DataLoader(RandomTokens(model.config.vocab_size, a.seq_len), batch_size=a.micro_batch,
-                        shuffle=True, num_workers=a.workers, pin_memory=True,
+    if a.data_path:
+        tok, pad = tokenizer_for(a.model)
+        data, collate = JsonlText(a.data_path, tok, a.seq_len), pad_collate(pad)
+    else:
+        data, collate = RandomTokens(model.config.vocab_size, a.seq_len), None
+    loader = DataLoader(data, batch_size=a.micro_batch, shuffle=True, num_workers=a.workers,
+                        pin_memory=True, collate_fn=collate,
                         generator=torch.Generator().manual_seed(42))
     opt = torch.optim.AdamW(model.parameters(), lr=1e-4)
     it = iter(loader)

@@ -102,24 +102,25 @@ it's a wrong recommendation.
 So the worst case is **manufactured, not sampled**: every sequence exactly `max_len`, attention
 mask all ones, ids drawn uniformly from the vocab and seeded (`frame/synthetic.py`). Activation
 memory is a function of shape, not content — which is why this is sound, and why it needs no
-dataset, no tokenizer and no dataloader. Then `frame/ceiling.py` brackets the boundary by doubling
-and bisects it: **~2·log₂(n) trials of a few seconds each**, not a linear walk.
+dataset, no tokenizer and no dataloader.
+
+**A trial is memory-only:** 3 optimizer steps at one micro-batch, accumulation 1, no timing, no
+profiler, then `ok` / `oom` / `error`. Step 1 alone isn't the answer (AdamW allocates its state
+during step 1's `opt.step()`, so the steady-state peak first appears at step 2); step 3 covers
+CUDA-graph pools and early allocator growth. **Only divisors of `effective_batch` are tried**,
+ascending, stopping at the first OOM: micro_batch must divide it, so at most 5 trials for 16, and
+never a number like 11 that no config can use.
 
 ```
-frame: measuring the memory ceiling at max_len=2048 (synthetic, seed 0)
-  mb=1   ok    peak  8.9GB
-  mb=2   ok    peak 10.4GB
-  mb=4   ok    peak 13.4GB
-  mb=8   ok    peak 19.5GB
-  mb=16  oom   reached 22.0GB
-  mb=12  oom   reached 22.1GB
-  mb=10  ok    peak 21.4GB
-  mb=11  ok    peak 21.9GB      ← ceiling
+frame: measuring the memory ceiling at max_len=2048 (synthetic, seed 0, framework=hf)
+  mb=1     ok    peak 8.9GB
+  mb=2     ok    peak 15.0GB      ← ceiling
+  mb=4     oom   peak n/a
 ```
 
-**What this buys the loop:** `micro_batch` stops being an unbounded search dimension. With
-`effective_batch = 16`, micro_batch must divide 16, so the ceiling of 11 leaves `{1, 2, 4, 8}` —
-and `16` is eliminated *before* the loop spends a 5-minute probe watching it crash.
+**What this buys the loop:** `micro_batch` stops being an unbounded search dimension. The record's
+`micro_batch_max` is the largest legal micro_batch that fits, and anything above it is eliminated
+*before* the loop spends a probe watching it crash.
 
 **Read the record, don't just read the number:**
 
@@ -129,7 +130,8 @@ and `16` is eliminated *before* the loop spends a 5-minute probe watching it cra
 | `capped` | `true` → the search hit `effective_batch`; the real ceiling is higher, memory isn't binding |
 | `oom_at` | the smallest micro_batch that failed |
 | `frag_gb` / `card_frac` | how close to the edge. Fixed-shape probing does NOT reproduce the fragmentation varying real lengths cause — at a high `card_frac`, keep a margin below the ceiling rather than running at it |
-| `config` | **the knobs it was measured under.** This is how a stale ceiling is detected |
+| `config` | **every memory knob it was measured under, defaults included** (the stamp). This is how a stale ceiling is detected |
+| `effective_batch` / `steps_per_trial` / `remeasured_from` | the divisor set it searched, the trial length, and the ceiling a re-measure started from |
 
 ### Rules
 
@@ -149,13 +151,28 @@ and `16` is eliminated *before* the loop spends a 5-minute probe watching it cra
   measured moving a ceiling from 2 to 4: Inductor fuses the cross-entropy and never materializes
   the fp32 logits copies, cutting peak memory 5.4GB
   (`beliefs/compile-cuts-memory-not-just-time.md`). Before trusting a ceiling, compare the
-  Config against the record's `config` (`frame.ceiling.is_stale`). Moved → **re-measure**, don't
-  extrapolate. Turning on `recompute`
-  can easily take a ceiling of 11 to 32; the search space is meant to widen on that evidence.
+  Config against the record's stamp (`frame.ceiling.is_stale`). Moved → **re-measure**, don't
+  extrapolate. Turning on `recompute` can easily take a ceiling of 8 to 32; the search space is
+  meant to widen on that evidence. Micro-batch, accumulation, padding, workers and other
+  non-memory knobs never make it stale.
+- **Re-measure before the probe that moves a memory knob,** through the same backend a probe uses:
+
+  ```bash
+  python -m frame.ceiling --config runs/<run>/candidate.json --run runs/<run>
+  ```
+
+  `candidate.json` is the probe config you are about to run (what you'd pass to `backends.run`).
+  Not stale → it says so and runs nothing. Stale → it searches **from the previous ceiling**: the
+  next divisor up first, climbing while it fits; if that fails, the previous ceiling itself, then
+  down. Usually 1-2 trials. The trials are appended to `runs/<run>/ceiling.tsv`, the Profile's
+  `ceiling` is replaced (the old one kept under `ceiling_history`), and `knobs.micro_batch.max`
+  follows. Ceiling trials are never `results.tsv` rows.
 - **Measure it with the REAL training step.** A ceiling measured on a different workload describes
   that workload, not this job. `--ceiling` uses `--framework`'s real runner (`frameworks/hf.py`
   loads real weights and runs a real fwd/bwd/opt); `frame.profile.frame(..., runner=...)` takes one
   directly. Constructing a runner is never implicit — no `runner`, no ceiling.
+- **User scripts get a ceiling too** (see below), so micro_batch is a lever for a script exactly as
+  for our runner. Only `effective_batch` is fixed.
 - **The bound lands on the knob.** `build()` stamps `micro_batch.max` from the measured ceiling
   (`_bound_knobs`). A framework's `knobs()` can only declare `min: 1` — it takes no arguments and
   cannot know a per-card measurement — so without this the SearchSpace would advertise an unbounded
@@ -189,7 +206,34 @@ Qwen2ForCausalLM (gqa, bfloat16) | 0.5B params | A10G 24.0GB x1 | peak 121 TFLOP
 
 `--max-len` is **required** — without it there is no worst case to measure against. `--ceiling`
 runs the search with `--framework`'s real runner, so the number is one to tune against; it costs
-~2·log₂(n) short trials. Omit it and the Profile carries `ceiling: null`.
+at most one 3-step trial per divisor of `--effective-batch`. Omit it and the Profile carries
+`ceiling: null`.
+
+### User scripts
+
+A user's script has no `data="synthetic"` switch, so the worst case reaches it as **data**:
+
+1. **Frame writes the rows**, once per run: `--ceiling-rows-out runs/<run>/ceiling_rows.jsonl`
+   (`frame/ceiling_rows.py`). `effective_batch × 3` rows, each encoding to more than `max_len`
+   tokens with the model's tokenizer, so the script's own truncation cuts every one to exactly
+   `max_len`. Random tokens decoded to text, special tokens excluded. The long text goes in
+   `--text-field`; for chat or prompt / completion data pass `--ceiling-row-template` (one real
+   row as JSON, with `"{TEXT}"` where the long text goes). `--ceiling-rows-format ids` writes
+   `{"input_ids": [...]}` rows of exactly `max_len` ids for pre-tokenized pipelines; for a separate
+   preprocessing step (`.pt` / Arrow), run the user's own preprocessing on the text rows instead.
+2. **The candidate config points the script at them**, wherever the knob audit found its data
+   source (`program.md` Step 2a): a flag → `script_args`; a config key → a template
+   (`ceiling_templates: {"runs/<run>/probes/ceiling_mb{micro_batch}.yaml": "runs/<run>/probes/ceiling.yaml"}`)
+   rendered per trial; hardcoded, or a hub id only → the Step 2b question first. `{micro_batch}`
+   is filled in per trial in `script_args` and templates; set accumulation to 1 and the script's
+   step budget to at least 3. The config also carries `memory_knobs`: the script's current value
+   for every memory knob, under the script's own names (that is the stamp).
+3. **`python -m frame.ceiling --config ... --run runs/<run>`** measures it (fresh the first time,
+   from the previous ceiling after that). Each trial is one launch under `profiler.launch
+   --memory-only`, which stops the script after 3 optimizer steps and **checks every batch is
+   `[micro_batch, max_len]`**. Any other shape fails the trial with the shape it saw: the script
+   ignored the rows, dropped / split / packed them, or runs at another sequence length (then
+   re-run Frame at the script's real length).
 
 `--sample` is rounded down to a multiple of `--effective-batch` (1000 → 992 at 16), so one pass over
 the probe sample is whole optimizer steps. The pool streams the whole split by default: seconds for
@@ -305,7 +349,8 @@ needed, a **shell** that hits the hub or the card.
 | `memory.py` | analytical weights/grads/optimizer breakdown |
 | `synthetic.py` | worst-case batch at `max_len` — every sequence full length, seeded |
 | | *consumed by `frameworks/hf.py` (`data="synthetic"`) and `frameworks/torch.py`* |
-| `ceiling.py` | `search` = the pure double-then-bisect ladder; `find_ceiling` = the live search |
+| `ceiling.py` | `search_divisors` (pure), `stamp` / `is_stale`, the trial providers (`runner_trial` in-process, `backend_trial` via `backends.run`), `find_ceiling` (Frame), and `python -m frame.ceiling` (re-measure) |
+| `ceiling_rows.py` | the over-length rows a user's script reads in a ceiling trial |
 | `profile.py` | assemble the `Profile` (`build` = pure; `frame` = live end-to-end) |
 | `__main__.py` | the `python -m frame` CLI |
 
@@ -326,8 +371,8 @@ Qwen2ForCausalLM (gqa, bfloat16) | 0.5B params | A10G 22.1GB x1 | peak 89 TFLOP/
 ```
 
 **Single-GPU** for now; multi-GPU and reading `run.toml` / writing `runs/<id>/profile.json` are
-deferred. The ceiling is built, unit-tested, and wired to the real `frameworks/hf.py` runner; it
-still wants a **GPU validation run** — every trial's memory field is `None` off-GPU, so only a real
-card exercises the bisection against actual OOMs. A second ceiling at the dataset's `p99` — whose
+deferred. The ceiling has run on A10 and A100 cards (`runs/*/ceiling.tsv`). The memory-only,
+divisor-only search and the user-script path (2026-10-02) are unit-tested on CPU; their GPU
+verification is `docs/verification/ceiling.md`. A second ceiling at the dataset's `p99` — whose
 gap from the `max_len` ceiling estimates what `packing` is worth — is one extra
 `find_ceiling(..., seq_len=p99)` call, not yet wired into `frame()`.

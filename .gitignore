@@ -46,3 +46,6 @@ runs/*
 
 # throwaway/dev scripts (live GPU validation harnesses, one-off probes)
 tmp_scripts/
+
+# Example dataset files written by examples/byo_script/make_data.py / prep.py on the box
+examples/byo_script/data/

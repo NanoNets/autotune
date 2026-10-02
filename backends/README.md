@@ -97,6 +97,12 @@ backends/local.py: run_script → python -m profiler.launch --out cap.json -- <s
 
 ssh and modal reach this through `backends.local.run` on the box, so all three backends support it.
 
+**Ceiling trials** use the same path with `probe_kind: "ceiling_trial"` (built by `frame.ceiling`,
+never by hand): a memory-only run of `trial_steps` optimizer steps at `micro_batch`, returning
+`{"status": ok|oom|error, "peak_gb", "reserved_gb", ...}` instead of an Observation. For our runner
+it's worst-case synthetic batches; for a script, `profiler.launch --memory-only` on the ceiling
+rows, with every batch checked to be `[micro_batch, max_len]` (`frame/README.md`, "User scripts").
+
 ```python
 from backends import run
 

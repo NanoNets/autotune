@@ -26,6 +26,12 @@ How the run ended decides what `--out` says, with the same statuses `capture()` 
   | torch left patched (nopatch guard)  | error          | overrides any status above, `ok` included    |
   | invalid warmup / clean settings     | error          | before the script starts                     |
 
+`--memory-only --steps N [--expect-shape B,S]` runs a ceiling trial instead (`profiler/memtrial.py`):
+no timing, no profiler. The script is stopped after N optimizer steps, and `--out` holds
+`{"trial": {"status", "error", "steps", "shapes_seen", "peak_gb", "reserved_gb", "total_gb"}}`:
+`ok` (fits), `oom` (doesn't), or `error` (a crash, too few steps, or a batch that wasn't
+`[B, S]`, which means the trial measured some other workload).
+
 The exception is re-raised after `--out` is written, so the process still exits non-zero and
 the full traceback still reaches stderr. A process killed outright (OOM killer, SIGKILL,
 `os._exit`) writes nothing; treat a missing `--out` as an error.
@@ -80,10 +86,15 @@ def main():
     ap.add_argument("--clean", type=int, default=10)
     ap.add_argument("--peak-flops", type=float, default=None, help="frozen ceiling (else measured)")
     ap.add_argument("--peak-bw", type=float, default=None, help="frozen ceiling (else measured)")
+    ap.add_argument("--memory-only", action="store_true", help="a ceiling trial: memory, no timing")
+    ap.add_argument("--steps", type=int, default=3, help="memory-only: optimizer steps to run")
+    ap.add_argument("--expect-shape", default=None, help="memory-only: B,S every batch must have")
     a = ap.parse_args(ours)
     if not theirs:
         raise SystemExit("no script given after --")
     script = os.path.abspath(theirs[0])
+    if a.memory_only:
+        return _memory_trial(a, script, theirs)
 
     try:                                                         # bad settings: say so in --out,
         att = Attach(device=a.device, warmup=a.warmup, clean_steps=a.clean, dtype=a.dtype,
@@ -135,6 +146,51 @@ def main():
             rec["capture"]["error"] = str(guard)
             _write(a.out, rec)
             raise
+
+
+def _run_script(script, theirs):
+    sys.argv = theirs                                            # the script sees its own argv
+    sys.path[0] = os.path.dirname(script)                        # ...and its own directory
+    runpy.run_path(script, run_name="__main__")
+
+
+def _memory_trial(a, script, theirs):
+    """A ceiling trial: run the script for `--steps` optimizer steps, record memory, stop it."""
+    from profiler.memtrial import MemoryTrial, TrialDone
+    try:
+        expect = tuple(int(x) for x in a.expect_shape.split(",")) if a.expect_shape else None
+        trial = MemoryTrial(device=a.device, steps=a.steps, expect_shape=expect)
+    except ValueError as e:
+        _write(a.out, {"trial": {"status": "error", "error": f"invalid trial settings: {e}"}})
+        raise SystemExit(2)
+    before = nopatch.snapshot()
+    trial.install()
+    exc = None
+    try:
+        _run_script(script, theirs)
+    except TrialDone:                                            # the answer is in: stop here
+        pass
+    except BaseException as e:
+        exc = e
+    finally:
+        trial.uninstall()
+    status, error = _classify(exc)
+    if status is None:
+        if trial.n >= trial.steps:
+            status = "ok"
+        else:                                                    # ended by itself, too early
+            status, error = "error", (f"script ended after {trial.n} optimizer steps; "
+                                      f"needs {trial.steps}")
+    rec = {"trial": trial.result(status, error)}
+    try:
+        nopatch.verify(before)
+    except SystemExit as guard:
+        rec["trial"]["status"], rec["trial"]["error"] = "error", str(guard)
+        _write(a.out, rec)
+        raise
+    _write(a.out, rec)
+    if exc is not None and not isinstance(exc, SystemExit):
+        raise exc                                                # the traceback reaches stderr
 
 
 if __name__ == "__main__":
