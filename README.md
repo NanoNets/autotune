@@ -37,37 +37,21 @@ uv run pytest
 
 ## Running the agent
 
-Open the repo in [Claude Code](https://claude.com/claude-code). The bundled skill,
-[`.claude/skills/run-loop/SKILL.md`](.claude/skills/run-loop/SKILL.md), takes the whole run in one
-line:
+Open the repo in [Claude Code](https://claude.com/claude-code) and run the
+[`/run-loop`](.claude/skills/run-loop/SKILL.md) skill:
 
 ```
-/run-loop <run_name> model=<hf_id> dataset=<hf_id>[:<config>] max_len=<N> effective_batch=<N>
-          host=<user>@<ip> | local    gpu=<label>
-          [script=<path> [script_configs=<path>,...]]    [resume | review | smoke]
+/run-loop <run_name> model=<hf_id> dataset=<hf_id>[:<config>] max_len=<N> effective_batch=<N> \
+          host=<user>@<ip> gpu=<label> [script=<train.py>] [resume | review]
 ```
-
-| Argument | Meaning |
-|---|---|
-| `model`, `dataset` | Hugging Face ids (`:config` picks a dataset subset) |
-| `max_len`, `effective_batch` | your training's sequence length and batch size; never changed |
-| `host` / `local` | where experiments run: a GPU box over SSH, or this machine |
-| `gpu` | a label for the record (the peak is measured on the card) |
-| `script`, `script_configs` | tune your own training script (and the config files it loads) instead of the built-in runner |
-| `resume` / `review` / `smoke` | continue a stopped run / write up a finished one / a CPU dry run |
-
-For example:
 
 ```
 /run-loop my_run model=Qwen/Qwen2.5-0.5B dataset=Salesforce/wikitext:wikitext-2-raw-v1 \
           max_len=2048 effective_batch=16 host=ubuntu@<gpu-box> gpu=A10
 ```
 
-It sizes up the job, shows you a summary to confirm, then runs unattended until you stop it.
-Results land in `runs/my_run/`. Your own script (HF Trainer, TRL, a plain PyTorch loop) runs
-unchanged; see [`examples/byo_script/`](examples/byo_script/).
-
-No Claude Code? Fill in `run.toml` and point any coding agent at `program.md`.
+The agent confirms the setup with you, then runs until you stop it. Results go to `runs/my_run/`.
+Add `script=` to tune your own training script ([examples](examples/byo_script/)).
 
 ## Our contributions
 
