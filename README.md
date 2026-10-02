@@ -1,6 +1,8 @@
-# autotune
+<h1 align="center">autotune</h1>
 
-
+<p align="center">
+  <img src="docs/assets/progress_test_a10G.png" alt="An autotune run on an A10: 4.3 to 108.6 samples/s in 23 experiments" width="800">
+</p>
 
 The idea: give an AI agent your training job and a GPU, and let it find the fastest configuration
 overnight. It profiles a real training step, works out where the time goes, changes one setting,
@@ -25,16 +27,13 @@ length are off-limits, so a faster config is never a worse model.
 
 ## Quick start
 
-**Requirements:** a single NVIDIA GPU (local, over SSH, or on Modal), Python 3.11+,
-[uv](https://docs.astral.sh/uv/).
+**Requirements:** a single NVIDIA GPU (local, over SSH, or on Modal), Python 3.11+, [uv](https://docs.astral.sh/uv/).
 
 ```bash
 git clone https://github.com/NanoNets/autotune && cd autotune
 uv sync
 uv run pytest
 ```
-
-
 
 ## Running the agent
 
@@ -70,12 +69,6 @@ For example:
 /run-loop my_run model=Qwen/Qwen2.5-0.5B dataset=Salesforce/wikitext:wikitext-2-raw-v1 \
           max_len=2048 effective_batch=16 host=ubuntu@<gpu-box> gpu=A10
 ```
-
-It sizes up the job, shows you a summary to confirm, then runs unattended until you stop it.
-Results land in `runs/my_run/`. Your own script (HF Trainer, TRL, a plain PyTorch loop) runs
-unchanged; see [`examples/byo_script/`](examples/byo_script/).
-
-No Claude Code? Fill in `run.toml` and point any coding agent at `program.md`.
 
 ## Our contributions
 
