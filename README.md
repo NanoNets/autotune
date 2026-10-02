@@ -13,11 +13,14 @@ length are off-limits, so a faster config is never a worse model.
 
 ## How it works
 
-1. **Frame:** size up the job once: the model, the data, the GPU's real peak, and the largest
-   micro-batch that fits.
-2. **Baseline:** run your config as-is.
-3. **Loop:** pick one change, test it on the GPU, keep it if it's faster, repeat.
-4. **Learn:** record the run and update the shared beliefs for next time.
+```
+ ┌─────────┐     ┌──────────┐     ┌───────────────────────┐     ┌─────────────────┐
+ │  Frame  │ ──▶ │ Baseline │ ──▶ │          Loop         │ ──▶ │      Learn      │
+ │ size up │     │ run your │     │   change one thing,   │     │ record the run, │
+ │ the job │     │  config  │     │ test, keep if faster, │     │  update beliefs │
+ │         │     │          │     │         repeat        │     │                 │
+ └─────────┘     └──────────┘     └───────────────────────┘     └─────────────────┘
+```
 
 ## Quick start
 
