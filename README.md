@@ -37,12 +37,19 @@ uv run pytest
 
 ## Running the agent
 
-Open the repo in [Claude Code](https://claude.com/claude-code). The bundled skill, `.claude/skills/run-loop/SKILL.md](.claude/skills/run-loop/SKILL.md)`, takes the whole run in one line:
+Open the repo in [Claude Code](https://claude.com/claude-code). The bundled skill, [`.claude/skills/run-loop/SKILL.md`](.claude/skills/run-loop/SKILL.md), takes the whole run in one command:
 
 ```
-/run-loop <run_name> model=<hf_id> dataset=<hf_id>[:<config>] max_len=<N> effective_batch=<N>
-          host=<user>@<ip> | local    gpu=<label>
-          [script=<path> [script_configs=<path>,...]]    [resume | review | smoke]
+/run-loop <run_name>
+    model=<hf_id>                    # e.g. Qwen/Qwen2.5-0.5B
+    dataset=<hf_id>[:<config>]       # e.g. Salesforce/wikitext:wikitext-2-raw-v1
+    max_len=<N>                      # sequence length, never changed
+    effective_batch=<N>              # batch size, never changed
+    host=<user>@<ip> | local         # where experiments run
+    gpu=<label>                      # e.g. A10
+    [script=<path>]                  # optional: your own training script
+    [script_configs=<path>,...]      # optional: the config files it loads
+    [resume | review | smoke]        # optional: continue / write up / CPU dry run
 ```
 
 
@@ -65,7 +72,7 @@ For example:
 
 It sizes up the job, shows you a summary to confirm, then runs unattended until you stop it.
 Results land in `runs/my_run/`. Your own script (HF Trainer, TRL, a plain PyTorch loop) runs
-unchanged; see `[examples/byo_script/](examples/byo_script/)`.
+unchanged; see [`examples/byo_script/`](examples/byo_script/).
 
 No Claude Code? Fill in `run.toml` and point any coding agent at `program.md`.
 
