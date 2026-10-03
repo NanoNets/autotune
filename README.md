@@ -113,4 +113,4 @@ loop/          design notes and data contracts
 
 ## Platform support
 
-Single NVIDIA GPU for now. Multi-GPU and a learned model that ranks candidates are next.
+Single NVIDIA GPU for now. Multi-GPU and a learned model that ranks candidates are next. MoE's are also not validated on this loop at this moment.
