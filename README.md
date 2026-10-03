@@ -13,9 +13,6 @@ It profiles a real training step, works out where the time goes, changes one set
 measures again on the GPU, keeps or discards, and repeats. You wake up to a log of experiments and
 a faster config. The run above took Qwen2.5-0.5B on an A10 from 4.3 to 108.6 samples/s.
 
-The agent only touches settings that change **speed** (micro-batch, attention kernel, compile,
-gradient checkpointing, padding, dataloader). Learning rate, precision, effective batch and sequence
-length are off-limits, so a faster config is never a worse model.
 
 ## How it works
 
