@@ -44,7 +44,7 @@ Entry (`experience/<run_name>.md`):
 ```markdown
 ## <run_name> — <date>
 Context: <model> · <dataset> · <hardware> · <dtype> · effective_batch <n> · max_len <n>
-Baseline: <tokens/s or samples/s>  →  Best: <tokens/s or samples/s>  (+X%)
+Baseline: <samples/s>  →  Best: <samples/s>  (+X%)   # the primary metric — `loop/throughput.md`
 Winning config: <the knob assignments, in full — a match replays this as experiment 2>
 
 Findings:
