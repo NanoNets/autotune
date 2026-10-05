@@ -3,7 +3,7 @@
 <p align="center"><b>An autoresearch loop for maximizing training throughput.</b></p>
 
 **The idea:** instead of painstakingly running through configurations, give your agent a training
-job and a GPU and let it go to work for you.
+job and a GPU and let it optimize your training throughput. 
 
 <p align="center">
   <img src="docs/assets/progress_test_a10G.png" alt="An autotune run on an A10: 4.3 to 108.6 samples/s in 23 experiments" width="800">
