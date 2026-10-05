@@ -98,6 +98,7 @@ def test_b1_tokens_come_from_the_clean_steps_not_the_traced_step():
     att, expected = _variable_width_run(WIDTHS)
     clean = expected[WARMUP:WARMUP + CLEAN]                               # steps 3-5
     assert att.step_tokens == clean                                       # one count per timed step
+    assert att.step_samples == [4] * CLEAN                                # rows, same steps
     assert att.tokens == sum(clean) / len(clean)                          # rate numerator = their mean
     traced = att.micro_batches["traced_step_tokens"]
     assert traced["hook"] == traced["trace"] == expected[WARMUP + CLEAN]  # hook and trace agree...
@@ -108,6 +109,7 @@ def test_b1_tokens_come_from_the_clean_steps_not_the_traced_step():
 def test_b1_grad_accum_sums_every_micro_batch_of_a_step():
     att, expected = _variable_width_run(WIDTHS, accum=2)
     assert att.step_tokens == expected[WARMUP:WARMUP + CLEAN]
+    assert att.step_samples == [8] * CLEAN                                # 2 micro-batches of 4
     assert att.micro_batches["forwards"] == att.micro_batches["backwards"] == 2
 
 

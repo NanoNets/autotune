@@ -4,7 +4,8 @@
 `effective_batch` is human-owned and fixed, so wall-clock for a fixed run = total_samples /
 samples_per_s — a higher samples/s is strictly shorter training, whatever the tokens do.
 
-- **Primary metric:** **samples/s**, scored on the **mean** step time, never the median.
+- **Primary metric:** **samples/s**, the Observation's `samples_per_s`: total rows over total time
+  across the clean window, never over the median step.
 - **Read alongside it:** tokens/s — not a tie-breaker, a *discriminator*. The two respond to
   different changes, and the pair tells you which one you actually made.
 - **Diagnostic only:** MFU (% of the measured roofline). Grounds a number against the hardware;
@@ -15,14 +16,14 @@ samples_per_s — a higher samples/s is strictly shorter training, whatever the 
 
 `tokens/s` counts pad tokens as work, so it **rewards computing padding** — and removing padding has
 been the single largest real lever in every run so far. Measured on `test_a10G`: `micro_batch` 4 → 8
-was **+15% per token and -14% on samples/s** (`knowledge/micro-batch-interacts-with-dynamic-padding.md`).
+was **+15% per token and -14% on samples/s** (`beliefs/micro-batch-interacts-with-dynamic-padding.md`).
 One experiment, opposite verdicts. Rank on samples/s.
 
 The converse is equally real, which is why tokens/s is not deleted. Under `padding="longest"` batch
 width *is* the rows drawn, so `samples/s` is **sample-sensitive**: on
 `smollm2_1.7b_a100_wikitext` the same config moved **1.9x** (264.4 → 138.1) on nothing but the
 probe's row sample, while tokens/s moved **1.3%**
-(`knowledge/probe-sample-must-match-length-distribution.md`).
+(`beliefs/probe-sample-must-match-length-distribution.md`).
 
 | what moved | tokens/s | samples/s | reading |
 |---|---|---|---|

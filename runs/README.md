@@ -14,7 +14,7 @@ Before the loop starts, create `runs/<run_name>/results.tsv` with this header ro
 experiment_number	token/s	samples/s	memory	status	hypothesis	conclusion
 ```
 
-- `samples/s` — **the ranked column.** Configs are compared on it and the progress staircase is
+- `samples/s` — **the ranked column**, the Observation's `samples_per_s`. Configs are compared on it and the progress staircase is
   drawn from it; `token/s` is recorded alongside to tell a real win from a sample artifact, never
   to rank (`loop/throughput.md`).
 - `status` — e.g. `ok` / `oom` / `crash` / `error`.

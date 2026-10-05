@@ -38,11 +38,12 @@ REF_WALL, PROFILED = 0.5e-3, 0.8e-3    # the reference batch: profiler off, then
 
 
 def _cap(status="ok", step_times=None, trace=TRACE, memory=MEMORY, cpu=CPU, error=None, peak=PEAK,
-         ref=REF_WALL, profiled=PROFILED, step_tokens=None, device="cuda"):
+         ref=REF_WALL, profiled=PROFILED, step_tokens=None, device="cuda",
+         step_samples=None):
     return SimpleNamespace(
         status=status, trace=trace, memory=memory, cpu=cpu, error=error, device=device,
         peak_flops=peak, peak_dtype="bfloat16", reference_step_s=ref, profiled_step_s=profiled,
-        step_tokens=step_tokens or [],
+        step_tokens=step_tokens or [], step_samples=step_samples or [],
         step_times_s=STEP_TIMES if step_times is None else step_times)
 
 
@@ -80,7 +81,11 @@ def test_trace_fields_flow_through():
 def test_rates_come_from_clean_window_totals_not_the_median():
     """Right-skewed steps: the median understates the time, so a median-based rate reads high."""
     times, toks = [1.0e-3, 1.0e-3, 4.0e-3], [100, 100, 700]      # one wide step; median 1ms
-    o = diagnose(_cap(step_times=times, step_tokens=toks), params=PARAMS, tokens=TOKENS, gpu=GPU)
+    o = diagnose(_cap(step_times=times, step_tokens=toks, step_samples=[16, 16, 16]),
+                 params=PARAMS, tokens=TOKENS, gpu=GPU)
+    assert o.samples_per_step == 16.0
+    assert abs(o.samples_per_s - 48 / 6.0e-3) < 1e-6             # total rows / total time
+    assert _obs().samples_per_s is None                          # rows uncounted: unknown, not 0
     assert o.step_time_s == 1.0e-3                               # median kept, as a statistic
     assert abs(o.step_time_mean_s - 2.0e-3) < 1e-15
     assert o.tokens_per_step == 300.0                            # mean over the clean steps

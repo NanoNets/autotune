@@ -81,6 +81,14 @@ def _padded_tokens(args, kwargs):
     return x.shape[0] * x.shape[1] if x.dim() >= 3 else x.shape[0]
 
 
+def _rows(args, kwargs):
+    """Rows in one micro-batch: the leading dim of the tensor `_padded_tokens` counts."""
+    x = kwargs.get("input_ids")
+    if x is None:
+        x = next((a for a in args if isinstance(a, torch.Tensor)), None)
+    return x.shape[0] if isinstance(x, torch.Tensor) and x.dim() else 0
+
+
 class Attach:
     def __init__(self, device="cpu", warmup=3, clean_steps=10, trace_path=None, dtype=None,
                  peak_flops=None, peak_mem_bw_gb_s=None):
@@ -102,7 +110,9 @@ class Attach:
         self._prof, self._step_rf, self._t_prof, self._cap = None, None, None, None
         self._profiling = False                        # True between profiler enter and exit
         self.step_tokens = []                          # padded tokens of each CLEAN step (B1)
+        self.step_samples = []                         # rows of each CLEAN step
         self._acc, self._traced_tokens = 0, None       # running count within the current step
+        self._acc_rows = 0
         self._root, self._root_hook, self._tok_hook = None, None, None
         self._trained = set()                          # ids of the parameters the optimizer trains
         self._step_bad = False                         # a call in this step had no token tensor
@@ -141,6 +151,7 @@ class Attach:
             self._step_bad = True                       # unknown, not a smaller number
         else:
             self._acc += n
+            self._acc_rows += _rows(args, kwargs)
 
     def uninstall(self):
         """Leave the process as it was: hook removed, and a profiler still running (the run ended
@@ -181,7 +192,8 @@ class Attach:
                 pass
         self.uninstall()
         return Capture(status=status, step_times_s=list(self._times), memory=_read_memory(self.device),
-                       step_tokens=list(self.step_tokens), clean_steps_requested=self.clean_steps,
+                       step_tokens=list(self.step_tokens), step_samples=list(self.step_samples),
+                       clean_steps_requested=self.clean_steps,
                        population={**POPULATION, "model_trained": self.model_trained},
                        cpu=cpu, peak_flops=self.peak_flops,
                        peak_dtype=str(self.dtype).replace("torch.", ""),
@@ -205,6 +217,7 @@ class Attach:
         self._n += 1
         n, w, c = self._n, self.warmup, self.clean_steps
         step_tok, self._acc = self._acc, 0             # tokens of the step that just ended
+        step_rows, self._acc_rows = self._acc_rows, 0
         step_bad, self._step_bad = self._step_bad, False
         if n < w:
             return
@@ -228,6 +241,7 @@ class Attach:
                 self._tokens_unknown = self._tokens_unknown or "the model's input carried no token tensor"
             else:
                 self.step_tokens.append(step_tok)
+                self.step_samples.append(step_rows)
             if n == w + c:
                 self._stop_cpu()
                 self._mem = _read_memory(self.device)   # the window's peak, before the traced step
@@ -259,7 +273,7 @@ class Attach:
         with open(self.trace_path, "w") as f:
             json.dump(trace, f)
         if self._tokens_unknown or not self.step_tokens:   # say so; never a guessed or partial count
-            self.step_tokens, self.tokens = [], None
+            self.step_tokens, self.step_samples, self.tokens = [], [], None
             found["token_source"] = f"unknown: {self._tokens_unknown or 'no per-step count'}"
         else:                                          # B1: the timed steps' own tokens
             self.tokens = sum(self.step_tokens) / len(self.step_tokens)
@@ -270,6 +284,7 @@ class Attach:
 
         self._cap = Capture(status="ok", step_times_s=self._times, trace=self.trace_path,
                             step_tokens=list(self.step_tokens),
+                            step_samples=list(self.step_samples),
                             clean_steps_requested=self.clean_steps,
                             profiled_step_s=profiled_s,
                             population={**POPULATION, "model_trained": self.model_trained},

@@ -8,8 +8,8 @@ when to drill into the raw trace, and a `trace_path` pointer so it can. No label
 suggestions.
 
 Every ratio stays inside one population (the Measurement axiom, `loop/contracts.md`). Rates —
-`mfu`, `tokens_per_s`, `roofline_floor_s` — come from clean-window TOTALS: mean tokens over mean
-step time, never over the median. Trace fractions — `gpu_active_frac`, `gap_s` — divide the
+`samples_per_s`, `tokens_per_s`, `mfu`, `roofline_floor_s` — come from clean-window TOTALS: mean
+rows / tokens over mean step time, never over the median. Trace fractions — `gpu_active_frac`, `gap_s` — divide the
 reference batch's busy time by that same batch's profiler-off wall (`reference_step_s`);
 `data_wait_frac` divides a host annotation by the wall of the profiled step it was recorded in.
 A physically impossible result (a fraction above 1, beyond tolerance) means two populations were
@@ -52,6 +52,8 @@ class Observation:
     clean_steps_measured: int = None   # clean steps timed (rounded up to whole passes when known)
     clean_steps_requested: int = None  # what the caller asked for; differs when rounding applied
     clean_passes: float = None         # passes COMPLETED over the sample (None: unknown)
+    samples_per_step: float = None     # mean rows per clean step
+    samples_per_s: float = None        # total clean rows / total clean time — the PRIMARY metric
     tokens_per_step: float = None      # mean tokens per clean step — the numerator of every rate
     tokens_per_s: float = None         # total clean tokens / total clean time
     flops: float = None                # training FLOPs of the mean clean step (6ND)
@@ -99,7 +101,7 @@ class Observation:
     summary: str = ""
 
 
-def _clean_timing(times, tokens):
+def _clean_timing(times, tokens, samples=None):
     """Clean-window statistics. {} if nothing was measured.
 
     `step_time_s` (median) and `step_time_cv` (std / mean) describe the distribution;
@@ -114,6 +116,8 @@ def _clean_timing(times, tokens):
            "step_time_cv": round(statistics.pstdev(times) / mean, 4) if len(times) > 1 and mean else 0.0}
     if tokens:
         out["tokens_per_step"] = sum(tokens) / len(tokens)
+    if samples:
+        out["samples_per_step"] = sum(samples) / len(samples)
     return out
 
 
@@ -145,7 +149,8 @@ def diagnose(capture, params, tokens, gpu):
     dev_str = f"[{dev.upper()} — not a GPU probe] " if dev and dev != "cuda" else ""
 
     times = capture.step_times_s or []
-    timing = _clean_timing(times, getattr(capture, "step_tokens", None))   # kept even on oom/error:
+    timing = _clean_timing(times, getattr(capture, "step_tokens", None),   # kept even on oom/error:
+                           getattr(capture, "step_samples", None))
     if capture.status != "ok" or not times:            # steps that DID run / nothing measured
         note = f"status={capture.status}" + (f": {capture.error}" if capture.error else "")
         return Observation(summary=dev_str + note, **timing, **base)
@@ -158,6 +163,8 @@ def diagnose(capture, params, tokens, gpu):
     floor = step_time_floor_s(flops, peak) if known else None     # count, so no MFU, rather
     mfu_v = mfu(flops, mean_wall, peak) if known else None        # than a crash or a guess
     tok_s = step_tok / mean_wall if step_tok and mean_wall else None
+    step_rows = timing.get("samples_per_step")
+    samples_s = step_rows / mean_wall if step_rows and mean_wall else None
 
     ph_s = {k: v / 1e6 for k, v in phase_times_us(trace).items()}   # all of them, not just PHASES
     ks = kernels(trace)                                # all kernels, by name (desc)
@@ -215,7 +222,7 @@ def diagnose(capture, params, tokens, gpu):
         summary = f"{dev_str}INVALID ({'; '.join(impossible)}) | " + summary[len(dev_str):]
 
     return Observation(
-        **timing, tokens_per_s=tok_s, flops=flops, roofline_floor_s=floor, mfu=mfu_v,
+        **timing, samples_per_s=samples_s, tokens_per_s=tok_s, flops=flops, roofline_floor_s=floor, mfu=mfu_v,
         gpu_busy_s=busy, gpu_active_frac=active, phase_times_s=ph_s,
         reference_step_s=ref_wall, profiled_step_s=profiled,
         gpu_phase_times_s=gpu_ph_s, gpu_phase_coverage=gpu_ph_cov,
