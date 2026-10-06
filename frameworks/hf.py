@@ -464,9 +464,9 @@ class HFRunner:
         where the lever is supposed to be judged. Under `padding="max_length"` the measured value
         equals that product, so this is a no-op there.
 
-        It is the MEAN over every step run, not the last step's count. `step_time_s` is a median
-        over many steps, so pairing it with a single step's token count mismatches numerator and
-        denominator: two runs of an identical config measured 7490 vs 9449 tokens/s while their
+        It is the MEAN over every step run, not the last step's count. Rates divide by the mean
+        step time over many steps, so pairing it with a single step's token count mismatches
+        numerator and denominator: two runs of an identical config measured 7490 vs 9449 tokens/s while their
         samples/s agreed to 0.9%. The mean makes the ratio meaningful again.
         """
         steps = getattr(self, "_steps", 0)

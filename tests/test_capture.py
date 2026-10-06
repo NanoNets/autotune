@@ -94,6 +94,7 @@ def test_clean_window_is_whole_passes_and_the_trace_is_the_reference_batch():
     assert r.log == ["step"] * 2 + ["ref"] * 2 + ["pass"] + ["step"] * 8 + ["ref", "ref"]
     assert cap.step_tokens == [10 * n for n in range(3, 11)]   # clean steps only, not warmup
     assert cap.reference_step_s is not None and cap.profiled_step_s is not None
+    assert cap.gpu_seconds is not None and cap.gpu_seconds >= sum(cap.step_times_s)
     assert cap.population["reference"]["batch_key"] == "k1"
 
 

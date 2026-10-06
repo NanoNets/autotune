@@ -41,6 +41,7 @@ def test_state_machine_and_capture():
     assert cap.trace and os.path.exists(cap.trace)
     assert att.micro_batches["forwards"] == att.micro_batches["backwards"] == 1
     assert att.tokens == 4 * 8
+    assert cap.gpu_seconds is not None and cap.gpu_seconds >= sum(cap.step_times_s)
 
 
 def test_params_come_from_the_first_optimizer_only():

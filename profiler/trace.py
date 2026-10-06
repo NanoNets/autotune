@@ -114,7 +114,8 @@ def gpu_phase_times_us(trace):
     duration says nothing about GPU work. Every kernel carries a `correlation` id matching the
     runtime launch that issued it, so a kernel belongs to whichever annotation window contains
     that launch. Scopes nest (`step` contains the rest), so these do not sum to the total.
-    Returns ({name: gpu_us}, attributed_fraction_of_busy); ({}, None) with no correlation data.
+    Returns ({name: gpu_us}, attributed share of summed kernel time); ({}, None) with no
+    correlation data. A kernel with no correlation id can't be attributed, so it lowers the share.
     """
     corr = {}
     for e in _events(trace):
@@ -140,9 +141,9 @@ def gpu_phase_times_us(trace):
         totals[e["name"]] = totals.get(e["name"], 0.0) + sum(d for _, d in launches[lo:hi])
         seen.update(range(lo, hi))
 
-    busy = sum(corr.values())
+    total = sum(dur for _, dur in kernels(trace))
     covered = sum(launches[i][1] for i in seen)
-    return totals, (round(covered / busy, 3) if busy else None)
+    return totals, (round(covered / total, 3) if total else None)
 
 
 def provenance(trace):

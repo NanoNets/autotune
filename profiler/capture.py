@@ -5,7 +5,7 @@ datasheet table — so any hardware works. They are hardware properties: measure
 pass them back in (`peak_flops=`, `peak_mem_bw_gb_s=`) for every later probe.
 
 The profiler distorts timing, so the real wall-clock comes from a warm, profiler-OFF window —
-all clean step times are kept (for the noise floor), and CPU utilization is sampled over that
+all clean step times are kept (for the step-time spread), and CPU utilization is sampled over that
 same window (via psutil, lazily imported). Memory (peak / reserved / headroom) is read from the
 torch.cuda allocator. An OOM is CAUGHT and returned as a result (status="oom"), not a crash.
 Returns a `Capture`.
@@ -51,6 +51,7 @@ class Capture:
     peak_dtype: str = None                            # the dtype that peak was measured at
     peak_mem_bw_gb_s: float = None                    # measured achievable bandwidth (roofline)
     device: str = None                                # the device this actually ran on (cuda/cpu/mps)
+    gpu_seconds: float = None                         # wall-clock the probe held the device, setup to trace
     error: str = None
 
 
@@ -224,6 +225,7 @@ def capture(runner, config, warmup=3, clean_steps=10, trace_path=None, peak_flop
     into a comparison whose real signal is ~1%. A shared constant cancels out of every ranking.
     """
     device = config.get("device", "cpu")
+    t_probe = time.perf_counter()                      # gpu_seconds: everything from here on
     if trace_path is None:                             # unique per capture — the Observation keeps
         trace_path = _default_trace_path()             # this pointer, so runs must not overwrite
     times = []                                         # hoisted: kept even if a later step OOMs
@@ -293,7 +295,7 @@ def capture(runner, config, warmup=3, clean_steps=10, trace_path=None, peak_flop
         sampler.start()                                # sample CPU only over the clean window...
         cpu_ready.wait(timeout=1.0)                    # ...but not before it has primed
         cpu0, wall0 = _tree_cpu_seconds(), time.perf_counter()
-        for _ in range(clean_steps):                   # clean wall-clock, profiler off (kept for noise)
+        for _ in range(clean_steps):                   # clean wall-clock, profiler off (kept for spread)
             t0 = time.perf_counter()
             runner.step()
             _sync(device)
@@ -336,7 +338,8 @@ def capture(runner, config, warmup=3, clean_steps=10, trace_path=None, peak_flop
                        reference_step_s=reference_s, profiled_step_s=profiled_s,
                        population=population,
                        peak_flops=peak, peak_dtype=peak_dtype, peak_mem_bw_gb_s=peak_bw,
-                       memory=memory, cpu=cpu, device=device)
+                       memory=memory, cpu=cpu, device=device,
+                       gpu_seconds=time.perf_counter() - t_probe)
 
     except torch.cuda.OutOfMemoryError as e:           # OOM is a valid result — the memory ceiling
         _stop_sampler()
@@ -347,7 +350,9 @@ def capture(runner, config, warmup=3, clean_steps=10, trace_path=None, peak_flop
                        step_tokens=step_tokens, clean_passes=passes(),  # evidence, not noise
                        clean_steps_requested=requested,
                        cpu=_cpu_stats(cpu_samples), peak_flops=peak,
-                       peak_dtype=peak_dtype, peak_mem_bw_gb_s=peak_bw, device=device, error=first)
+                       peak_dtype=peak_dtype, peak_mem_bw_gb_s=peak_bw, device=device, error=first,
+                       gpu_seconds=time.perf_counter() - t_probe)
     except Exception as e:                             # any other failure, surfaced not swallowed
         _stop_sampler()
-        return Capture(status="error", device=device, error=f"{type(e).__name__}: {e}")
+        return Capture(status="error", device=device, error=f"{type(e).__name__}: {e}",
+                       gpu_seconds=time.perf_counter() - t_probe)

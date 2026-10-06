@@ -97,6 +97,10 @@ def test_gpu_phase_times_attributes_kernels_to_the_enclosing_annotation():
     times, cov = gpu_phase_times_us(trace)
     assert times == {"forward": 300.0, "backward": 700.0}   # NOT the 100us host windows
     assert cov == 1.0
+    # a kernel with no correlation id can't be attributed: it lowers the share, it isn't ignored
+    trace["traceEvents"].append({"cat": "kernel", "name": "orphan", "ts": 2000.0, "dur": 1000.0})
+    times, cov = gpu_phase_times_us(trace)
+    assert times == {"forward": 300.0, "backward": 700.0} and cov == 0.5
 
 
 def test_gpu_phase_times_empty_without_correlation_data():
