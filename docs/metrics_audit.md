@@ -2,8 +2,8 @@
 
 Every metric the profiler reports: what it is, how the code calculates it, why it is needed, and
 whether the code matches the docs. Audited against `main` at `592d074` (2026-10-05), by reading the
-code; the seven items it flagged are fixed in the `metrics-audit` PR, which this doc ships with.
-`samples_per_step` and `samples_per_s` are on the `metric` branch, not yet on `main`.
+code. The seven items it flagged are fixed in PR #24 (`metrics-audit`), which this doc ships with.
+`samples_per_step` and `samples_per_s` are added by PR #25 (`metric`).
 
 **Matches docs:** ✅ yes · ✅ *n* fixed by this PR, see item *n* below · ❌ a real gap.
 
@@ -23,8 +23,8 @@ one fixed batch that is traced with the profiler on.
 | `clean_steps_measured` | Steps actually timed | Count of clean step times | Shows how much evidence is behind the timing | ✅ |
 | `clean_steps_requested` | Steps the caller asked for | The `clean_steps` input, before rounding up to whole passes | Explains why measured differs from requested | ✅ |
 | `clean_passes` | Passes over the sample completed | Steps completed / steps per pass | A whole number proves every row was timed equally, so configs are comparable | ✅ |
-| `samples_per_step` | Rows per step (`metric` branch) | Mean of per-step row counts over the clean steps | Numerator of samples/s | ✅ |
-| `samples_per_s` | Training examples per second (`metric` branch) | `samples_per_step / step_time_mean_s` | **The primary metric**: what configs are ranked on | ✅ on `metric`; ❌ absent on `main` |
+| `samples_per_step` | Rows per step (PR #25) | Mean of per-step row counts over the clean steps | Numerator of samples/s | ✅ |
+| `samples_per_s` | Training examples per second (PR #25) | `samples_per_step / step_time_mean_s` | **The primary metric**: what configs are ranked on | ✅ in PR #25; ❌ absent on `main` |
 | `tokens_per_step` | Tokens per step, padding included | Mean of per-step `input_ids.numel()` over the clean steps | Numerator of tokens/s and of the FLOP estimate | ✅ |
 | `tokens_per_s` | Tokens per second | `tokens_per_step / step_time_mean_s` | Cross-check on samples/s: shows whether a win is real or a sampling artifact | ✅ |
 | `peak_flops` | Fastest compute the device delivers | Best of three large matrix multiplies: `2 × n³ × iters / elapsed` | The denominator of MFU, measured so any hardware works | ✅ |
