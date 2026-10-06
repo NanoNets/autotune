@@ -118,7 +118,7 @@ so "unknown" can't be mistaken for "measured zero".
 | 48 | `device_type` | what it RAN on (`cuda` / `cpu` / `mps`). A `cpu` probe is a smoke test: MFU and every GPU signal are meaningless, so never rank it against a `cuda` probe or learn a belief from it | capture never reached a device |
 | 49 | `trace_path` | raw Chrome trace on disk, for drill-down | no trace exported (e.g. OOM before the profiled step) |
 | 50 | `error` | failure cause, first line; for `invalid`, which reading was impossible | `status == "ok"` |
-| 51 | `summary` | the one-line human/agent digest (prefixed `[CPU — not a GPU probe]` when `device_type` isn't `cuda`, and `INVALID (...)` when `status` is `invalid`) | never |
+| 51 | `summary` | the one-line human/agent digest: samples/s, tokens/s, MFU, then the GPU signals (prefixed `[CPU — not a GPU probe]` when `device_type` isn't `cuda`, and `INVALID (...)` when `status` is `invalid`) | never |
 
 **Two populations, never mixed.** Rates (`samples_per_s`, `tokens_per_s`, `mfu`, `roofline_floor_s`) come only from
 the clean window's totals: mean tokens over mean step time. Everything read from the trace
@@ -221,7 +221,7 @@ other fields added since, so read the table above for the current shape:
   },
   "trace_path": "/tmp/autotune_trace_2_1787343066222349493.json",
   "error": null,
-  "summary": "MFU 73% | GPU active 96% | data-wait 0% | idle 4% | cpu 6% | noise +/-1% | occ 27% | mem 2.016/22.058GB"
+  "summary": "samples/s 128.78 | tokens/s 65935 | MFU 73% | ref-batch GPU active 96% | data-wait 0% | idle 4% | cpu 6% | step cv 1% | occ 27% | mem 2.016/22.058GB"
 }
 ```
 
@@ -261,6 +261,11 @@ the **attached capture** instead, started by `python -m profiler.launch -- train
   bookkeeping, so don't compare it with runner probes.
 - **Params are the optimizer's (trainable only).** MFU under LoRA / frozen weights reads far too low
   until `design_improvements.md` §10.
+- **Samples under packing are counted from the boundaries the batch carries**: `position_ids`
+  resetting to 0 (TRL `padding_free`, HF packed collators) or `cu_seqlens`. Without them a row is a
+  sample; a 1-D input without them is unknown (`samples_per_s` null, `sample_source` says why). A
+  script that packs with no boundary markers at all is counted per row, so its samples/s reads
+  low; `population.micro_batches.sample_source` records which rule applied.
 
 What's planned: `design_improvements.md` §7–§11.
 

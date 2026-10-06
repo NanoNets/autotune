@@ -2,7 +2,7 @@
 
 Torch-free: `diagnose` takes a capture-like object (any object with .status, .step_times_s,
 .trace, .memory, .error) plus plain numbers, so it's unit-testable without a GPU. Reports raw
-signals — MFU (achieved / MEASURED peak, the "utilized well" number), GPU-active, data-wait, idle, step-time spread, memory —
+signals — samples/s (the primary metric), tokens/s, MFU (achieved / MEASURED peak), GPU-active, data-wait, idle, step-time spread, memory —
 plus coverage stats (how much the top-8 kernels represent, idle shape) so the agent can tell
 when to drill into the raw trace, and a `trace_path` pointer so it can. No labels, no lever
 suggestions.
@@ -213,7 +213,11 @@ def diagnose(capture, params, tokens, gpu):
         return f"{x:.0%}" if x is not None else "n/a"
 
     wait = frac(data_wait, profiled)                   # host annotation over its own profiled wall
-    summary = (f"{dev_str}MFU {pct(mfu_v)} | ref-batch GPU active {pct(active)} | "
+    def rate(x, fmt):
+        return format(x, fmt) if x is not None else "n/a"
+
+    summary = (f"{dev_str}samples/s {rate(samples_s, '.2f')} | tokens/s {rate(tok_s, '.0f')} | "
+               f"MFU {pct(mfu_v)} | ref-batch GPU active {pct(active)} | "
                f"data-wait {pct(wait)} | "
                f"idle {pct(frac(gap, ref_wall))}{cpu_str} | step cv {cv:.0%}{occ_str}{mem_str}")
     if busy is None:

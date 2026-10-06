@@ -81,12 +81,33 @@ def _padded_tokens(args, kwargs):
     return x.shape[0] * x.shape[1] if x.dim() >= 3 else x.shape[0]
 
 
-def _rows(args, kwargs):
-    """Rows in one micro-batch: the leading dim of the tensor `_padded_tokens` counts."""
+def _samples(args, kwargs):
+    """(samples, source) for one micro-batch: the training examples it holds, not its rows.
+
+    Unpacked, a row is a sample. A packed batch holds several documents per row, marked where each
+    starts: `position_ids` reset to 0 (TRL `padding_free`, HF packed collators) or `cu_seqlens`
+    lists the offsets (flash-attn varlen). A 1-D input with neither carries no boundaries, so its
+    count is unknown, never the token count. The `position_ids` count is a device tensor (no sync
+    here); it is read at the step boundary, where we sync anyway.
+    """
     x = kwargs.get("input_ids")
     if x is None:
         x = next((a for a in args if isinstance(a, torch.Tensor)), None)
-    return x.shape[0] if isinstance(x, torch.Tensor) and x.dim() else 0
+    if not isinstance(x, torch.Tensor) or x.dim() == 0:
+        return None, None
+    pos = kwargs.get("position_ids")
+    if isinstance(pos, torch.Tensor):
+        n = (pos == 0).sum()
+        if pos.dim() >= 2 and pos.shape[0] == 1 and x.dim() >= 2 and x.shape[0] > 1:
+            n = n * x.shape[0]                      # one position row broadcast over the batch
+        return n, "position_ids"
+    cu = next((kwargs[k] for k in ("cu_seqlens", "cu_seq_lens_q")
+               if isinstance(kwargs.get(k), torch.Tensor)), None)
+    if cu is not None:
+        return cu.numel() - 1, "cu_seqlens"
+    if x.dim() >= 2:
+        return x.shape[0], "rows"
+    return None, "unknown: 1-D input without position_ids or cu_seqlens"
 
 
 class Attach:
@@ -112,7 +133,8 @@ class Attach:
         self.step_tokens = []                          # padded tokens of each CLEAN step (B1)
         self.step_samples = []                         # rows of each CLEAN step
         self._acc, self._traced_tokens = 0, None       # running count within the current step
-        self._acc_rows = 0
+        self._acc_rows, self._step_sources = 0, set()  # rows, and how they were counted, this step
+        self._sample_sources = set()                   # ...over the clean steps
         self._root, self._root_hook, self._tok_hook = None, None, None
         self._trained = set()                          # ids of the parameters the optimizer trains
         self._step_bad = False                         # a call in this step had no token tensor
@@ -151,7 +173,10 @@ class Attach:
             self._step_bad = True                       # unknown, not a smaller number
         else:
             self._acc += n
-            self._acc_rows += _rows(args, kwargs)
+            rows, src = _samples(args, kwargs)
+            self._step_sources.add(src)
+            if rows is not None:
+                self._acc_rows = self._acc_rows + rows   # int or device tensor
 
     def uninstall(self):
         """Leave the process as it was: hook removed, and a profiler still running (the run ended
@@ -218,6 +243,7 @@ class Attach:
         n, w, c = self._n, self.warmup, self.clean_steps
         step_tok, self._acc = self._acc, 0             # tokens of the step that just ended
         step_rows, self._acc_rows = self._acc_rows, 0
+        step_src, self._step_sources = self._step_sources, set()
         step_bad, self._step_bad = self._step_bad, False
         if n < w:
             return
@@ -241,7 +267,8 @@ class Attach:
                 self._tokens_unknown = self._tokens_unknown or "the model's input carried no token tensor"
             else:
                 self.step_tokens.append(step_tok)
-                self.step_samples.append(step_rows)
+                self.step_samples.append(int(step_rows))   # synced above: safe to read
+                self._sample_sources |= step_src
             if n == w + c:
                 self._stop_cpu()
                 self._mem = _read_memory(self.device)   # the window's peak, before the traced step
@@ -278,6 +305,12 @@ class Attach:
         else:                                          # B1: the timed steps' own tokens
             self.tokens = sum(self.step_tokens) / len(self.step_tokens)
             found["token_source"] = f"hook: mean of {len(self.step_tokens)} clean steps (padded)"
+        unknown = [s for s in self._sample_sources if s is None or s.startswith("unknown")]
+        if unknown:                                    # any uncounted micro-batch: no partial count
+            self.step_samples = []
+            found["sample_source"] = unknown[0] or "unknown: no token tensor"
+        else:
+            found["sample_source"] = "+".join(sorted(self._sample_sources)) or None
         found["traced_step_tokens"] = {"hook": self._traced_tokens, "trace": found.get("tokens")}
         found["tokens"] = self.tokens
         self.micro_batches = found

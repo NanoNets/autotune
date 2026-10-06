@@ -122,3 +122,68 @@ def test_b1_no_hook_left_on_the_model():
     att, _ = _variable_width_run(WIDTHS)
     assert att._tok_hook is None and att._root_hook is None
     assert att._root is not None and len(att._root._forward_pre_hooks) == 0
+
+
+# ---- samples under packing: documents, not rows -------------------------------------------
+
+class _KwModel(torch.nn.Module):
+    """A model called HF-style, with keyword inputs; packing metadata rides alongside."""
+    def __init__(self):
+        super().__init__()
+        self.emb, self.head = torch.nn.Embedding(50, 16), torch.nn.Linear(16, 50)
+
+    def forward(self, input_ids, position_ids=None, cu_seqlens=None, cu_seq_lens_q=None):
+        return self.head(self.emb(input_ids))
+
+
+def _packed_run(batches):
+    """One optimizer step per batch; each batch is the kwargs the model is called with."""
+    torch.manual_seed(0)
+    before = nopatch.snapshot()
+    att = Attach(device="cpu", warmup=WARMUP, clean_steps=CLEAN, peak_flops=1.0, peak_mem_bw_gb_s=1.0)
+    att.install()
+    model = _KwModel()
+    opt = torch.optim.AdamW(model.parameters())
+    for kw in batches:
+        model(**kw).logsumexp(-1).mean().backward()
+        opt.step()
+        opt.zero_grad()
+    nopatch.verify(before)
+    return att
+
+
+def _pos(*doc_lens):
+    """position_ids for one row packing documents of the given lengths."""
+    return torch.cat([torch.arange(n) for n in doc_lens])
+
+
+def test_packed_rows_count_documents_via_position_ids():
+    ids = torch.randint(0, 50, (2, 12))                    # 2 rows, 3 + 2 documents packed in them
+    pos = torch.stack([_pos(4, 4, 4), _pos(6, 6)])
+    att = _packed_run([{"input_ids": ids, "position_ids": pos}] * (WARMUP + CLEAN + 2))
+    assert att.step_samples == [5] * CLEAN                 # documents, not the 2 rows
+    assert att.step_tokens == [24] * CLEAN                 # tokens unchanged: padded numel
+    assert att.micro_batches["sample_source"] == "position_ids"
+
+
+def test_broadcast_position_row_counts_every_batch_row():
+    ids = torch.randint(0, 50, (4, 8))
+    pos = torch.arange(8)[None]                            # [1, S], as HF-style scripts pass it
+    att = _packed_run([{"input_ids": ids, "position_ids": pos}] * (WARMUP + CLEAN + 2))
+    assert att.step_samples == [4] * CLEAN                 # one zero, broadcast over 4 rows
+
+
+def test_flattened_packing_counts_via_cu_seqlens():
+    ids = torch.randint(0, 50, (30,))                      # 1-D: three documents of 10
+    cu = torch.tensor([0, 10, 20, 30])
+    att = _packed_run([{"input_ids": ids, "cu_seqlens": cu}] * (WARMUP + CLEAN + 2))
+    assert att.step_samples == [3] * CLEAN
+    assert att.micro_batches["sample_source"] == "cu_seqlens"
+
+
+def test_flattened_input_without_boundaries_is_unknown_not_the_token_count():
+    ids = torch.randint(0, 50, (30,))
+    att = _packed_run([{"input_ids": ids}] * (WARMUP + CLEAN + 2))
+    assert att.step_samples == []                          # never 30
+    assert att.step_tokens == [30] * CLEAN                 # tokens still known
+    assert att.micro_batches["sample_source"].startswith("unknown")

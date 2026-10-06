@@ -455,11 +455,10 @@ correct. Two inputs are wrong, pulling in opposite directions:
    6ND, SmolLM2 + LoRA reads ≈22.5%: ~1.5× high.
 
 **What MFU is for** (why the definition matters, not just the number):
-- **Scoring against the possible:** "Primary metric: tokens/s, reported as MFU (% of the
-  hardware roofline)" (`loop/throughput.md:6`); `objective` = tokens/s + MFU
-  (`loop/contracts.md:65`).
-- **Stopping:** stop when near the roofline (`loop/loop.md:106`); report the "% of roofline
-  reached" (`:112`).
+- **Scoring against the possible:** samples/s is the primary metric and MFU "a diagnostic only"
+  (`loop/throughput.md`); `objective` = samples/s + tokens/s + MFU (`loop/contracts.md`). MFU
+  grounds a samples/s number against the hardware; it never ranks.
+- **Reporting:** the final report gives MFU reached as context (`loop/loop.md`, "Output").
 - **Diagnosis:** "the 'is the GPU utilized well' signal" (`profiler/README.md:44`), with measured
   bandwidth for compute- vs memory-bound.
 - **Cross-run comparison:** every retrospective in `experience/` reports it.

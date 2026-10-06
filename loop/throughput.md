@@ -25,6 +25,11 @@ width *is* the rows drawn, so `samples/s` is **sample-sensitive**: on
 probe's row sample, while tokens/s moved **1.3%**
 (`beliefs/probe-sample-must-match-length-distribution.md`).
 
+**Packing.** A packed row holds several examples, so samples are counted from document boundaries
+(`position_ids` resets or `cu_seqlens`) when a user's script passes them, and per row otherwise.
+A script that packs without boundary markers reads low on samples/s; `sample_source` in the
+Observation's `population` says how the count was made (`profiler/README.md`, "Attached capture").
+
 | what moved | tokens/s | samples/s | reading |
 |---|---|---|---|
 | a real speed knob | up | up | genuine win |
