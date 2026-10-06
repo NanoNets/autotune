@@ -65,7 +65,7 @@ one fixed batch that is traced with the profiler on.
 | `population` | Which rows were timed and which batch was traced | Reported by the runner: sample hash, steps per pass, reference batch key | Decides which probes can be compared with each other | ✅ |
 | Ceiling trial: `peak_gb`, `reserved_gb`, `total_gb` | Memory of a memory-only trial | Allocator peaks from start until optimizer step 3 | Answers "does this batch size fit?" | ✅ |
 | Ceiling trial: `shapes_seen`, `shape_checked` | Batch shapes the model was fed | Every `(batch, seq)` seen by a hook on the model | Proves the trial measured the intended worst case | ✅ |
-| `gpu_seconds` | How long the probe held the device | Wall-clock from the start of `capture()` (or `Attach.install()`) to the end of the traced step | Cost = `gpu_seconds` × the card's $/hour / 3600 | ✅ 3 |
+| `cost` | What the probe spent | **Not calculated.** Was listed in `loop/contracts.md` only | Out of scope for now | ✅ 3 |
 
 ## What the PR fixed
 
@@ -75,8 +75,9 @@ one fixed batch that is traced with the profiler on.
 2. **`data_wait_s`** read `0.0` when the trace had no `dataloader` span (a script without a torch
    `DataLoader`). Now `null`: unknown, not a measured zero.
 3. **`cost`** was in `loop/contracts.md` but not in the code, along with a "steady-state reached?"
-   flag, a `context` field and `provenance.probe_kind`. Added `gpu_seconds` (the probe's wall-clock
-   on the device); removed the rest from the contract. Price is the user's to apply.
+   flag, a `context` field and `provenance.probe_kind`. Cost is out of scope for now, so all four are
+   removed from the contract, and the steady-state / noise-floor wording is gone from `loop/loop.md`
+   too: probes use a fixed warmup → clean → trace split, the same for every config.
 4. **`cpu_util_mean` / `cpu_util_max`** are whole-machine numbers; the README now says so and
    points to `cpu_cores_busy` for this process alone.
 5. **`gap_count`** was described as "number of gaps". It counts gaps of any size between consecutive

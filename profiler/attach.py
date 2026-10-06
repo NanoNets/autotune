@@ -107,13 +107,12 @@ class Attach:
         self._trained = set()                          # ids of the parameters the optimizer trains
         self._step_bad = False                         # a call in this step had no token tensor
         self._tokens_unknown = None                    # why tokens can't be reported, if they can't
-        self._mem, self._t_install = None, None        # window memory; when the probe began
+        self._mem = None                               # the clean window's peak memory
         self.model_trained = None                      # the model's checkpoint name, when it has one
 
     # ---- lifecycle -------------------------------------------------------------------------
     def install(self):
         """Measure the ceilings (while memory is still free) and start watching for a step."""
-        self._t_install = time.perf_counter()
         if self.peak_flops is None:
             self.peak_flops = measure_peak_flops(self.device, self.dtype)
         if self.peak_mem_bw_gb_s is None:
@@ -186,9 +185,7 @@ class Attach:
                        population={**POPULATION, "model_trained": self.model_trained},
                        cpu=cpu, peak_flops=self.peak_flops,
                        peak_dtype=str(self.dtype).replace("torch.", ""),
-                       peak_mem_bw_gb_s=self.peak_mem_bw_gb_s, device=self.device, error=error,
-                       gpu_seconds=(time.perf_counter() - self._t_install
-                                    if self._t_install is not None else None))
+                       peak_mem_bw_gb_s=self.peak_mem_bw_gb_s, device=self.device, error=error)
 
     def tokens_per_step(self):
         """Mean padded tokens per clean step: the same steps the clean window timed (B1)."""
@@ -279,8 +276,7 @@ class Attach:
                             peak_flops=self.peak_flops,
                             peak_dtype=str(self.dtype).replace("torch.", ""),
                             peak_mem_bw_gb_s=self.peak_mem_bw_gb_s,
-                            memory=self._mem, cpu=self._cpu, device=self.device,
-                            gpu_seconds=time.perf_counter() - self._t_install)
+                            memory=self._mem, cpu=self._cpu, device=self.device)
         self.done = True
         self.uninstall()
         if self.on_done is not None:

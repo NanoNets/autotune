@@ -5,7 +5,7 @@ Method: the scientific method, run by an agent, on real hardware.
 
 ## Principles
 
-- **The agent decides; code executes.** Mechanical work (run a probe, detect steady-state, compute physics) is delegated to code. Every judgment stays with the agent.
+- **The agent decides; code executes.** Mechanical work (run a probe, compute physics) is delegated to code. Every judgment stays with the agent.
 - **Nothing is hardcoded.** Priors are starting points the agent overrides. Knowledge is derived at Frame, computed by physics, or learned from probes — never baked in.
 - **Every number comes from a real probe**, verified to have actually applied.
 - **Quality is never touched.** Only knobs that change speed, not the model, are searchable.
@@ -84,7 +84,7 @@ Propose the next Config.
 Run the Config — the cheapest test that answers the question.
 
 1. **Analytical** (free): predict via the surrogate. Kill predicted-OOM or predicted-worse-than-frontier configs here. `micro_batch` above the measured ceiling is killed on evidence, not on a prediction.
-2. **Probe** (seconds): run on real hardware. Cost-capped and adaptive — stop when the reading is steady within the noise floor, or the cost cap is hit. The agent sets the cap.
+2. **Probe** (seconds): run on real hardware. A fixed warmup → clean window → trace split, the same for every config, so probes rank against each other. Cost-capped; the agent sets the cap.
 3. **Extended probe** (minutes, champion only): confirm the number holds over time (fragmentation, drift, periodic stalls). Never a full training run. The ceiling is measured at a fixed shape and so does NOT predict fragmentation from varying real lengths — this is where that shows up.
 
 **Ceiling probes are not experiments.** They run on synthetic batches and answer "does it fit", never "how fast". They go to `ceiling.tsv`; only real-data probes are scored, ranked, or put on the frontier.
@@ -107,7 +107,7 @@ Fold the result into the run's records, and into beliefs.
 - **Calibrate** the surrogate with the measured residual.
 - **Update Beliefs** — write/curate claims (regime, ceilings, dead levers, calibration). Amend + link on contradiction; key by context.
 - **Update the frontier** — promote, archive, log why each config was kept or dropped.
-- **Decide convergence** — stop when the frontier stops producing and you're near the roofline, judged against the noise floor. Hard probe cap as backstop. No fixed plateau rule.
+- **Decide convergence** — stop when the frontier stops producing and you're near the roofline. Hard probe cap as backstop. No fixed plateau rule.
 
 
 

@@ -6,8 +6,8 @@ measure the peak, load the HF config + tokenizer, scan the dataset, then build.
 
 The peak FLOP/s (MFU denominator) is MEASURED once here at the run dtype and carried in the
 Profile; the loop threads it to every probe via `capture(..., peak_flops=...)`. Measuring it
-once matters: on cloud GPUs the measured peak swings ~28% run-to-run while the step-time noise
-floor is ~1%, so if each probe measured its own, probe-to-probe MFU would be mostly noise.
+once matters: on cloud GPUs the measured peak swings ~28% run-to-run while step time varies
+~1%, so if each probe measured its own, probe-to-probe MFU would be mostly measurement noise.
 
 `model_state_fits` covers the model state ONLY — weights/grads/optimizer. Activations are not in
 it, so a positive `activation_headroom_gb` is what actually decides whether a config runs.

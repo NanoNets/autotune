@@ -40,7 +40,6 @@ _TOLERANCE = 0.02
 class Observation:
     status: str = "ok"                 # ok / oom / error / invalid (impossible reading, see error)
     gpu: str = ""                      # hardware LABEL from the input — identifies, never priced
-    gpu_seconds: float = None          # wall-clock the probe held the device, setup to trace
     peak_flops: float = None           # measured dense-GEMM peak on this device (MFU denominator)
     peak_dtype: str = None             # dtype the peak was measured at — MFU is only apples-to-
                                        #   apples when it matches the dtype the model ran in
@@ -130,7 +129,6 @@ def diagnose(capture, params, tokens, gpu):
     peak = getattr(capture, "peak_flops", None)
     base = dict(
         status=capture.status, gpu=gpu, error=capture.error, trace_path=trace_path,
-        gpu_seconds=getattr(capture, "gpu_seconds", None),
         peak_flops=peak, peak_dtype=getattr(capture, "peak_dtype", None),
         peak_mem_bw_gb_s=getattr(capture, "peak_mem_bw_gb_s", None),
         device_type=getattr(capture, "device", None),

@@ -140,14 +140,6 @@ def test_data_wait_is_unknown_without_a_dataloader_annotation():
     assert _obs().data_wait_s == 300e-6                 # present: read as before
 
 
-def test_gpu_seconds_flow_through_on_every_status():
-    for status in ("ok", "oom", "error"):
-        cap = _cap(status=status, step_times=[] if status != "ok" else None)
-        cap.gpu_seconds = 12.5
-        assert diagnose(cap, params=PARAMS, tokens=TOKENS, gpu=GPU).gpu_seconds == 12.5
-    assert _obs().gpu_seconds is None                   # a capture without it: unknown
-
-
 def test_a_cuda_trace_with_no_kernels_is_unknown_not_idle():
     """A failed trace (seen at 38.97/39.5GB reserved) must not read as a 0%-busy GPU."""
     empty = {**TRACE, "traceEvents": [e for e in TRACE["traceEvents"] if e["cat"] != "kernel"]}
