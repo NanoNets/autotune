@@ -29,7 +29,7 @@ TRACE = {
 
 PARAMS, TOKENS, GPU = 1_000_000, 1_000, "A100"     # GPU is a label now, not a spec key
 PEAK = 3.12e14                                     # measured peak handed over by the capture
-STEP_TIMES = [1.0e-3, 1.1e-3, 0.9e-3]   # median 1.0 ms, with spread -> nonzero noise floor
+STEP_TIMES = [1.0e-3, 1.1e-3, 0.9e-3]   # median 1.0 ms, with spread -> nonzero cv
 MEMORY = {"peak_gb": 12.0, "reserved_gb": 14.0, "total_gb": 80.0, "headroom_gb": 66.0}
 CPU = {"mean": 62.0, "max": 88.0, "nproc": 16}
 
@@ -95,8 +95,10 @@ def test_caller_tokens_are_the_fallback_when_steps_are_uncounted():
     assert abs(o.mfu - mfu(training_flops(PARAMS, TOKENS), 1.0e-3, PEAK)) < 1e-12   # mean = 1ms
 
 
-def test_noise_floor():
+def test_step_time_cv_is_std_over_mean():
     assert _obs().step_time_cv > 0                      # spread -> nonzero cv
+    o = diagnose(_cap(step_times=[1.0e-3, 1.0e-3, 4.0e-3]), params=PARAMS, tokens=TOKENS, gpu=GPU)
+    assert o.step_time_cv == 0.7071                     # pstdev 1.414ms / mean 2ms, not / median 1ms
     o1 = diagnose(_cap(step_times=[1.0e-3]), params=PARAMS, tokens=TOKENS, gpu=GPU)
     assert o1.step_time_cv == 0.0                       # single sample -> 0
 
@@ -128,6 +130,14 @@ def test_no_reference_wall_means_no_trace_fractions():
     o = diagnose(_cap(ref=None, profiled=None), params=PARAMS, tokens=TOKENS, gpu=GPU)
     assert o.gpu_active_frac is None and o.gap_s is None and o.data_wait_frac is None
     assert o.gpu_busy_s == 120e-6                       # the trace itself still reports
+
+
+def test_data_wait_is_unknown_without_a_dataloader_annotation():
+    """A script that fetches without a DataLoader has no span to read: null, never a measured 0."""
+    trace = {**TRACE, "traceEvents": [e for e in TRACE["traceEvents"] if e.get("name") != "dataloader"]}
+    o = diagnose(_cap(trace=trace), params=PARAMS, tokens=TOKENS, gpu=GPU)
+    assert o.data_wait_s is None and o.data_wait_frac is None
+    assert _obs().data_wait_s == 300e-6                 # present: read as before
 
 
 def test_a_cuda_trace_with_no_kernels_is_unknown_not_idle():

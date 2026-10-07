@@ -107,6 +107,7 @@ class Attach:
         self._trained = set()                          # ids of the parameters the optimizer trains
         self._step_bad = False                         # a call in this step had no token tensor
         self._tokens_unknown = None                    # why tokens can't be reported, if they can't
+        self._mem = None                               # the clean window's peak memory
         self.model_trained = None                      # the model's checkpoint name, when it has one
 
     # ---- lifecycle -------------------------------------------------------------------------
@@ -229,6 +230,7 @@ class Attach:
                 self.step_tokens.append(step_tok)
             if n == w + c:
                 self._stop_cpu()
+                self._mem = _read_memory(self.device)   # the window's peak, before the traced step
                 self._start_profiled()
 
     # ---- profiled step ---------------------------------------------------------------------
@@ -274,7 +276,7 @@ class Attach:
                             peak_flops=self.peak_flops,
                             peak_dtype=str(self.dtype).replace("torch.", ""),
                             peak_mem_bw_gb_s=self.peak_mem_bw_gb_s,
-                            memory=_read_memory(self.device), cpu=self._cpu, device=self.device)
+                            memory=self._mem, cpu=self._cpu, device=self.device)
         self.done = True
         self.uninstall()
         if self.on_done is not None:

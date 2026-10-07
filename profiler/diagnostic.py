@@ -2,7 +2,7 @@
 
 Torch-free: `diagnose` takes a capture-like object (any object with .status, .step_times_s,
 .trace, .memory, .error) plus plain numbers, so it's unit-testable without a GPU. Reports raw
-signals — MFU (achieved / MEASURED peak, the "utilized well" number), GPU-active, data-wait, idle, noise floor, memory —
+signals — MFU (achieved / MEASURED peak, the "utilized well" number), GPU-active, data-wait, idle, step-time spread, memory —
 plus coverage stats (how much the top-8 kernels represent, idle shape) so the agent can tell
 when to drill into the raw trace, and a `trace_path` pointer so it can. No labels, no lever
 suggestions.
@@ -48,7 +48,7 @@ class Observation:
     step_time_s: float = None          # clean wall-clock per step (profiler off), MEDIAN — a
                                        #   distribution statistic, never the denominator of a rate
     step_time_mean_s: float = None     # clean wall-clock per step, MEAN — what every rate divides by
-    step_time_cv: float = None         # noise floor: coefficient of variation across clean steps
+    step_time_cv: float = None         # std / mean of the clean step times
     clean_steps_measured: int = None   # clean steps timed (rounded up to whole passes when known)
     clean_steps_requested: int = None  # what the caller asked for; differs when rounding applied
     clean_passes: float = None         # passes COMPLETED over the sample (None: unknown)
@@ -67,11 +67,12 @@ class Observation:
     phase_times_s: dict = field(default_factory=dict)   # HOST dispatch time per annotation
     gpu_phase_times_s: dict = field(default_factory=dict)  # GPU time per annotation (correlation ids)
     gpu_phase_coverage: float = None   # share of summed kernel time attributed to an annotation
-    data_wait_s: float = None
+    data_wait_s: float = None          # the `dataloader` annotation; None when there is none
     data_wait_frac: float = None
     gap_s: float = None                # reference batch GPU idle (reference_step_s - busy)
     gap_frac: float = None
-    cpu_util_mean: float = None        # over the clean window; GPU-idle + CPU pinned = preprocessing wall
+    cpu_util_mean: float = None        # whole-machine CPU % over the clean window (psutil); GPU-idle
+                                       #   + CPU pinned = preprocessing wall
     cpu_util_max: float = None
     cpu_cores_busy: float = None       # CPU-seconds burned per wall-second by this process tree
                                        #   (dataloader workers included). A counter delta, so it
@@ -101,16 +102,16 @@ class Observation:
 def _clean_timing(times, tokens):
     """Clean-window statistics. {} if nothing was measured.
 
-    `step_time_s` (median) and `step_time_cv` describe the distribution; `step_time_mean_s` and
-    `tokens_per_step` (mean over the same steps) are what rates are built from.
+    `step_time_s` (median) and `step_time_cv` (std / mean) describe the distribution;
+    `step_time_mean_s` and `tokens_per_step` (mean over the same steps) are what rates are built from.
     """
     if not times:
         return {}
-    wall = statistics.median(times)
-    out = {"step_time_s": wall,
-           "step_time_mean_s": sum(times) / len(times),
+    mean = sum(times) / len(times)
+    out = {"step_time_s": statistics.median(times),
+           "step_time_mean_s": mean,
            "clean_steps_measured": len(times),
-           "step_time_cv": round(statistics.pstdev(times) / wall, 4) if len(times) > 1 and wall else 0.0}
+           "step_time_cv": round(statistics.pstdev(times) / mean, 4) if len(times) > 1 and mean else 0.0}
     if tokens:
         out["tokens_per_step"] = sum(tokens) / len(tokens)
     return out
@@ -174,7 +175,7 @@ def diagnose(capture, params, tokens, gpu):
 
     ref_wall = getattr(capture, "reference_step_s", None)   # same batch as the trace, profiler off
     profiled = getattr(capture, "profiled_step_s", None)    # same batch, profiler on
-    data_wait = ph_s.get("dataloader", 0.0)
+    data_wait = ph_s.get("dataloader")               # None without the annotation: unknown, not 0
 
     def frac(x, over):                                 # a trace fraction, over ITS OWN batch's wall
         return x / over if over and x is not None else None
@@ -207,7 +208,7 @@ def diagnose(capture, params, tokens, gpu):
     wait = frac(data_wait, profiled)                   # host annotation over its own profiled wall
     summary = (f"{dev_str}MFU {pct(mfu_v)} | ref-batch GPU active {pct(active)} | "
                f"data-wait {pct(wait)} | "
-               f"idle {pct(frac(gap, ref_wall))}{cpu_str} | noise +/-{cv:.0%}{occ_str}{mem_str}")
+               f"idle {pct(frac(gap, ref_wall))}{cpu_str} | step cv {cv:.0%}{occ_str}{mem_str}")
     if busy is None:
         summary += " | trace recorded no kernels: GPU signals unknown"
     if impossible:

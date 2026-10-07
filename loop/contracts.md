@@ -65,11 +65,9 @@ Everything measured from running a Config. Raw and rich.
 | `objective` | tokens/s + MFU (% of roofline), from clean-window totals |
 | `memory` | peak, headroom; on OOM: breakdown (what/how much overshot) |
 | `signals` | raw gpu/cpu util, comm, data-wait. **No derived labels** — the model interprets |
-| `provenance` | did the config apply? which kernels engaged vs silently fell back? `probe_kind`: `real` (throughput, real data) or `synthetic_ceiling` (memory only — NEVER scored for throughput) |
+| `provenance` | did the config apply? which kernels engaged vs silently fell back? |
 | `population` | which rows the clean window timed (and over how many whole passes), and which fixed reference batch the trace describes. A **script probe** (the user's own training script, `program.md` "Script mode") says so: `driver: "script"`, `clean_window: "fixed-position"` (not whole passes) and `trace_basis: "traced-step"` (not a reference batch), plus the `script`, `script_args` and `script_files` it ran. Under the axiom below, it is never `same-rows` or `same-reference-batch` evidence |
-| `cost` | gpu-seconds, $ |
-| `reliability` | measured noise/variance, steps measured, steady-state reached? |
-| `context` | framework hints/warnings, log tail |
+| `reliability` | step-time spread (`step_time_cv`), steps measured, passes completed |
 | `error` | on failure: structured cause |
 
 Invariant: raw, not pre-digested. The model reads and interprets; code does not label.
