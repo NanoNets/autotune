@@ -641,14 +641,12 @@ completions per step.
 **Status:** the estimates are implemented on branch `peft-lora` (2026-10-07): with `--lora-r` /
 `--lora-targets`, Frame counts the adapters from the config (`frame.model.lora_params`, exact
 against peft on SmolLM2-360M and Qwen2.5-0.5B), uses `4 * N_total + 2 * N_trainable` FLOPs per
-token, and charges grads + optimizer state to the adapters only (`frame/README.md`, "LoRA"). Two
-things are still open.
+token, and charges grads + optimizer state to the adapters only (`frame/README.md`, "LoRA"). One
+thing is still open (item 2).
 
-**1. The model-state estimate hasn't been checked on a GPU.** It assumes a bf16 base and fp32
-adapters (peft's default), AdamW, no master copy.
-*What would settle it:* on the §10 experiment-7 configs, Frame's `model_state_gb` within ~10% of
-`torch.cuda.memory_allocated()` right after the first optimizer step (activations freed, AdamW
-state allocated).
+**1. Model-state estimate: checked, closed.** On an A10 (2026-10-07), Frame's LoRA
+`model_state_gb` is within 4% of the memory allocated right after the first optimizer step
+(SmolLM2-360M 0.80 vs 0.833 GB, Qwen2.5-0.5B 1.05 vs 1.075 GB; `docs/verification/lora.md`).
 
 **2. The declared LoRA setup isn't cross-checked.** Frame trusts the rank and targets the agent
 read from the script. A script that also trains something else (`modules_to_save`, an unfrozen
@@ -675,3 +673,25 @@ the runner reporting both counts (`params` as N_total, plus a trainable count pa
 
 **What would settle it:** a runner LoRA probe and a script LoRA probe of the same config agree on
 step time within the known ~0.25% script offset, and on MFU.
+
+
+## 16. Frame's full fine-tune memory assumes mixed precision
+
+**Status:** future. Found 2026-10-07 while checking §14 on an A10; predates LoRA support.
+
+**The claim:** `training_memory` charges every trained weight 16 bytes (bf16 weight + bf16 grad +
+fp32 AdamW m and v + an fp32 master copy): the mixed-precision recipe. On an A10 that matched an
+fp32-weights + bf16-autocast loop within 1% (SmolLM2-360M 5.39 vs 5.44 GB). But a loop that loads
+the model in bf16 and runs plain `torch.optim.AdamW` (`examples/byo_script/torch_flags.py`) keeps
+the optimizer state in bf16 and has no master copy: ~8 bytes a weight, measured 2.76 GB. Frame
+reads ~2× high for it.
+
+**Why it matters:** the same misleading-context problem LoRA had, at half the size: an overstated
+model state can make a run look memory-bound. Nothing decides on it (the measured ceiling does).
+
+**Proposed:** make the precision recipe a Frame input next to `--dtype` (mixed vs pure), declared
+from the script or the runner (`frameworks/hf.py`'s loop is what to check first), and charge
+optimizer state at the weights' precision for "pure".
+
+**What would settle it:** the pure-bf16 rows in `docs/verification/lora.md` read within ~10% once
+the recipe is declared, with the mixed-precision rows unchanged.

@@ -85,8 +85,26 @@ Frame's LoRA estimates (`--lora-r` / `--lora-targets`) were checked against the 
 | Qwen2.5-0.5B | 8,798,208 | 8,798,208 |
 
 Frame's analytical base count is within 0.02% of the measured one (it leaves out norm and bias
-weights). The model-state memory estimate (bf16 base stored only; fp32 adapters with grads and
-AdamW state) was **not** checked on a GPU: that is `design_improvements.md` §14, item 1.
+weights).
+
+**Model-state memory, checked on a second A10 the same day** (fresh box, same pins). Each model
+was loaded, run for one training step, and `torch.cuda.memory_allocated()` read right after
+`optimizer.step()`: activations freed, weights + grads + AdamW state held, which is exactly what
+Frame's `model_state_gb` estimates.
+
+| Model | Setup | Frame | Measured | Diff |
+|---|---|---|---|---|
+| SmolLM2-360M | LoRA (bf16 base, peft fp32 adapters, AdamW over adapters) | 0.80 GB | 0.833 GB | −4.0% |
+| Qwen2.5-0.5B | LoRA | 1.05 GB | 1.075 GB | −2.3% |
+| SmolLM2-360M | full, fp32 weights + bf16 autocast | 5.39 GB | 5.442 GB | −1.0% |
+| Qwen2.5-0.5B | full, fp32 weights + bf16 autocast | 7.36 GB | 7.392 GB | −0.4% |
+| SmolLM2-360M | full, pure bf16 (bf16 weights and AdamW state) | 5.39 GB | 2.755 GB | +96% |
+| Qwen2.5-0.5B | full, pure bf16 | 7.36 GB | 3.727 GB | +98% |
+
+The LoRA estimate is within 4% (it leaves out norms and biases). The full fine-tune estimate
+assumes mixed precision (16 bytes a weight) and matches that setup within 1%; a pure-bf16 loop
+(`torch_flags.py`'s style) keeps AdamW state in bf16 (~8 bytes a weight), so Frame reads ~2× high
+there. That full fine-tune mismatch predates this branch and is `design_improvements.md` §16.
 
 ## CPU tests
 
