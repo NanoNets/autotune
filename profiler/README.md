@@ -261,11 +261,19 @@ the **attached capture** instead, started by `python -m profiler.launch -- train
   bookkeeping, so don't compare it with runner probes.
 - **Params are the optimizer's (trainable only).** MFU under LoRA / frozen weights reads far too low
   until `design_improvements.md` §10.
-- **Samples under packing are counted from the boundaries the batch carries**: `position_ids`
-  resetting to 0 (TRL `padding_free`, HF packed collators) or `cu_seqlens`. Without them a row is a
-  sample; a 1-D input without them is unknown (`samples_per_s` null, `sample_source` says why). A
-  script that packs with no boundary markers at all is counted per row, so its samples/s reads
-  low; `population.micro_batches.sample_source` records which rule applied.
+- **Samples are counted from the boundaries the batch carries.** `population.micro_batches.sample_source`
+  records which rule applied (`rows`, `position_ids`, `cu_seqlens`, or `unknown: <why>`).
+  - **Supported:** unpacked 2-D batches (a row is a sample); packed batches whose `position_ids`
+    reset to 0 per document, passed as a keyword (`[B, S]`, `[1, S]` or multi-axis such as mRoPE
+    `[3, B, S]`), with padding masked or not at position 0; flattened 1-D batches with a 1-D
+    `cu_seqlens` / `cu_seq_lens_q` keyword. A 1-D batch with neither is `null`.
+  - **Underestimates** (documents counted as rows, or merged): concat-and-chunk packing with no
+    markers; packing through a 4-D block-diagonal mask; packing without position resets (EOS only);
+    boundaries in other kwargs (`seq_idx`, 2-D `cu_seqlens`, `packed_seq_params`); `position_ids`
+    passed positionally; a one-token document followed by another (their 0s form one run).
+  - **Overestimates:** documents split across rows (counted once per row); context / sequence
+    parallel shards that start mid-document; padding at position 0 *after* a document with no
+    `attention_mask` passed (one extra per row).
 
 What's planned: `design_improvements.md` §7–§11.
 

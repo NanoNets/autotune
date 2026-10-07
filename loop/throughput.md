@@ -26,9 +26,15 @@ probe's row sample, while tokens/s moved **1.3%**
 (`beliefs/probe-sample-must-match-length-distribution.md`).
 
 **Packing.** A packed row holds several examples, so samples are counted from document boundaries
-(`position_ids` resets or `cu_seqlens`) when a user's script passes them, and per row otherwise.
-A script that packs without boundary markers reads low on samples/s; `sample_source` in the
-Observation's `population` says how the count was made (`profiler/README.md`, "Attached capture").
+(`position_ids` resets or a 1-D `cu_seqlens`) when a user's script passes them, and per row
+otherwise. `sample_source` in the Observation's `population` says how the count was made. Some
+layouts over- or under-count; the list of which, and in which direction, is in `profiler/README.md`,
+"Attached capture".
+
+**Comparing across packing.** samples/s ranks correctly while the packing setup is the same across
+the configs being compared: a constant counting error cancels. Across a change in packing (on/off,
+or pack length), trust it only if both probes' `sample_source` is `position_ids` or `cu_seqlens`;
+otherwise cross-check with tokens/s.
 
 | what moved | tokens/s | samples/s | reading |
 |---|---|---|---|

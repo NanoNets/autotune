@@ -132,7 +132,7 @@ class _KwModel(torch.nn.Module):
         super().__init__()
         self.emb, self.head = torch.nn.Embedding(50, 16), torch.nn.Linear(16, 50)
 
-    def forward(self, input_ids, position_ids=None, cu_seqlens=None, cu_seq_lens_q=None):
+    def forward(self, input_ids, **packing):
         return self.head(self.emb(input_ids))
 
 
@@ -187,3 +187,43 @@ def test_flattened_input_without_boundaries_is_unknown_not_the_token_count():
     assert att.step_samples == []                          # never 30
     assert att.step_tokens == [30] * CLEAN                 # tokens still known
     assert att.micro_batches["sample_source"].startswith("unknown")
+
+
+def _steps(kw):
+    return [kw] * (WARMUP + CLEAN + 2)
+
+
+def test_left_padding_at_position_zero_is_not_counted_as_documents():
+    mask = torch.tensor([[0, 0, 0, 1, 1, 1, 1, 1],                 # 4 rows, left-padded by 3/2/1/0
+                         [0, 0, 1, 1, 1, 1, 1, 1],
+                         [0, 1, 1, 1, 1, 1, 1, 1],
+                         [1, 1, 1, 1, 1, 1, 1, 1]])
+    pos = (mask.cumsum(-1) - 1).clamp(min=0)                       # pads get 0, like the real token
+    ids = torch.randint(0, 50, (4, 8))
+    att = _packed_run(_steps({"input_ids": ids, "position_ids": pos, "attention_mask": mask}))
+    assert att.step_samples == [4] * CLEAN                         # was 10: every pad a "start"
+    att = _packed_run(_steps({"input_ids": ids, "position_ids": pos}))
+    assert att.step_samples == [4] * CLEAN                         # no mask: a run of 0s is one start
+
+
+def test_packed_row_padded_at_position_zero():
+    pos = torch.cat([_pos(3, 3), torch.zeros(4, dtype=torch.long)])[None]   # 2 docs, then 4 pads at 0
+    mask = torch.tensor([[1] * 6 + [0] * 4])
+    ids = torch.randint(0, 50, (1, 10))
+    att = _packed_run(_steps({"input_ids": ids, "position_ids": pos, "attention_mask": mask}))
+    assert att.step_samples == [2] * CLEAN                         # masked pads never count
+    att = _packed_run(_steps({"input_ids": ids, "position_ids": pos}))
+    assert att.step_samples == [3] * CLEAN                         # no mask: the pad run counts once
+
+
+def test_multi_axis_position_ids_count_on_one_axis():
+    pos = torch.arange(8).expand(3, 4, 8)                          # mRoPE [3, B, S], unpacked
+    att = _packed_run(_steps({"input_ids": torch.randint(0, 50, (4, 8)), "position_ids": pos}))
+    assert att.step_samples == [4] * CLEAN                         # was 12: zeros on all 3 axes
+
+
+def test_2d_cu_seqlens_is_not_trusted():
+    ids = torch.randint(0, 50, (2, 12))
+    cu = torch.tensor([[0, 6, 12], [0, 4, 12]])                    # not the flash-attn 1-D layout
+    att = _packed_run(_steps({"input_ids": ids, "cu_seqlens": cu}))
+    assert att.step_samples == [2] * CLEAN and att.micro_batches["sample_source"] == "rows"

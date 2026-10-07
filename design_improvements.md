@@ -581,3 +581,25 @@ Adopt the short window if rankings agree and noise is within the floor.
 **Interaction:** OG and user-script probes should share one clean-window rule, or their throughput
 isn't comparable (axiom audit B5).
 
+
+## 12. Let the sample rule be declared per script, not inferred from a fixed list
+
+**Status:** design note, no code. Raised 2026-10-07 in review of PR #25.
+
+**The claim:** inferring samples from model inputs (`profiler/attach.py`, `_samples`) can't keep up.
+Collators, trainers and model families each mark document boundaries differently, and the
+supported-layout list in `profiler/README.md` ("Attached capture") only grows by patching cases one
+by one. A constant counting error still ranks correctly; one that changes between configs (e.g.
+padding counted as documents, which grows with `micro_batch`) can change the winner.
+
+**Proposal:**
+- The agent declares the sample rule at the script-contract step (`program.md` Step 3), after
+  reading the script's collator: `rows`, `position_ids`, `cu_seqlens`, or a named kwarg.
+- The profiler applies only that rule, checks each input matches it (shape, kwarg present), and
+  reports `samples_per_s = null` with a reason when it doesn't, instead of falling back to a guess.
+- Each new layout met in a real run gets a rule and a test, so the supported list grows from
+  evidence.
+
+**What would settle it:** one packed TRL run and one mRoPE (Qwen-VL) run where the declared rule's
+count matches the dataset's true document count per step, and a mismatched declaration is caught
+as `null` rather than scored.

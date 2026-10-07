@@ -85,10 +85,13 @@ def _samples(args, kwargs):
     """(samples, source) for one micro-batch: the training examples it holds, not its rows.
 
     Unpacked, a row is a sample. A packed batch holds several documents per row, marked where each
-    starts: `position_ids` reset to 0 (TRL `padding_free`, HF packed collators) or `cu_seqlens`
-    lists the offsets (flash-attn varlen). A 1-D input with neither carries no boundaries, so its
-    count is unknown, never the token count. The `position_ids` count is a device tensor (no sync
-    here); it is read at the step boundary, where we sync anyway.
+    starts: `position_ids` reset to 0 (TRL `padding_free`, HF packed collators) or a 1-D
+    `cu_seqlens` lists the offsets (flash-attn varlen). A document start is a run of 0s, so padding
+    that sits at position 0 counts once, not per token; masked positions never count; multi-axis
+    positions (mRoPE `[3, B, S]`) are read on one axis. A 1-D input with neither carries no
+    boundaries, so its count is unknown, never the token count. Supported layouts and which way the
+    count errs outside them: `profiler/README.md`, "Attached capture". The count is a device tensor
+    (no sync here); it is read at the step boundary, where we sync anyway.
     """
     x = kwargs.get("input_ids")
     if x is None:
@@ -96,13 +99,21 @@ def _samples(args, kwargs):
     if not isinstance(x, torch.Tensor) or x.dim() == 0:
         return None, None
     pos = kwargs.get("position_ids")
-    if isinstance(pos, torch.Tensor):
-        n = (pos == 0).sum()
-        if pos.dim() >= 2 and pos.shape[0] == 1 and x.dim() >= 2 and x.shape[0] > 1:
-            n = n * x.shape[0]                      # one position row broadcast over the batch
-        return n, "position_ids"
+    if isinstance(pos, torch.Tensor) and pos.dim():
+        if pos.dim() > 2:                            # multi-axis (mRoPE [3, B, S]): one axis
+            pos = pos[0]
+        if pos.dim() == 1:
+            pos = pos[None]
+        if x.dim() >= 2 and pos.shape[0] == 1 and x.shape[0] > 1:
+            pos = pos.expand(x.shape[0], -1)         # one position row broadcast over the batch
+        zero = pos == 0
+        mask = kwargs.get("attention_mask")
+        if isinstance(mask, torch.Tensor) and mask.shape == zero.shape:
+            zero = zero & (mask != 0)                # padding is never a document start
+        prev = torch.cat([torch.zeros_like(zero[:, :1]), zero[:, :-1]], dim=1)
+        return (zero & ~prev).sum(), "position_ids"  # a run of 0s is one start
     cu = next((kwargs[k] for k in ("cu_seqlens", "cu_seq_lens_q")
-               if isinstance(kwargs.get(k), torch.Tensor)), None)
+               if isinstance(kwargs.get(k), torch.Tensor) and kwargs[k].dim() == 1), None)
     if cu is not None:
         return cu.numel() - 1, "cu_seqlens"
     if x.dim() >= 2:
