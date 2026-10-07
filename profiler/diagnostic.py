@@ -56,7 +56,10 @@ class Observation:
     samples_per_s: float = None        # total clean rows / total clean time — the PRIMARY metric
     tokens_per_step: float = None      # mean tokens per clean step — the numerator of every rate
     tokens_per_s: float = None         # total clean tokens / total clean time
-    flops: float = None                # training FLOPs of the mean clean step (6ND)
+    flops: float = None                # training FLOPs of the mean clean step:
+                                       #   (4 * params_total + 2 * params_trainable) * D, = 6ND
+    params_total: int = None           # every weight of the model (N in the forward)
+    params_trainable: int = None       # weights the optimizer trains (LoRA: the adapters only)
     roofline_floor_s: float = None
     mfu: float = None                  # achieved / peak over clean-window totals
     gpu_busy_s: float = None           # reference batch: union of kernel intervals, profiled run
@@ -121,18 +124,22 @@ def _clean_timing(times, tokens, samples=None):
     return out
 
 
-def diagnose(capture, params, tokens, gpu):
+def diagnose(capture, params, tokens, gpu, trainable=None):
     """capture: an object with .status, .step_times_s, .trace, .memory, .error.
 
+    params: every weight of the model (N_total); 0 / None when unknown, which means no MFU.
+    trainable: the weights that get gradients; None means all of them (a full fine-tune).
     tokens: tokens per step, used only when the capture carries no per-step counts
     (`capture.step_tokens`) — a runner whose steps are all the same size.
     """
+    trainable = params if trainable is None else trainable
     mem = capture.memory or {}
     cpu = getattr(capture, "cpu", None) or {}
     trace_path = capture.trace if isinstance(capture.trace, str) else None
     peak = getattr(capture, "peak_flops", None)
     base = dict(
         status=capture.status, gpu=gpu, error=capture.error, trace_path=trace_path,
+        params_total=params or None, params_trainable=trainable or None,
         peak_flops=peak, peak_dtype=getattr(capture, "peak_dtype", None),
         peak_mem_bw_gb_s=getattr(capture, "peak_mem_bw_gb_s", None),
         device_type=getattr(capture, "device", None),
@@ -158,10 +165,11 @@ def diagnose(capture, params, tokens, gpu):
     cv, mean_wall = timing["step_time_cv"], timing["step_time_mean_s"]
     step_tok = timing.setdefault("tokens_per_step", tokens)   # per-step counts, else the caller's
     trace = load_trace(capture.trace)
-    known = bool(step_tok and params)                  # tokens unknown (a script whose model input
-    flops = training_flops(params, step_tok) if known else None   # had no token tensor): no FLOP
-    floor = step_time_floor_s(flops, peak) if known else None     # count, so no MFU, rather
-    mfu_v = mfu(flops, mean_wall, peak) if known else None        # than a crash or a guess
+    known = bool(step_tok and params)                  # tokens or N_total unknown (no token tensor,
+    flops = (training_flops(params, step_tok, trainable)   # or a quantized base): no FLOP count,
+             if known else None)                       # so no MFU, rather than a crash or a guess
+    floor = step_time_floor_s(flops, peak) if known else None
+    mfu_v = mfu(flops, mean_wall, peak) if known else None
     tok_s = step_tok / mean_wall if step_tok and mean_wall else None
     step_rows = timing.get("samples_per_step")
     samples_s = step_rows / mean_wall if step_rows and mean_wall else None

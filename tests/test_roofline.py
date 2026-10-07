@@ -17,6 +17,14 @@ def test_training_flops_is_6ND():
     assert training_flops(params=124_000_000, tokens=1_000) == 6 * 124_000_000 * 1_000
 
 
+def test_frozen_weights_skip_only_their_weight_gradients():
+    # 2ND forward + 2ND activation grads through every weight, 2ND weight grads for trained ones
+    n, t, d = 370_000_000, 8_700_000, 16_384
+    assert training_flops(n, d, trainable=n) == training_flops(n, d) == 6 * n * d
+    assert training_flops(n, d, trainable=t) == (4 * n + 2 * t) * d
+    assert training_flops(n, d, trainable=0) == 4 * n * d             # nothing trained: no weight grads
+
+
 def test_step_time_floor_matches_peak():
     flops = training_flops(124_000_000, 1_000)          # 7.44e11
     assert abs(step_time_floor_s(flops, PEAK) - flops / PEAK) < 1e-15

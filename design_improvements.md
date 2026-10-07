@@ -429,9 +429,17 @@ inside-noise calls, and the MFU-with-padding reading.
 
 ## 10. MFU is wrong whenever weights are frozen (LoRA / PEFT); keep "model FLOPs", fix the count
 
-**Scope and owner:** a **separate branch**, now unblocked: the bring-your-own-script work it waited
-on has merged (#17, #18). Handed to a colleague; this entry is written to be read cold. Until it
-lands, MFU under LoRA is a documented known limitation of the BYO-script path.
+**Status (2026-10-07):** steps 1 and 2 below are implemented on branch `peft-lora`:
+`training_flops(params, tokens, trainable)` and the `params_total` / `params_trainable` fields. One
+change from the proposal: **N_total is not derived from the trace.** The attached capture already
+identifies the model (the module the optimizer's parameters live in, `Attach._find_root`), so
+N_total is that module's `parameters()`. That is exact, keeps embeddings in the count like the OG
+runners do (continuity with every past 6ND in `experience/`), and needs no shape parsing. A
+quantized base (QLoRA, GPTQ, AWQ) can't be counted that way and reports null. **Verified on an A10
+the same day** (`docs/verification/lora.md`): exact trainable / total counts, full fine-tune MFU
+unchanged, LoRA MFU 13.1% / 16.6% (from ~0.45%). Those read ~12-14% below the estimates below
+because the new example script steps slower than experiment 7's Trainer, not because of the count.
+What remains open is step 3 (HFU), which stays optional.
 
 **The problem, measured.** BYO experiment 7, 1× A10, peft 0.20.0, LoRA
 r=16 on every attention / MLP projection:
@@ -626,3 +634,48 @@ step. RL-style training puts generation inside the loop, which breaks several of
 **What would settle it:** one GRPO run (e.g. TRL) through the attached capture, checking that the
 rollout and update phases are timed separately and that the sample count matches the prompts and
 completions per step.
+
+
+## 14. Frame's analytical FLOPs and memory assume full fine-tuning
+
+**Status:** future. Raised 2026-10-07 while adding LoRA support to the profiler (§10).
+
+**The claim:** Frame's analytical numbers count every weight as trained:
+- `flops_per_token = 6 * params` (`frame/profile.py`), the roofline floor the loop grounds against.
+- `training_memory` (`frame/memory.py`): weights, grads, AdamW state and fp32 master weights for
+  every parameter, about 16 bytes per param. That feeds `model_state_fits`,
+  `activation_headroom_gb` and the memory breakdown.
+
+Under LoRA the real model state is about `N_total * param_bytes + N_trainable * (grad + optimizer +
+master)`. For a 7B model on a 24GB card, Frame would say ~112GB and `model_state_fits: false`; with
+LoRA it fits in about 14GB plus a few hundred MB.
+
+**Why it isn't urgent:** none of these decide anything. The measured ceiling decides whether a
+config runs, and on the script path the ceiling trial runs the user's own script, so it already
+reflects LoRA. The risk is misleading context: the agent reads Frame's summary first, and "model
+state doesn't fit" could make it escalate or rule out configs for a run that fits. Subtracting a
+full fine-tune model state from a measured peak to estimate activations also goes wrong.
+
+**Proposed:** Frame learns N_trainable before any probe (from the script contract, `program.md`
+Step 3, or a memory-only trial that already sees the optimizer) and uses
+`(4 * N_total + 2 * N_trainable)` per token and the split memory model above.
+
+**What would settle it:** Frame's model state for a LoRA run within ~10% of the measured peak
+minus activations, on the §10 experiment-7 configs.
+
+## 15. LoRA as a run parameter for the OG runner
+
+**Status:** future. Raised 2026-10-07; LoRA currently runs only through a user's own script.
+
+**The claim:** `frameworks/hf.py` trains every weight (`self.params` counts them all, and AdamW gets
+`self.model.parameters()`), so a LoRA fine-tune can only be tuned in script mode. Adding LoRA as a
+**run parameter** (like `dtype` / `seq_len`, never a knob: LoRA rank is off-limits,
+`loop/throughput.md`) would let runner probes use whole-pass clean windows and reference batches
+for LoRA runs too.
+
+**Needs:** `get_peft_model` after `from_pretrained`, an optimizer over `requires_grad` params, and
+the runner reporting both counts (`params` as N_total, plus a trainable count passed to
+`diagnose(..., trainable=...)`, already supported).
+
+**What would settle it:** a runner LoRA probe and a script LoRA probe of the same config agree on
+step time within the known ~0.25% script offset, and on MFU.

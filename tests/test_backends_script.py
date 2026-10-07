@@ -43,7 +43,9 @@ SCRIPT = textwrap.dedent(f'''
     transform = torch.nn.Identity()                         # no parameters; called before the model
     reference = torch.nn.Sequential(torch.nn.Embedding(64, 16), torch.nn.Linear(16, 64))
     reference.requires_grad_(False)                         # frozen, e.g. a distillation teacher
-    opt = torch.optim.AdamW(model.parameters())
+    if a.mode == "frozen_embed":                         # LoRA-like: part of the model frozen
+        model[0].requires_grad_(False)
+    opt = torch.optim.AdamW([p for p in model.parameters() if p.requires_grad])
     data = DataLoader(TensorDataset(torch.randint(0, 64, (256, {SEQ}))), batch_size={BATCH})
     it = iter(data)
     for step in range(1, a.max_steps + 1):
@@ -88,6 +90,18 @@ def test_a_user_script_becomes_an_observation(tmp_path):
     assert pop["clean_window"] == "fixed-position"                 # not whole passes: said, not hidden
     assert pop["script"].endswith("train.py") and pop["script_args"] == ["--max-steps", "8"]
     assert pop["micro_batches"]["forwards"] == pop["micro_batches"]["backwards"] == 1
+
+
+def test_frozen_weights_reach_the_observation_as_total_and_trainable(tmp_path):
+    """The optimizer trains the Linear only; N_total is the whole model, and MFU uses both."""
+    embed, linear = 64 * 16, 16 * 64 + 64
+    obs = probe(tmp_path, "--max-steps", "8", "--mode", "frozen_embed")
+    assert obs["status"] == "ok", obs["error"]
+    assert obs["params_trainable"] == linear and obs["params_total"] == embed + linear
+    assert obs["flops"] == (4 * (embed + linear) + 2 * linear) * obs["tokens_per_step"]
+    assert obs["population"]["micro_batches"]["params_source"] == "root module: all parameters"
+    full = probe(tmp_path, "--max-steps", "8")                     # full fine-tune: the two agree
+    assert full["params_total"] == full["params_trainable"] == embed + linear
 
 
 def test_grad_accum_is_seen_through_the_script(tmp_path):

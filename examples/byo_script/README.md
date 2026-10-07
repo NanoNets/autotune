@@ -18,12 +18,13 @@ which is also how a **ceiling trial** points them at Frame's `ceiling_rows.jsonl
 | `trainer_hardcoded.py` | **hardcoded** in `TrainingArguments(...)` | asks: move them to a config file / expose as flags / leave untuned |
 | `trainer_no_budget.py` | flags, but **no step budget** | asks permission to add one (on a copy), or stops |
 | `torch_flags.py` | `argparse` flags, plain PyTorch loop | tunes flags via `script_args` |
+| `torch_lora.py` | `argparse` flags, plain PyTorch loop, **LoRA** (PEFT, base frozen; needs `peft`) | tunes flags via `script_args`; LoRA rank / alpha / targets are off-limits |
 
 Where the **data source** lives decides how a ceiling trial reaches it:
 
 | Script | Data source | A ceiling trial points at the rows through |
 |---|---|---|
-| `trainer_flags.py`, `torch_flags.py` | a flag (`--data_path` / `--data-path`) | `script_args` |
+| `trainer_flags.py`, `torch_flags.py`, `torch_lora.py` | a flag (`--data_path` / `--data-path`) | `script_args` |
 | `trainer_yaml.py` + `data.yaml` | a config key (`path`) | a per-trial config copy, `runs/<run>/probes/ceiling_mbN.yaml` |
 | `trainer_hardcoded_data.py` | a **hardcoded** path (`data/train.jsonl`) | the Step 2b question: move it to a flag or config, on a copy |
 | `trainer_hub_data.py` | a **hub id** only (`load_dataset("Salesforce/wikitext", ...)`) | treated as hardcoded: Step 2b |

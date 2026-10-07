@@ -259,3 +259,28 @@ if __name__ == "__main__":
         if _n.startswith("test_") and callable(_f):
             _f(); print(f"ok  {_n}")
     print("all passed")
+
+
+def test_frozen_weights_mfu_counts_the_total_and_the_trainable():
+    """LoRA: N_total runs the forward and activation grads; only N_trainable gets weight grads."""
+    total, trainable = 370_000_000, 8_700_000
+    o = diagnose(_cap(), params=total, tokens=TOKENS, gpu=GPU, trainable=trainable)
+    assert o.params_total == total and o.params_trainable == trainable
+    assert o.flops == (4 * total + 2 * trainable) * TOKENS
+    assert abs(o.mfu - mfu(training_flops(total, TOKENS, trainable), 1.0e-3, PEAK)) < 1e-12
+
+
+def test_full_fine_tune_mfu_is_unchanged():
+    """No trainable count (every OG runner): exactly the old 6ND, so past MFUs stay comparable."""
+    o = _obs()
+    assert o.params_total == o.params_trainable == PARAMS
+    assert o.flops == 6 * PARAMS * TOKENS
+    assert o.mfu == diagnose(_cap(), params=PARAMS, tokens=TOKENS, gpu=GPU, trainable=PARAMS).mfu
+
+
+def test_unknown_total_means_no_mfu_not_the_trainable_count():
+    """A quantized base: the trainable count is known, but MFU from it alone would be ~30x low."""
+    o = diagnose(_cap(), params=0, tokens=TOKENS, gpu=GPU, trainable=8_700_000)
+    assert o.mfu is None and o.flops is None and o.roofline_floor_s is None
+    assert o.params_total is None and o.params_trainable == 8_700_000
+    assert o.tokens_per_s is not None                   # everything measured still reports
