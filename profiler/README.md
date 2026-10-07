@@ -270,12 +270,15 @@ the **attached capture** instead, started by `python -m profiler.launch -- train
   - **Underestimates** (documents counted as rows, or merged): concat-and-chunk packing with no
     markers; packing through a 4-D block-diagonal mask; packing without position resets (EOS only);
     boundaries in other kwargs (`seq_idx`, 2-D `cu_seqlens`, `packed_seq_params`); `position_ids`
-    passed positionally; a one-token document followed by another (their 0s form one run).
+    passed positionally; a one-token document followed by another (their 0s form one run); left
+    padding with broadcast `[1, S]` positions `0…S-1` and an `attention_mask` (each padded row's
+    position 0 is a masked pad, so that row counts 0; left padding is for generation, outside
+    SFT / PEFT — `design_improvements.md` §13).
   - **Overestimates:** documents split across rows (counted once per row); context / sequence
     parallel shards that start mid-document; padding at position 0 *after* a document with no
     `attention_mask` passed (one extra per row).
 
-What's planned: `design_improvements.md` §7–§11.
+What's planned: `design_improvements.md` §7–§13.
 
 ## Adapters
 

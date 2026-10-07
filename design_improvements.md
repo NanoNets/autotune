@@ -603,3 +603,26 @@ padding counted as documents, which grows with `micro_batch`) can change the win
 **What would settle it:** one packed TRL run and one mRoPE (Qwen-VL) run where the declared rule's
 count matches the dataset's true document count per step, and a mismatched declaration is caught
 as `null` rather than scored.
+
+
+## 13. RL-style training (PPO / GRPO / online DPO)
+
+**Status:** future, out of the current scope (SFT + PEFT). Raised 2026-10-07 in review of PR #25.
+
+**The claim:** the probe assumes a plain training step: fetch a batch, forward, backward, optimizer
+step. RL-style training puts generation inside the loop, which breaks several of those assumptions:
+
+- **What a step and a sample are.** A probe would need to time rollouts separately from the
+  training update, and decide whether a sample is a prompt, a completion, or a prompt-completion
+  pair. samples/s is undefined until then.
+- **Left padding.** Prompts are left-padded for generation. With broadcast `[1, S]` positions
+  `0…S-1` and an `attention_mask`, each padded row's position 0 is a masked pad, so `_samples`
+  (`profiler/attach.py`) counts that row as 0 (listed under "Underestimates" in
+  `profiler/README.md`). The fix: count at least one sample for any row with an unmasked token
+  (`max(starts_in_row, 1)`), with a test.
+- **More than one model on the device.** Reference, reward and value models share the GPU, which
+  changes the memory picture the ceiling trials (`frame/ceiling.py`) assume.
+
+**What would settle it:** one GRPO run (e.g. TRL) through the attached capture, checking that the
+rollout and update phases are timed separately and that the sample count matches the prompts and
+completions per step.
