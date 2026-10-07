@@ -235,6 +235,27 @@ A user's script has no `data="synthetic"` switch, so the worst case reaches it a
    ignored the rows, dropped / split / packed them, or runs at another sequence length (then
    re-run Frame at the script's real length).
 
+### LoRA
+
+Frame's FLOPs and model-state memory are analytical, and by default they assume every weight
+trains. For a script that trains LoRA adapters on a frozen base, pass the script's own rank and
+target modules (read from the script; never changed): `--lora-r 16 --lora-targets
+q_proj,k_proj,v_proj,o_proj,gate_proj,up_proj,down_proj` (or `all-linear`). Then:
+
+- **The adapters are counted from the config:** `r * (d_in + d_out)` per targeted projection per
+  layer (`frame.model.lora_params`). On SmolLM2-360M and Qwen2.5-0.5B at r=16 on all 7 projections
+  this is exactly the trainable count peft reports (8,683,520 and 8,798,208).
+- **FLOPs per token** = `4 * N_total + 2 * N_trainable`, the profiler's formula: forward and
+  activation gradients run through every weight, weight gradients only through the adapters.
+- **Model state:** the frozen base is only stored (2 bytes a weight in bf16); the adapters carry
+  fp32 weights, grads and AdamW state (16 bytes each, no master copy: peft keeps them in fp32). An
+  8B model drops from ~120GB to ~15GB, so `model_state_fits` turns true on a 24GB card.
+- **Targets it can't count** (other naming such as GPT-2's `c_attn`, an ungated MLP, MLP targets on
+  an MoE) leave `params_trainable` null and the full fine-tune numbers in place, with a note saying
+  they overstate memory for this run. Never a guess.
+
+The measured ceiling needs nothing extra: its trials run the user's own LoRA script.
+
 `--sample` is rounded down to a multiple of `--effective-batch` (1000 → 992 at 16), so one pass over
 the probe sample is whole optimizer steps. The pool streams the whole split by default: seconds for
 a fine-tuning set, since only the pool is tokenized. `--max-scan` caps the rows streamed for a corpus
@@ -279,6 +300,8 @@ One compact JSON object — small on purpose, so it can sit in the agent's conte
 - **memory** — where the memory goes; pairs with the profiler's *measured* peak to reveal activations.
 - **flops_per_token / activation_headroom_gb / model_state_fits** — the roofline math and the
   analytical fit check (`model_state_fits` is weights+grads+optimizer only).
+- **lora** — `null` for a full fine-tune. For a LoRA run (`--lora-r` / `--lora-targets`): the rank,
+  the targets, and `params_trainable` / `params_total`. See "LoRA" below.
 - **max_len / ceiling** — the human's declared sequence length and the **measured** micro_batch
   ceiling at it. This is what actually decides whether a config runs; `activation_headroom_gb` only
   says how much room there was to work with. `null` ceiling means it was not measured — it never

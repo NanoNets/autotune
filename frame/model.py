@@ -111,6 +111,37 @@ def internals(config):
     }
 
 
+# LoRA targets by module name (llama-family naming, which most decoder LMs use).
+_ATTN_TARGETS = ("q_proj", "k_proj", "v_proj", "o_proj")
+_MLP_TARGETS = ("gate_proj", "up_proj", "down_proj")
+
+
+def lora_params(internals, r, targets):
+    """Trainable parameters LoRA adds: `r * (d_in + d_out)` per targeted projection per layer
+    (A is d_in x r, B is r x d_out), from the dims `internals` already read off the config.
+
+    targets: module names (`q_proj`, ..., `down_proj`) or peft's "all-linear" (every projection in
+    the blocks, not `lm_head`). Returns None, never a guess, for a name this doesn't know (other
+    families name their layers differently), an ungated MLP, or MLP targets on an MoE (where the
+    expert weights are laid out is model- and version-specific).
+    """
+    targets = [targets] if isinstance(targets, str) else list(targets)
+    if targets == ["all-linear"]:
+        targets = list(_ATTN_TARGETS + _MLP_TARGETS)
+    if any(t not in _ATTN_TARGETS + _MLP_TARGETS for t in targets):
+        return None
+    if any(t in _MLP_TARGETS for t in targets) and (not internals["gated_mlp"] or internals["moe"]):
+        return None
+    h, inter = internals["hidden"], internals["intermediate"]
+    q_out = internals["heads"] * internals["head_dim"]
+    kv_out = internals["kv_heads"] * internals["head_dim"]
+    shapes = {"q_proj": (h, q_out), "k_proj": (h, kv_out), "v_proj": (h, kv_out),
+              "o_proj": (q_out, h), "gate_proj": (h, inter), "up_proj": (h, inter),
+              "down_proj": (inter, h)}
+    per_layer = sum(r * (shapes[t][0] + shapes[t][1]) for t in set(targets))
+    return internals["layers"] * per_layer
+
+
 def load(model):
     """model: an HF hub id or local path. Needs `transformers`."""
     from transformers import AutoConfig

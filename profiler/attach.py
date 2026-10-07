@@ -121,6 +121,21 @@ def _samples(args, kwargs):
     return None, "unknown: 1-D input without position_ids or cu_seqlens"
 
 
+def _count_params(model):
+    """(N_total, source): every parameter of the model, trained or frozen — the N the forward and
+    the activation gradients run through (LoRA / PEFT: the base weights plus the adapters).
+
+    A quantized base (QLoRA's 4-bit `Params4bit`, int8, or GPTQ / AWQ `qweight` buffers) packs
+    several weights per element or keeps them outside `parameters()`, so `numel` would understate
+    N: unknown (None), never a guess.
+    """
+    params = list(model.parameters())
+    packed = [p for p in params if not p.is_floating_point()]
+    if packed or any(name.endswith("qweight") for name, _ in model.named_buffers()):
+        return None, "unknown: quantized weights (packed numel understates the count)"
+    return sum(p.numel() for p in params), "root module: all parameters"
+
+
 class Attach:
     def __init__(self, device="cpu", warmup=3, clean_steps=10, trace_path=None, dtype=None,
                  peak_flops=None, peak_mem_bw_gb_s=None):
@@ -152,6 +167,8 @@ class Attach:
         self._tokens_unknown = None                    # why tokens can't be reported, if they can't
         self._mem = None                               # the clean window's peak memory
         self.model_trained = None                      # the model's checkpoint name, when it has one
+        self.params_total = None                       # every parameter of the model, trained or not
+        self.params_source = None                      # how params_total was counted, or why it can't be
 
     # ---- lifecycle -------------------------------------------------------------------------
     def install(self):
@@ -177,6 +194,7 @@ class Attach:
         self._root_hook = None
         cfg = getattr(mod, "config", None)              # HF models (and peft wrappers) carry the
         self.model_trained = getattr(cfg, "_name_or_path", None) or None   # checkpoint they came from
+        self.params_total, self.params_source = _count_params(mod)
 
     def _count(self, mod, args, kwargs):
         n = _padded_tokens(args, kwargs)
@@ -243,8 +261,10 @@ class Attach:
     def _on_optimizer_step(self, opt, args, kwargs):
         if self._opt is None:                          # adopt the first optimizer; ignore others
             self._opt = opt
-            self.params = sum(p.numel() for g in opt.param_groups for p in g["params"])
-            self._trained = {id(p) for g in opt.param_groups for p in g["params"]}
+            trained = [p for g in opt.param_groups for p in g["params"] if p.requires_grad]
+            self.params = sum(p.numel() for p in trained)   # a frozen weight handed to the
+            self._trained = {id(p) for p in trained}        # optimizer (`AdamW(model.parameters())`
+                                                            # under LoRA) gets no weight gradient
             self._root_hook = _module.register_module_forward_pre_hook(self._find_root)
         if opt is self._opt and not self.done:
             self._on_step()
@@ -316,6 +336,7 @@ class Attach:
         else:                                          # B1: the timed steps' own tokens
             self.tokens = sum(self.step_tokens) / len(self.step_tokens)
             found["token_source"] = f"hook: mean of {len(self.step_tokens)} clean steps (padded)"
+        found["params_source"] = self.params_source
         unknown = [s for s in self._sample_sources if s is None or s.startswith("unknown")]
         if unknown:                                    # any uncounted micro-batch: no partial count
             self.step_samples = []

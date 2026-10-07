@@ -18,7 +18,7 @@ Anything the profiler drives implements:
 | `setup(config)` | build the model + optimizer + data; set `self.params` |
 | `step()` | run **one** optimizer step, each phase wrapped in `record_function("dataloader"/"forward"/"backward"/"optimizer")` |
 | `tokens_per_step()` | tokens processed per optimizer step (the D in the roofline) |
-| `.params` | parameter count (the N in the roofline) |
+| `.params` | total parameter count, every weight of the model (N_total in the roofline). Runners train every weight, so it is also the trainable count |
 
 The profiler is unchanged across runners — it just calls these.
 

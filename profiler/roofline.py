@@ -5,6 +5,12 @@ step (forward 2ND + backward 4ND) — the standard MFU estimate (PaLM / nanoGPT)
 the attention term (~12 * layers * d_model * seq per token), a later refinement; for most
 fine-tuning shapes 6ND is within a few percent.
 
+With frozen weights (LoRA / PEFT) the backward's 4ND splits: gradients back through the
+activations (2ND) still flow through every weight, but weight gradients (2ND) exist only for the
+trained ones. So it is (4 * N_total + 2 * N_trainable) * D, which is exactly 6ND when every
+weight trains. These are model FLOPs, not executed ones: recompute (gradient checkpointing) is not
+counted, so MFU can't rise while training slows.
+
 The denominator is measured on the actual device (see `capture.measure_peak_flops`), not read
 from a datasheet table: a table can't tell an A10 from an A10G, quietly quotes sparse numbers,
 and hard-fails on any chip it has never heard of. A measured peak also prices in clock
@@ -13,9 +19,11 @@ takes the number.
 """
 
 
-def training_flops(params: int, tokens: int) -> float:
-    """Approx training FLOPs to process `tokens` tokens through a `params`-param model."""
-    return 6.0 * params * tokens
+def training_flops(params: int, tokens: int, trainable: int = None) -> float:
+    """Approx training FLOPs to process `tokens` tokens through a `params`-param model, of which
+    `trainable` get weight gradients (None: all of them, i.e. 6ND)."""
+    trainable = params if trainable is None else trainable
+    return (4.0 * params + 2.0 * trainable) * tokens
 
 
 def step_time_floor_s(flops: float, peak_flops: float) -> float:

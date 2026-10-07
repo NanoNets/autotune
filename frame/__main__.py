@@ -54,7 +54,15 @@ def main():
                     help='one row as JSON with "{TEXT}" where the long text goes (chat / prompt data)')
     ap.add_argument("--ceiling-rows-format", default="text", choices=("text", "ids"),
                     help="text rows (default) or pre-tokenized input_ids rows")
+    ap.add_argument("--lora-r", type=int, default=None,
+                    help="the script trains LoRA at this rank (read it from the script; never change it)")
+    ap.add_argument("--lora-targets", default=None,
+                    help='its target modules, comma-separated (q_proj,v_proj,...) or "all-linear"')
     a = ap.parse_args()
+    if (a.lora_r is None) != (a.lora_targets is None):
+        ap.error("--lora-r and --lora-targets go together")
+    lora = ({"r": a.lora_r, "targets": [t.strip() for t in a.lora_targets.split(",")]}
+            if a.lora_r is not None else None)
 
     runner = None
     if a.ceiling:
@@ -73,7 +81,7 @@ def main():
               runner=runner, seed=a.seed, on_trial=on_trial, sample_path=a.sample_out,
               sample_seed=a.sample_seed, max_scan=a.max_scan,
               ceiling_rows_path=a.ceiling_rows_out, ceiling_row_template=a.ceiling_row_template,
-              ceiling_rows_format=a.ceiling_rows_format)
+              ceiling_rows_format=a.ceiling_rows_format, lora=lora)
     if a.ceiling_rows_out:
         print(f"frame: ceiling rows written to {a.ceiling_rows_out} (point the script's data at it)")
     if a.sample_out:

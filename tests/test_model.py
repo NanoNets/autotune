@@ -104,3 +104,36 @@ if __name__ == "__main__":
         if _n.startswith("test_") and callable(_f):
             _f(); print(f"ok  {_n}")
     print("all passed")
+
+
+# ---- LoRA adapters, counted from the dims ---------------------------------------------------
+
+from frame.model import lora_params  # noqa: E402
+
+SMOLLM2_360M = dict(model_type="llama", architectures=["LlamaForCausalLM"],
+                    num_hidden_layers=32, hidden_size=960, num_attention_heads=15,
+                    num_key_value_heads=5, vocab_size=49152, intermediate_size=2560,
+                    max_position_embeddings=8192, hidden_act="silu",
+                    tie_word_embeddings=True, torch_dtype="bfloat16")
+
+
+def test_lora_params_match_the_counts_peft_reported():
+    """r=16 on all 7 projections: exactly what peft's optimizer held in BYO experiment 7 and on
+    the A10 (docs/verification/lora.md)."""
+    assert lora_params(internals(SMOLLM2_360M), 16, "all-linear") == 8_683_520
+    assert lora_params(internals(QWEN25_05B), 16, "all-linear") == 8_798_208
+    names = ["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"]
+    assert lora_params(internals(QWEN25_05B), 16, names) == 8_798_208
+
+
+def test_lora_params_per_projection():
+    m = internals(LLAMA3_8B)                            # q 4096->4096, k/v 4096->1024 (GQA)
+    assert lora_params(m, 8, ["q_proj"]) == 32 * 8 * (4096 + 4096)
+    assert lora_params(m, 8, ["q_proj", "v_proj"]) == 32 * 8 * ((4096 + 4096) + (4096 + 1024))
+    assert lora_params(m, 8, ["down_proj"]) == 32 * 8 * (14336 + 4096)
+
+
+def test_lora_params_unknown_rather_than_guessed():
+    assert lora_params(internals(LLAMA3_8B), 8, ["c_attn"]) is None              # GPT-2 naming
+    assert lora_params(internals(MIXTRAL_8X7B), 8, ["gate_proj"]) is None        # MoE experts
+    assert lora_params(internals(MIXTRAL_8X7B), 8, ["q_proj"]) is not None       # attention is fine

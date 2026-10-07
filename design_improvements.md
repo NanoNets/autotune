@@ -429,9 +429,17 @@ inside-noise calls, and the MFU-with-padding reading.
 
 ## 10. MFU is wrong whenever weights are frozen (LoRA / PEFT); keep "model FLOPs", fix the count
 
-**Scope and owner:** a **separate branch**, now unblocked: the bring-your-own-script work it waited
-on has merged (#17, #18). Handed to a colleague; this entry is written to be read cold. Until it
-lands, MFU under LoRA is a documented known limitation of the BYO-script path.
+**Status (2026-10-07):** steps 1 and 2 below are implemented on branch `peft-lora`:
+`training_flops(params, tokens, trainable)` and the `params_total` / `params_trainable` fields. One
+change from the proposal: **N_total is not derived from the trace.** The attached capture already
+identifies the model (the module the optimizer's parameters live in, `Attach._find_root`), so
+N_total is that module's `parameters()`. That is exact, keeps embeddings in the count like the OG
+runners do (continuity with every past 6ND in `experience/`), and needs no shape parsing. A
+quantized base (QLoRA, GPTQ, AWQ) can't be counted that way and reports null. **Verified on an A10
+the same day** (`docs/verification/lora.md`): exact trainable / total counts, full fine-tune MFU
+unchanged, LoRA MFU 13.1% / 16.6% (from ~0.45%). Those read ~12-14% below the estimates below
+because the new example script steps slower than experiment 7's Trainer, not because of the count.
+What remains open is step 3 (HFU), which stays optional.
 
 **The problem, measured.** BYO experiment 7, 1× A10, peft 0.20.0, LoRA
 r=16 on every attention / MLP projection:
@@ -626,3 +634,64 @@ step. RL-style training puts generation inside the loop, which breaks several of
 **What would settle it:** one GRPO run (e.g. TRL) through the attached capture, checking that the
 rollout and update phases are timed separately and that the sample count matches the prompts and
 completions per step.
+
+
+## 14. Frame's LoRA estimates: check them against measurements
+
+**Status:** the estimates are implemented on branch `peft-lora` (2026-10-07): with `--lora-r` /
+`--lora-targets`, Frame counts the adapters from the config (`frame.model.lora_params`, exact
+against peft on SmolLM2-360M and Qwen2.5-0.5B), uses `4 * N_total + 2 * N_trainable` FLOPs per
+token, and charges grads + optimizer state to the adapters only (`frame/README.md`, "LoRA"). One
+thing is still open (item 2).
+
+**1. Model-state estimate: checked, closed.** On an A10 (2026-10-07), Frame's LoRA
+`model_state_gb` is within 4% of the memory allocated right after the first optimizer step
+(SmolLM2-360M 0.80 vs 0.833 GB, Qwen2.5-0.5B 1.05 vs 1.075 GB; `docs/verification/lora.md`).
+
+**2. The declared LoRA setup isn't cross-checked.** Frame trusts the rank and targets the agent
+read from the script. A script that also trains something else (`modules_to_save`, an unfrozen
+`lm_head`, biases) would make the estimate low.
+*Proposed:* the memory ceiling trial (`profiler/memtrial.py`) already runs the user's script up to
+its optimizer; have it record the optimizer's `requires_grad` count, and have `frame.ceiling` add a
+note when it differs from Frame's `params_trainable`.
+*What would settle it:* a script with `modules_to_save=["lm_head"]` is flagged; the plain LoRA
+script is not.
+
+## 15. LoRA as a run parameter for the OG runner
+
+**Status:** future. Raised 2026-10-07; LoRA currently runs only through a user's own script.
+
+**The claim:** `frameworks/hf.py` trains every weight (`self.params` counts them all, and AdamW gets
+`self.model.parameters()`), so a LoRA fine-tune can only be tuned in script mode. Adding LoRA as a
+**run parameter** (like `dtype` / `seq_len`, never a knob: LoRA rank is off-limits,
+`loop/throughput.md`) would let runner probes use whole-pass clean windows and reference batches
+for LoRA runs too.
+
+**Needs:** `get_peft_model` after `from_pretrained`, an optimizer over `requires_grad` params, and
+the runner reporting both counts (`params` as N_total, plus a trainable count passed to
+`diagnose(..., trainable=...)`, already supported).
+
+**What would settle it:** a runner LoRA probe and a script LoRA probe of the same config agree on
+step time within the known ~0.25% script offset, and on MFU.
+
+
+## 16. Frame's full fine-tune memory assumes mixed precision
+
+**Status:** future. Found 2026-10-07 while checking §14 on an A10; predates LoRA support.
+
+**The claim:** `training_memory` charges every trained weight 16 bytes (bf16 weight + bf16 grad +
+fp32 AdamW m and v + an fp32 master copy): the mixed-precision recipe. On an A10 that matched an
+fp32-weights + bf16-autocast loop within 1% (SmolLM2-360M 5.39 vs 5.44 GB). But a loop that loads
+the model in bf16 and runs plain `torch.optim.AdamW` (`examples/byo_script/torch_flags.py`) keeps
+the optimizer state in bf16 and has no master copy: ~8 bytes a weight, measured 2.76 GB. Frame
+reads ~2× high for it.
+
+**Why it matters:** the same misleading-context problem LoRA had, at half the size: an overstated
+model state can make a run look memory-bound. Nothing decides on it (the measured ceiling does).
+
+**Proposed:** make the precision recipe a Frame input next to `--dtype` (mixed vs pure), declared
+from the script or the runner (`frameworks/hf.py`'s loop is what to check first), and charge
+optimizer state at the weights' precision for "pure".
+
+**What would settle it:** the pure-bf16 rows in `docs/verification/lora.md` read within ~10% once
+the recipe is declared, with the mixed-precision rows unchanged.

@@ -112,8 +112,12 @@ def run_script(config):
         cap = Capture(status="error", device=config["device"],
                       error=f"launcher wrote no result (exit {returncode}): {tail[0]}")
         rec = {}
-    obs = dataclasses.asdict(diagnose(cap, params=rec.get("params") or 0,
-                                      tokens=rec.get("tokens"), gpu=config.get("gpu", "local")))
+    # `params` is the optimizer's (trainable) count; `params_total` every weight of the model the
+    # script trained. No total (a quantized base, or the model was never found) means no MFU,
+    # never the trainable count standing in for it.
+    obs = dataclasses.asdict(diagnose(cap, params=rec.get("params_total") or 0,
+                                      tokens=rec.get("tokens"), gpu=config.get("gpu", "local"),
+                                      trainable=rec.get("params")))
     obs["population"] = {**(obs.get("population") or {}), "script": config["script"],
                          "script_args": list(map(str, config.get("script_args") or [])),
                          "script_files": list(config.get("script_files") or []),

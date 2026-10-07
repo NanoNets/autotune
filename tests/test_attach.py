@@ -227,3 +227,75 @@ def test_2d_cu_seqlens_is_not_trusted():
     cu = torch.tensor([[0, 6, 12], [0, 4, 12]])                    # not the flash-attn 1-D layout
     att = _packed_run(_steps({"input_ids": ids, "cu_seqlens": cu}))
     assert att.step_samples == [2] * CLEAN and att.micro_batches["sample_source"] == "rows"
+
+
+# ---- frozen weights (LoRA / PEFT): N_total vs N_trainable ----------------------------------
+
+class _LoraLinear(torch.nn.Module):
+    """A frozen base Linear plus a trainable rank-r A/B pair, the way PEFT wraps a projection."""
+    def __init__(self, d_in, d_out, r=2):
+        super().__init__()
+        self.base = torch.nn.Linear(d_in, d_out).requires_grad_(False)
+        self.lora_A, self.lora_B = torch.nn.Linear(d_in, r, bias=False), torch.nn.Linear(r, d_out, bias=False)
+
+    def forward(self, x):
+        return self.base(x) + self.lora_B(self.lora_A(x))
+
+
+class _LoraModel(torch.nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.emb = torch.nn.Embedding(50, 16).requires_grad_(False)
+        self.proj, self.head = _LoraLinear(16, 16), torch.nn.Linear(16, 50).requires_grad_(False)
+
+    def forward(self, input_ids):
+        return self.head(self.proj(self.emb(input_ids)))
+
+
+def _lora_run(model, all_params=False):
+    torch.manual_seed(0)
+    before = nopatch.snapshot()
+    att = Attach(device="cpu", warmup=WARMUP, clean_steps=CLEAN, peak_flops=1.0, peak_mem_bw_gb_s=1.0)
+    att.install()
+    opt = torch.optim.AdamW(model.parameters() if all_params
+                            else [p for p in model.parameters() if p.requires_grad])
+    for _ in range(WARMUP + CLEAN + 2):
+        model(torch.randint(0, 50, (4, 8))).logsumexp(-1).mean().backward()
+        opt.step()
+        opt.zero_grad()
+    nopatch.verify(before)
+    return att
+
+
+def test_lora_counts_trainable_from_the_optimizer_and_total_from_the_model():
+    model = _LoraModel()
+    att = _lora_run(model)
+    adapters = sum(p.numel() for p in model.parameters() if p.requires_grad)
+    assert att.params == adapters                                        # the optimizer's: adapters
+    assert att.params_total == sum(p.numel() for p in model.parameters())   # base + adapters
+    assert att.params_total > 10 * att.params and att._root is model     # the whole model is root
+    assert att.micro_batches["params_source"] == "root module: all parameters"
+
+
+def test_frozen_weights_handed_to_the_optimizer_are_not_counted_as_trained():
+    """`AdamW(model.parameters())` under LoRA trains fine (frozen weights get no gradient, so the
+    optimizer skips them), but they must not count as trainable: that would make it 6 * N_total."""
+    model = _LoraModel()
+    att = _lora_run(model, all_params=True)
+    assert att.params == sum(p.numel() for p in model.parameters() if p.requires_grad)
+    assert att.params_total == sum(p.numel() for p in model.parameters()) and att._root is model
+
+
+def test_full_fine_tune_total_equals_trainable():
+    att, model = _run(steps=WARMUP + CLEAN + 3)                          # AdamW trains model[1] only,
+    assert att.params == sum(p.numel() for p in model[1].parameters())   # but the root is the whole
+    assert att.params_total == sum(p.numel() for p in model.parameters())   # Sequential
+
+
+def test_quantized_base_is_unknown_not_its_packed_count():
+    """QLoRA's 4-bit base packs two weights per uint8: numel would halve N, so it isn't counted."""
+    model = _LoraModel()
+    model.packed = torch.nn.Parameter(torch.zeros(8, dtype=torch.uint8), requires_grad=False)
+    att = _lora_run(model)
+    assert att.params_total is None and att.params is not None
+    assert att.micro_batches["params_source"].startswith("unknown: quantized")

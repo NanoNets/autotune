@@ -59,7 +59,8 @@ def test_missing_mem_degrades_gracefully():
 def test_dtype_drives_param_bytes_and_memory():
     bf16 = _profile(dtype="bfloat16")
     fp32 = _profile(dtype="float32")
-    assert bf16.default_config == {"dtype": "bfloat16", "param_bytes": 2, "optimizer": "adamw"}
+    assert bf16.default_config == {"dtype": "bfloat16", "param_bytes": 2, "optimizer": "adamw",
+                                   "finetune": "full"}
     assert fp32.default_config["param_bytes"] == 4
     assert fp32.memory["weights_gb"] > bf16.memory["weights_gb"]     # fp32 weights are heavier
 
@@ -185,3 +186,30 @@ if __name__ == "__main__":
         if _n.startswith("test_") and callable(_f):
             _f(); print(f"ok  {_n}")
     print("all passed")
+
+
+# ---- LoRA: the adapters are the only trained weights -----------------------------------------
+
+def test_lora_flops_and_memory_count_frozen_and_trained_separately():
+    full = _profile()
+    lora = _profile(lora={"r": 16, "targets": "all-linear"})
+    t = lora.lora["params_trainable"]
+    n = full.model["params"] + t
+    assert lora.lora["params_total"] == n and t > 0
+    assert abs(lora.flops_per_token - (4 * n + 2 * t)) < 1           # the profiler's formula
+    assert lora.flops_per_token < full.flops_per_token
+    assert lora.memory["model_state_gb"] < full.memory["model_state_gb"] / 5
+    assert lora.default_config["finetune"] == "lora" and "LoRA model-state" in lora.summary
+
+
+def test_lora_flips_the_fit_for_an_8b_on_a_24gb_card():
+    assert _profile(mem_gb=24.0).model_state_fits is False                       # full FT: ~120GB
+    assert _profile(mem_gb=24.0, lora={"r": 16, "targets": "all-linear"}).model_state_fits is True
+
+
+def test_lora_targets_it_cant_count_keep_full_numbers_and_say_so():
+    full = _profile()
+    p = _profile(lora={"r": 16, "targets": ["c_attn"]})
+    assert p.lora["params_trainable"] is None and p.flops_per_token == full.flops_per_token
+    assert p.memory == full.memory and "full-FT model-state" in p.summary
+    assert any("can't be counted" in n for n in p.notes)
