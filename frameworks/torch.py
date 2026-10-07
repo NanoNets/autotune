@@ -62,3 +62,6 @@ class TorchRunner:
 
     def tokens_per_step(self):
         return self.bs * self.seq
+
+    def last_step_samples(self):
+        return self.bs

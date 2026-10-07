@@ -95,7 +95,8 @@ Run the Config — the cheapest test that answers the question.
 
 Read the `Observation` — raw and rich. Interpret it yourself; nothing is pre-labeled.
 
-- Ground the objective against the roofline (% of achievable), not in isolation.
+- Rank on samples/s. Read MFU as context — how far the step is from the hardware limit — never as
+  the ranking key (`loop/throughput.md`).
 - Check **provenance**: did the config apply? did the kernel engage? A number that didn't apply is worse than no number.
 
 
@@ -107,10 +108,10 @@ Fold the result into the run's records, and into beliefs.
 - **Calibrate** the surrogate with the measured residual.
 - **Update Beliefs** — write/curate claims (regime, ceilings, dead levers, calibration). Amend + link on contradiction; key by context.
 - **Update the frontier** — promote, archive, log why each config was kept or dropped.
-- **Decide convergence** — stop when the frontier stops producing and you're near the roofline. Hard probe cap as backstop. No fixed plateau rule.
+- **Decide convergence** — stop when the frontier stops producing on samples/s. MFU says how much room was left; it is not the stopping rule. Hard probe cap as backstop. No fixed plateau rule.
 
 
 
 ## Output
 
-The best config + the explanation: regime, ceilings, what's dead, and % of roofline reached.
+The best config + the explanation: regime, ceilings, what's dead, samples/s baseline → best, and MFU reached as context.

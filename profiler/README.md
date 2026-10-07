@@ -1,7 +1,7 @@
 # profiler/
 
 The measurement instrument. Times a window of training steps, traces a fixed reference batch, and
-turns both into an **Observation**: the 49-field diagnostic the agent reads. Framework-agnostic
+turns both into an **Observation**: the 51-field diagnostic the agent reads. Framework-agnostic
 (it's `torch.profiler` underneath), and validated live on an A10G.
 
 ## Run it
@@ -47,7 +47,7 @@ each measuring its own population (the Measurement axiom, `loop/contracts.md`):
   `clean_steps`, warmup or loader order can't change which batch is traced.
 
 Runner hooks, all optional and duck-typed (`frameworks/hf.py` implements them):
-`steps_per_pass`, `start_pass()`, `has_reference`, `reference_step()`, `last_step_tokens()`,
+`steps_per_pass`, `start_pass()`, `has_reference`, `reference_step()`, `last_step_tokens()`, `last_step_samples()`,
 `population()`.
 A runner without a reference batch (`has_reference` false: the torch fixture, a synthetic ceiling
 trial) reuses one fixed batch, so its clean window already times the reference: `reference_step_s`
@@ -59,7 +59,7 @@ The peak is measured, never read from a table: tables can't tell an A10 from an 
 sparse numbers, and fail on hardware they've never heard of. Measuring supports any chip and prices
 in real clocks and power caps.
 
-## The Observation (49 fields)
+## The Observation (51 fields)
 
 A **flat JSON object** — one level deep, except six container fields (`population`, `phase_times_s`,
 `gpu_phase_times_s`, `provenance`, `device`, `top_kernels`). `python -m profiler` prints the one-line `summary`, then
@@ -81,44 +81,46 @@ so "unknown" can't be mistaken for "measured zero".
 | 11 | `clean_passes` | passes over the sample the clean window **completed** (so an OOM mid-window reports a partial pass). A whole number means every row was timed the same number of times, so two configs on the same `population.sample_hash` timed identical work | runner doesn't report passes (torch fixture, synthetic) |
 | 12 | `tokens_per_step` | mean tokens (padded width x rows) per **clean** step, counted per step; falls back to the caller's constant for runners that don't count | not measured |
 | 13 | `tokens_per_s` | total clean tokens / total clean time | not `ok` |
-| 14 | `flops` | estimated training FLOPs of the **mean** clean step (6ND over `tokens_per_step`) | not `ok` |
-| 15 | `roofline_floor_s` | compute-bound floor on the mean step's time at peak | not `ok` |
-| 16 | `mfu` | achieved / peak over the clean window's **totals**: `flops / step_time_mean_s / peak_flops` | not `ok` |
-| 17 | `gpu_busy_s` | time the GPU was busy on the **reference batch**: the union of kernel intervals in its trace, so concurrent streams don't count twice | not `ok`; **`null` when a CUDA trace recorded no kernels** (a failed trace, not an idle GPU) |
-| 18 | `gpu_active_frac` | `gpu_busy_s / reference_step_s`: both sides are the same batch. Describes the reference batch, not the run average | not `ok`, or no `reference_step_s` |
-| 19 | `reference_step_s` | wall of the **reference batch** with the profiler **off**: the denominator for every trace fraction | not `ok` |
-| 20 | `profiled_step_s` | wall of the reference batch **with** the profiler on. `profiled_step_s / reference_step_s` is the profiler's overhead factor (≈1.0 when GPU-bound, up to ~1.9x launch-bound), exposed so the distortion is visible rather than folded into the numbers | not `ok` |
-| 21 | `population` | what was measured. `sample_method` (`length-stratified` from a Frame-drawn `sample_file`, or `head` for the unrepresentative fallback) / `sample_file` / `sample_rows` / `sample_hash` / `steps_per_pass` / `loader_seed` identify the rows the clean window timed; `reference.{row_ids, rows_hash, real_tokens, batch_shapes, batch_key}` identify the batch the trace describes. Compare duration metrics across probes only when `batch_key` matches | `{}` for runners without the hooks (torch fixture, synthetic) |
-| 22 | `phase_times_s` | **every** `record_function` annotation, seconds — the four above plus whatever the runner/torch emit (`step`, `Optimizer.step#AdamW.step`, comm, …). Two traps: scopes **nest** (do not sum them), and these are **host dispatch times, not GPU time** — CUDA launches are async, so `forward` is how long the host spent *launching* forward, not how long the GPU ran it. Compare against `gpu_busy_s`, never against these | `{}` when not `ok` |
-| 23 | `gpu_phase_times_s` | **GPU** time per annotation, seconds — kernels linked to the enclosing annotation by `correlation` id. This is the real fwd/bwd/opt split; `phase_times_s` is only host dispatch. Nests the same way | `{}` with no correlation data (CPU trace) |
-| 24 | `gpu_phase_coverage` | share of **summed** kernel time attributed to some annotation (summed, not `gpu_busy_s`'s union, so overlapping kernels count once each) — 1.0 means nothing was missed | ditto |
-| 25 | `data_wait_s` | dataloader annotation time | not `ok`, or the trace has no `dataloader` annotation |
-| 26 | `data_wait_frac` | `data_wait_s / profiled_step_s`: a host annotation over the wall of the profiled run it was recorded in | not `ok` |
-| 27 | `gap_s` | reference-batch GPU idle (`reference_step_s - gpu_busy_s`) | not `ok`; **`null` when negative**: busy comes from the profiled run and wall from the unprofiled one, so a negative value means the two runs disagree, not "no idle" |
-| 28 | `gap_frac` | `gap_s / reference_step_s` | not `ok` |
-| 29 | `cpu_util_mean` | mean **whole-machine** CPU % (psutil, all cores averaged) over the clean window: other processes on the host count too. `cpu_cores_busy` is this process alone | no psutil, or window too short to sample |
-| 30 | `cpu_util_max` | max whole-machine CPU % over the same window | ditto |
-| 31 | `nproc` | host CPU count (denominator for the above) | ditto |
-| 32 | `cpu_cores_busy` | CPU-seconds burned per wall-second by this process **and its children** (dataloader workers included). A counter delta rather than a sampled rate, so unlike the two fields above it survives windows too short to sample. `1.0` = one core saturated; `>1` = genuinely parallel | psutil missing and `process_time` unavailable |
-| 33 | `peak_mem_gb` | `torch.cuda` peak allocated over the clean window (read when the window closes, before the reference batch or traced step runs) | off-GPU (CPU/MPS) |
-| 34 | `reserved_mem_gb` | allocator reserved (`reserved - peak` = fragmentation) | off-GPU |
-| 35 | `mem_total_gb` | device total | off-GPU |
-| 36 | `headroom_gb` | `total - reserved` — distance to the OOM ceiling | off-GPU |
-| 37 | `provenance` | `{flash_attention, fused_kernels, dtypes}` — a **hint** from substring-matching kernel names, not a verdict; the raw names are in `top_kernels`. Booleans are `null` when no kernels ran (unknown ≠ False) | `{}` when not `ok` |
-| 38 | `top_kernels` | top 8 as `[[name, seconds], …]` | `[]` when not `ok` |
-| 39 | `kernel_count` | distinct kernels — with `top8_coverage`, exposes the long tail | not `ok` |
-| 40 | `top8_coverage` | share of **summed** kernel time inside the top 8 (a share of kernel time, not of `gpu_busy_s`) | not `ok`, or no kernels |
-| 41 | `gap_count` | gaps between consecutive kernel events on the GPU timeline, of any size | kernel events carry no `ts` (CPU trace) |
-| 42 | `max_gap_s` | largest single gap — one big stall vs many small | ditto |
-| 43 | `achieved_occupancy_pct` | runtime-weighted; the "why is compute slow" signal | trace has no occupancy args (CPU / no kernels) |
-| 44 | `limiting_factor` | what caps occupancy (`REGS` / shared mem / warps) | ditto |
-| 45 | `device` | real hw from the trace: `{name, mem_gb, compute_capability, num_sms}` | `{}` on a CPU trace |
-| 46 | `device_type` | what it RAN on (`cuda` / `cpu` / `mps`). A `cpu` probe is a smoke test: MFU and every GPU signal are meaningless, so never rank it against a `cuda` probe or learn a belief from it | capture never reached a device |
-| 47 | `trace_path` | raw Chrome trace on disk, for drill-down | no trace exported (e.g. OOM before the profiled step) |
-| 48 | `error` | failure cause, first line; for `invalid`, which reading was impossible | `status == "ok"` |
-| 49 | `summary` | the one-line human/agent digest (prefixed `[CPU — not a GPU probe]` when `device_type` isn't `cuda`, and `INVALID (...)` when `status` is `invalid`) | never |
+| 14 | `samples_per_step` | mean rows per **clean** step, counted per step | runner doesn't count rows |
+| 15 | `samples_per_s` | total clean rows / total clean time. **The primary metric**: what configs are ranked on (`loop/throughput.md`) | not `ok`, or rows not counted |
+| 16 | `flops` | estimated training FLOPs of the **mean** clean step (6ND over `tokens_per_step`) | not `ok` |
+| 17 | `roofline_floor_s` | compute-bound floor on the mean step's time at peak | not `ok` |
+| 18 | `mfu` | achieved / peak over the clean window's **totals**: `flops / step_time_mean_s / peak_flops` | not `ok` |
+| 19 | `gpu_busy_s` | time the GPU was busy on the **reference batch**: the union of kernel intervals in its trace, so concurrent streams don't count twice | not `ok`; **`null` when a CUDA trace recorded no kernels** (a failed trace, not an idle GPU) |
+| 20 | `gpu_active_frac` | `gpu_busy_s / reference_step_s`: both sides are the same batch. Describes the reference batch, not the run average | not `ok`, or no `reference_step_s` |
+| 21 | `reference_step_s` | wall of the **reference batch** with the profiler **off**: the denominator for every trace fraction | not `ok` |
+| 22 | `profiled_step_s` | wall of the reference batch **with** the profiler on. `profiled_step_s / reference_step_s` is the profiler's overhead factor (≈1.0 when GPU-bound, up to ~1.9x launch-bound), exposed so the distortion is visible rather than folded into the numbers | not `ok` |
+| 23 | `population` | what was measured. `sample_method` (`length-stratified` from a Frame-drawn `sample_file`, or `head` for the unrepresentative fallback) / `sample_file` / `sample_rows` / `sample_hash` / `steps_per_pass` / `loader_seed` identify the rows the clean window timed; `reference.{row_ids, rows_hash, real_tokens, batch_shapes, batch_key}` identify the batch the trace describes. Compare duration metrics across probes only when `batch_key` matches | `{}` for runners without the hooks (torch fixture, synthetic) |
+| 24 | `phase_times_s` | **every** `record_function` annotation, seconds — the four above plus whatever the runner/torch emit (`step`, `Optimizer.step#AdamW.step`, comm, …). Two traps: scopes **nest** (do not sum them), and these are **host dispatch times, not GPU time** — CUDA launches are async, so `forward` is how long the host spent *launching* forward, not how long the GPU ran it. Compare against `gpu_busy_s`, never against these | `{}` when not `ok` |
+| 25 | `gpu_phase_times_s` | **GPU** time per annotation, seconds — kernels linked to the enclosing annotation by `correlation` id. This is the real fwd/bwd/opt split; `phase_times_s` is only host dispatch. Nests the same way | `{}` with no correlation data (CPU trace) |
+| 26 | `gpu_phase_coverage` | share of **summed** kernel time attributed to some annotation (summed, not `gpu_busy_s`'s union, so overlapping kernels count once each) — 1.0 means nothing was missed | ditto |
+| 27 | `data_wait_s` | dataloader annotation time | not `ok`, or the trace has no `dataloader` annotation |
+| 28 | `data_wait_frac` | `data_wait_s / profiled_step_s`: a host annotation over the wall of the profiled run it was recorded in | not `ok` |
+| 29 | `gap_s` | reference-batch GPU idle (`reference_step_s - gpu_busy_s`) | not `ok`; **`null` when negative**: busy comes from the profiled run and wall from the unprofiled one, so a negative value means the two runs disagree, not "no idle" |
+| 30 | `gap_frac` | `gap_s / reference_step_s` | not `ok` |
+| 31 | `cpu_util_mean` | mean **whole-machine** CPU % (psutil, all cores averaged) over the clean window: other processes on the host count too. `cpu_cores_busy` is this process alone | no psutil, or window too short to sample |
+| 32 | `cpu_util_max` | max whole-machine CPU % over the same window | ditto |
+| 33 | `nproc` | host CPU count (denominator for the above) | ditto |
+| 34 | `cpu_cores_busy` | CPU-seconds burned per wall-second by this process **and its children** (dataloader workers included). A counter delta rather than a sampled rate, so unlike the two fields above it survives windows too short to sample. `1.0` = one core saturated; `>1` = genuinely parallel | psutil missing and `process_time` unavailable |
+| 35 | `peak_mem_gb` | `torch.cuda` peak allocated over the clean window (read when the window closes, before the reference batch or traced step runs) | off-GPU (CPU/MPS) |
+| 36 | `reserved_mem_gb` | allocator reserved (`reserved - peak` = fragmentation) | off-GPU |
+| 37 | `mem_total_gb` | device total | off-GPU |
+| 38 | `headroom_gb` | `total - reserved` — distance to the OOM ceiling | off-GPU |
+| 39 | `provenance` | `{flash_attention, fused_kernels, dtypes}` — a **hint** from substring-matching kernel names, not a verdict; the raw names are in `top_kernels`. Booleans are `null` when no kernels ran (unknown ≠ False) | `{}` when not `ok` |
+| 40 | `top_kernels` | top 8 as `[[name, seconds], …]` | `[]` when not `ok` |
+| 41 | `kernel_count` | distinct kernels — with `top8_coverage`, exposes the long tail | not `ok` |
+| 42 | `top8_coverage` | share of **summed** kernel time inside the top 8 (a share of kernel time, not of `gpu_busy_s`) | not `ok`, or no kernels |
+| 43 | `gap_count` | gaps between consecutive kernel events on the GPU timeline, of any size | kernel events carry no `ts` (CPU trace) |
+| 44 | `max_gap_s` | largest single gap — one big stall vs many small | ditto |
+| 45 | `achieved_occupancy_pct` | runtime-weighted; the "why is compute slow" signal | trace has no occupancy args (CPU / no kernels) |
+| 46 | `limiting_factor` | what caps occupancy (`REGS` / shared mem / warps) | ditto |
+| 47 | `device` | real hw from the trace: `{name, mem_gb, compute_capability, num_sms}` | `{}` on a CPU trace |
+| 48 | `device_type` | what it RAN on (`cuda` / `cpu` / `mps`). A `cpu` probe is a smoke test: MFU and every GPU signal are meaningless, so never rank it against a `cuda` probe or learn a belief from it | capture never reached a device |
+| 49 | `trace_path` | raw Chrome trace on disk, for drill-down | no trace exported (e.g. OOM before the profiled step) |
+| 50 | `error` | failure cause, first line; for `invalid`, which reading was impossible | `status == "ok"` |
+| 51 | `summary` | the one-line human/agent digest: samples/s, tokens/s, MFU, then the GPU signals (prefixed `[CPU — not a GPU probe]` when `device_type` isn't `cuda`, and `INVALID (...)` when `status` is `invalid`) | never |
 
-**Two populations, never mixed.** Rates (`mfu`, `tokens_per_s`, `roofline_floor_s`) come only from
+**Two populations, never mixed.** Rates (`samples_per_s`, `tokens_per_s`, `mfu`, `roofline_floor_s`) come only from
 the clean window's totals: mean tokens over mean step time. Everything read from the trace
 (`gpu_busy_s`, the phase maps, gaps, occupancy, kernels) describes the reference batch only, and
 its fractions divide by that batch's own wall: `reference_step_s` for GPU time (profiler off, so
@@ -219,7 +221,7 @@ other fields added since, so read the table above for the current shape:
   },
   "trace_path": "/tmp/autotune_trace_2_1787343066222349493.json",
   "error": null,
-  "summary": "MFU 73% | GPU active 96% | data-wait 0% | idle 4% | cpu 6% | noise +/-1% | occ 27% | mem 2.016/22.058GB"
+  "summary": "samples/s 128.78 | tokens/s 65935 | MFU 73% | ref-batch GPU active 96% | data-wait 0% | idle 4% | cpu 6% | step cv 1% | occ 27% | mem 2.016/22.058GB"
 }
 ```
 
@@ -259,8 +261,24 @@ the **attached capture** instead, started by `python -m profiler.launch -- train
   bookkeeping, so don't compare it with runner probes.
 - **Params are the optimizer's (trainable only).** MFU under LoRA / frozen weights reads far too low
   until `design_improvements.md` §10.
+- **Samples are counted from the boundaries the batch carries.** `population.micro_batches.sample_source`
+  records which rule applied (`rows`, `position_ids`, `cu_seqlens`, or `unknown: <why>`).
+  - **Supported:** unpacked 2-D batches (a row is a sample); packed batches whose `position_ids`
+    reset to 0 per document, passed as a keyword (`[B, S]`, `[1, S]` or multi-axis such as mRoPE
+    `[3, B, S]`), with padding masked or not at position 0; flattened 1-D batches with a 1-D
+    `cu_seqlens` / `cu_seq_lens_q` keyword. A 1-D batch with neither is `null`.
+  - **Underestimates** (documents counted as rows, or merged): concat-and-chunk packing with no
+    markers; packing through a 4-D block-diagonal mask; packing without position resets (EOS only);
+    boundaries in other kwargs (`seq_idx`, 2-D `cu_seqlens`, `packed_seq_params`); `position_ids`
+    passed positionally; a one-token document followed by another (their 0s form one run); left
+    padding with broadcast `[1, S]` positions `0…S-1` and an `attention_mask` (each padded row's
+    position 0 is a masked pad, so that row counts 0; left padding is for generation, outside
+    SFT / PEFT — `design_improvements.md` §13).
+  - **Overestimates:** documents split across rows (counted once per row); context / sequence
+    parallel shards that start mid-document; padding at position 0 *after* a document with no
+    `attention_mask` passed (one extra per row).
 
-What's planned: `design_improvements.md` §7–§11.
+What's planned: `design_improvements.md` §7–§13.
 
 ## Adapters
 

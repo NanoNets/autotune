@@ -78,6 +78,9 @@ class _PassRunner(_Runner):
     def last_step_tokens(self):
         return 10 * self.n                               # every step a different width
 
+    def last_step_samples(self):
+        return 16
+
     def population(self):
         return {"sample_hash": "abc", "reference": {"batch_key": "k1"}}
 
@@ -93,6 +96,7 @@ def test_clean_window_is_whole_passes_and_the_trace_is_the_reference_batch():
     # boundary, window, then the reference twice: profiler off (its wall), then on (the trace)
     assert r.log == ["step"] * 2 + ["ref"] * 2 + ["pass"] + ["step"] * 8 + ["ref", "ref"]
     assert cap.step_tokens == [10 * n for n in range(3, 11)]   # clean steps only, not warmup
+    assert cap.step_samples == [16] * 8
     assert cap.reference_step_s is not None and cap.profiled_step_s is not None
     assert cap.population["reference"]["batch_key"] == "k1"
 

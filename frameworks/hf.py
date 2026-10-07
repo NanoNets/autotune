@@ -376,8 +376,12 @@ class HFRunner:
         """Tokens the most recent `step()` pushed through the model (padded width x rows)."""
         return self._tokens
 
+    def last_step_samples(self):
+        """Rows the most recent `step()` pushed through the model."""
+        return self._samples
+
     def step(self):
-        self._tokens = 0                                   # measured, not assumed (see tokens_per_step)
+        self._tokens = self._samples = 0                   # measured, not assumed (see tokens_per_step)
         self._steps = getattr(self, "_steps", 0) + 1
         self._train_step(self._next, count=True)
 
@@ -397,6 +401,7 @@ class HFRunner:
                 input_ids, attention, labels = next_batch()
             if count:
                 self._tokens += input_ids.numel()
+                self._samples += input_ids.shape[0]
                 self._tokens_total = getattr(self, "_tokens_total", 0) + input_ids.numel()
             input_ids = input_ids.to(self.device)
             attention = attention.to(self.device)

@@ -455,11 +455,10 @@ correct. Two inputs are wrong, pulling in opposite directions:
    6ND, SmolLM2 + LoRA reads ≈22.5%: ~1.5× high.
 
 **What MFU is for** (why the definition matters, not just the number):
-- **Scoring against the possible:** "Primary metric: tokens/s, reported as MFU (% of the
-  hardware roofline)" (`loop/throughput.md:6`); `objective` = tokens/s + MFU
-  (`loop/contracts.md:65`).
-- **Stopping:** stop when near the roofline (`loop/loop.md:106`); report the "% of roofline
-  reached" (`:112`).
+- **Scoring against the possible:** samples/s is the primary metric and MFU "a diagnostic only"
+  (`loop/throughput.md`); `objective` = samples/s + tokens/s + MFU (`loop/contracts.md`). MFU
+  grounds a samples/s number against the hardware; it never ranks.
+- **Reporting:** the final report gives MFU reached as context (`loop/loop.md`, "Output").
 - **Diagnosis:** "the 'is the GPU utilized well' signal" (`profiler/README.md:44`), with measured
   bandwidth for compute- vs memory-bound.
 - **Cross-run comparison:** every retrospective in `experience/` reports it.
@@ -582,3 +581,48 @@ Adopt the short window if rankings agree and noise is within the floor.
 **Interaction:** OG and user-script probes should share one clean-window rule, or their throughput
 isn't comparable (axiom audit B5).
 
+
+## 12. Let the sample rule be declared per script, not inferred from a fixed list
+
+**Status:** design note, no code. Raised 2026-10-07 in review of PR #25.
+
+**The claim:** inferring samples from model inputs (`profiler/attach.py`, `_samples`) can't keep up.
+Collators, trainers and model families each mark document boundaries differently, and the
+supported-layout list in `profiler/README.md` ("Attached capture") only grows by patching cases one
+by one. A constant counting error still ranks correctly; one that changes between configs (e.g.
+padding counted as documents, which grows with `micro_batch`) can change the winner.
+
+**Proposal:**
+- The agent declares the sample rule at the script-contract step (`program.md` Step 3), after
+  reading the script's collator: `rows`, `position_ids`, `cu_seqlens`, or a named kwarg.
+- The profiler applies only that rule, checks each input matches it (shape, kwarg present), and
+  reports `samples_per_s = null` with a reason when it doesn't, instead of falling back to a guess.
+- Each new layout met in a real run gets a rule and a test, so the supported list grows from
+  evidence.
+
+**What would settle it:** one packed TRL run and one mRoPE (Qwen-VL) run where the declared rule's
+count matches the dataset's true document count per step, and a mismatched declaration is caught
+as `null` rather than scored.
+
+
+## 13. RL-style training (PPO / GRPO / online DPO)
+
+**Status:** future, out of the current scope (SFT + PEFT). Raised 2026-10-07 in review of PR #25.
+
+**The claim:** the probe assumes a plain training step: fetch a batch, forward, backward, optimizer
+step. RL-style training puts generation inside the loop, which breaks several of those assumptions:
+
+- **What a step and a sample are.** A probe would need to time rollouts separately from the
+  training update, and decide whether a sample is a prompt, a completion, or a prompt-completion
+  pair. samples/s is undefined until then.
+- **Left padding.** Prompts are left-padded for generation. With broadcast `[1, S]` positions
+  `0…S-1` and an `attention_mask`, each padded row's position 0 is a masked pad, so `_samples`
+  (`profiler/attach.py`) counts that row as 0 (listed under "Underestimates" in
+  `profiler/README.md`). The fix: count at least one sample for any row with an unmasked token
+  (`max(starts_in_row, 1)`), with a test.
+- **More than one model on the device.** Reference, reward and value models share the GPU, which
+  changes the memory picture the ceiling trials (`frame/ceiling.py`) assume.
+
+**What would settle it:** one GRPO run (e.g. TRL) through the attached capture, checking that the
+rollout and update phases are timed separately and that the sample count matches the prompts and
+completions per step.

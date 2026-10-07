@@ -62,7 +62,7 @@ Everything measured from running a Config. Raw and rich.
 | Field | Meaning |
 |---|---|
 | `status` | ok / oom / error / invalid (a physically impossible reading — never scored) |
-| `objective` | tokens/s + MFU (% of roofline), from clean-window totals |
+| `objective` | samples/s (**primary**, from clean-window totals) + tokens/s (discriminator) + MFU (diagnostic only — `loop/throughput.md`) |
 | `memory` | peak, headroom; on OOM: breakdown (what/how much overshot) |
 | `signals` | raw gpu/cpu util, comm, data-wait. **No derived labels** — the model interprets |
 | `provenance` | did the config apply? which kernels engaged vs silently fell back? |

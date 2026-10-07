@@ -1,11 +1,55 @@
 # Objective: Training Throughput
 
-**Maximize** training throughput (tokens/second) on the given hardware, **without degrading quality**.
-Wall-clock for a fixed run = total_tokens / tokens_per_s, so higher throughput = shorter training.
+**Maximize** training throughput on the given hardware, **without degrading quality**.
+`effective_batch` is human-owned and fixed, so wall-clock for a fixed run = total_samples /
+samples_per_s — a higher samples/s is strictly shorter training, whatever the tokens do.
 
-- **Primary metric:** tokens/s, reported as **MFU** (% of the hardware roofline).
-- **Cross-check:** samples/s.
+- **Primary metric:** **samples/s**, the Observation's `samples_per_s`: total rows over total time
+  across the clean window, never over the median step.
+- **Read alongside it:** tokens/s — not a tie-breaker, a *discriminator*. The two respond to
+  different changes, and the pair tells you which one you actually made.
+- **Diagnostic only:** MFU (% of the measured roofline). Grounds a number against the hardware;
+  never the thing being maximized, and never a ranking key.
 - **Quality guarantee:** by construction — only knobs that change speed, not the model, are searchable.
+
+## Why samples/s, and why tokens/s still stays on the page
+
+`tokens/s` counts pad tokens as work, so it **rewards computing padding** — and removing padding has
+been the single largest real lever in every run so far. Measured on `test_a10G`: `micro_batch` 4 → 8
+was **+15% per token and -14% on samples/s** (`beliefs/micro-batch-interacts-with-dynamic-padding.md`).
+One experiment, opposite verdicts. Rank on samples/s.
+
+The converse is equally real, which is why tokens/s is not deleted. Under `padding="longest"` batch
+width *is* the rows drawn, so `samples/s` is **sample-sensitive**: on
+`smollm2_1.7b_a100_wikitext` the same config moved **1.9x** (264.4 → 138.1) on nothing but the
+probe's row sample, while tokens/s moved **1.3%**
+(`beliefs/probe-sample-must-match-length-distribution.md`).
+
+**Packing.** A packed row holds several examples, so samples are counted from document boundaries
+(`position_ids` resets or a 1-D `cu_seqlens`) when a user's script passes them, and per row
+otherwise. `sample_source` in the Observation's `population` says how the count was made. Some
+layouts over- or under-count; the list of which, and in which direction, is in `profiler/README.md`,
+"Attached capture".
+
+**Comparing across packing.** samples/s ranks correctly while the packing setup is the same across
+the configs being compared: a constant counting error cancels. Across a change in packing (on/off,
+or pack length), trust it only if both probes' `sample_source` is `position_ids` or `cu_seqlens`;
+otherwise cross-check with tokens/s.
+
+| what moved | tokens/s | samples/s | reading |
+|---|---|---|---|
+| a real speed knob | up | up | genuine win |
+| padding removed at the loader | down (less pad counted as work) | up | genuine win — believe samples/s |
+| the probe's row sample | ~flat | moves a lot | measurement artifact, not a result |
+
+**Neither metric is safe alone.** Rank on samples/s; read tokens/s to confirm the change you made is
+the change you measured.
+
+## MFU is a diagnostic: it is pad-inflated
+
+It is computed from tokens/step, which counts pad, so it is comparable only *within* one padding
+regime. `qwen3.5_2b_a100_wikitext` under static padding reports MFU 49% / GPU-active 100% —
+genuinely efficient per token while computing 6.8x too many of them.
 
 ## Safe vs off-limits
 The agent classifies each knob at Frame (conservative: unsure → off_limits). Guidance:

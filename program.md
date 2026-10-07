@@ -5,8 +5,8 @@ The operational playbook for running an autonomous throughput-tuning session in 
 the map, not the territory. `loop/` (`contracts.md`, `loop.md`, `throughput.md`) is the design
 reference this is built from — read it for the underlying model.
 
-**Goal:** maximize training throughput (tokens/s and/or samples/s) on the given hardware, without
-degrading model quality.
+**Goal:** maximize **samples/s** (training examples per second) on the given hardware, without
+degrading model quality. tokens/s is the cross-check, MFU a diagnostic (`loop/throughput.md`).
 
 ---
 

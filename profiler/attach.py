@@ -81,6 +81,46 @@ def _padded_tokens(args, kwargs):
     return x.shape[0] * x.shape[1] if x.dim() >= 3 else x.shape[0]
 
 
+def _samples(args, kwargs):
+    """(samples, source) for one micro-batch: the training examples it holds, not its rows.
+
+    Unpacked, a row is a sample. A packed batch holds several documents per row, marked where each
+    starts: `position_ids` reset to 0 (TRL `padding_free`, HF packed collators) or a 1-D
+    `cu_seqlens` lists the offsets (flash-attn varlen). A document start is a run of 0s, so padding
+    that sits at position 0 counts once, not per token; masked positions never count; multi-axis
+    positions (mRoPE `[3, B, S]`) are read on one axis. A 1-D input with neither carries no
+    boundaries, so its count is unknown, never the token count. Supported layouts and which way the
+    count errs outside them: `profiler/README.md`, "Attached capture". The count is a device tensor
+    (no sync here); it is read at the step boundary, where we sync anyway.
+    """
+    x = kwargs.get("input_ids")
+    if x is None:
+        x = next((a for a in args if isinstance(a, torch.Tensor)), None)
+    if not isinstance(x, torch.Tensor) or x.dim() == 0:
+        return None, None
+    pos = kwargs.get("position_ids")
+    if isinstance(pos, torch.Tensor) and pos.dim():
+        if pos.dim() > 2:                            # multi-axis (mRoPE [3, B, S]): one axis
+            pos = pos[0]
+        if pos.dim() == 1:
+            pos = pos[None]
+        if x.dim() >= 2 and pos.shape[0] == 1 and x.shape[0] > 1:
+            pos = pos.expand(x.shape[0], -1)         # one position row broadcast over the batch
+        zero = pos == 0
+        mask = kwargs.get("attention_mask")
+        if isinstance(mask, torch.Tensor) and mask.shape == zero.shape:
+            zero = zero & (mask != 0)                # padding is never a document start
+        prev = torch.cat([torch.zeros_like(zero[:, :1]), zero[:, :-1]], dim=1)
+        return (zero & ~prev).sum(), "position_ids"  # a run of 0s is one start
+    cu = next((kwargs[k] for k in ("cu_seqlens", "cu_seq_lens_q")
+               if isinstance(kwargs.get(k), torch.Tensor) and kwargs[k].dim() == 1), None)
+    if cu is not None:
+        return cu.numel() - 1, "cu_seqlens"
+    if x.dim() >= 2:
+        return x.shape[0], "rows"
+    return None, "unknown: 1-D input without position_ids or cu_seqlens"
+
+
 class Attach:
     def __init__(self, device="cpu", warmup=3, clean_steps=10, trace_path=None, dtype=None,
                  peak_flops=None, peak_mem_bw_gb_s=None):
@@ -102,7 +142,10 @@ class Attach:
         self._prof, self._step_rf, self._t_prof, self._cap = None, None, None, None
         self._profiling = False                        # True between profiler enter and exit
         self.step_tokens = []                          # padded tokens of each CLEAN step (B1)
+        self.step_samples = []                         # rows of each CLEAN step
         self._acc, self._traced_tokens = 0, None       # running count within the current step
+        self._acc_rows, self._step_sources = 0, set()  # rows, and how they were counted, this step
+        self._sample_sources = set()                   # ...over the clean steps
         self._root, self._root_hook, self._tok_hook = None, None, None
         self._trained = set()                          # ids of the parameters the optimizer trains
         self._step_bad = False                         # a call in this step had no token tensor
@@ -141,6 +184,10 @@ class Attach:
             self._step_bad = True                       # unknown, not a smaller number
         else:
             self._acc += n
+            rows, src = _samples(args, kwargs)
+            self._step_sources.add(src)
+            if rows is not None:
+                self._acc_rows = self._acc_rows + rows   # int or device tensor
 
     def uninstall(self):
         """Leave the process as it was: hook removed, and a profiler still running (the run ended
@@ -181,7 +228,8 @@ class Attach:
                 pass
         self.uninstall()
         return Capture(status=status, step_times_s=list(self._times), memory=_read_memory(self.device),
-                       step_tokens=list(self.step_tokens), clean_steps_requested=self.clean_steps,
+                       step_tokens=list(self.step_tokens), step_samples=list(self.step_samples),
+                       clean_steps_requested=self.clean_steps,
                        population={**POPULATION, "model_trained": self.model_trained},
                        cpu=cpu, peak_flops=self.peak_flops,
                        peak_dtype=str(self.dtype).replace("torch.", ""),
@@ -205,6 +253,8 @@ class Attach:
         self._n += 1
         n, w, c = self._n, self.warmup, self.clean_steps
         step_tok, self._acc = self._acc, 0             # tokens of the step that just ended
+        step_rows, self._acc_rows = self._acc_rows, 0
+        step_src, self._step_sources = self._step_sources, set()
         step_bad, self._step_bad = self._step_bad, False
         if n < w:
             return
@@ -228,6 +278,8 @@ class Attach:
                 self._tokens_unknown = self._tokens_unknown or "the model's input carried no token tensor"
             else:
                 self.step_tokens.append(step_tok)
+                self.step_samples.append(int(step_rows))   # synced above: safe to read
+                self._sample_sources |= step_src
             if n == w + c:
                 self._stop_cpu()
                 self._mem = _read_memory(self.device)   # the window's peak, before the traced step
@@ -259,17 +311,24 @@ class Attach:
         with open(self.trace_path, "w") as f:
             json.dump(trace, f)
         if self._tokens_unknown or not self.step_tokens:   # say so; never a guessed or partial count
-            self.step_tokens, self.tokens = [], None
+            self.step_tokens, self.step_samples, self.tokens = [], [], None
             found["token_source"] = f"unknown: {self._tokens_unknown or 'no per-step count'}"
         else:                                          # B1: the timed steps' own tokens
             self.tokens = sum(self.step_tokens) / len(self.step_tokens)
             found["token_source"] = f"hook: mean of {len(self.step_tokens)} clean steps (padded)"
+        unknown = [s for s in self._sample_sources if s is None or s.startswith("unknown")]
+        if unknown:                                    # any uncounted micro-batch: no partial count
+            self.step_samples = []
+            found["sample_source"] = unknown[0] or "unknown: no token tensor"
+        else:
+            found["sample_source"] = "+".join(sorted(self._sample_sources)) or None
         found["traced_step_tokens"] = {"hook": self._traced_tokens, "trace": found.get("tokens")}
         found["tokens"] = self.tokens
         self.micro_batches = found
 
         self._cap = Capture(status="ok", step_times_s=self._times, trace=self.trace_path,
                             step_tokens=list(self.step_tokens),
+                            step_samples=list(self.step_samples),
                             clean_steps_requested=self.clean_steps,
                             profiled_step_s=profiled_s,
                             population={**POPULATION, "model_trained": self.model_trained},

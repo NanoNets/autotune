@@ -98,6 +98,7 @@ def test_b1_tokens_come_from_the_clean_steps_not_the_traced_step():
     att, expected = _variable_width_run(WIDTHS)
     clean = expected[WARMUP:WARMUP + CLEAN]                               # steps 3-5
     assert att.step_tokens == clean                                       # one count per timed step
+    assert att.step_samples == [4] * CLEAN                                # rows, same steps
     assert att.tokens == sum(clean) / len(clean)                          # rate numerator = their mean
     traced = att.micro_batches["traced_step_tokens"]
     assert traced["hook"] == traced["trace"] == expected[WARMUP + CLEAN]  # hook and trace agree...
@@ -108,6 +109,7 @@ def test_b1_tokens_come_from_the_clean_steps_not_the_traced_step():
 def test_b1_grad_accum_sums_every_micro_batch_of_a_step():
     att, expected = _variable_width_run(WIDTHS, accum=2)
     assert att.step_tokens == expected[WARMUP:WARMUP + CLEAN]
+    assert att.step_samples == [8] * CLEAN                                # 2 micro-batches of 4
     assert att.micro_batches["forwards"] == att.micro_batches["backwards"] == 2
 
 
@@ -120,3 +122,108 @@ def test_b1_no_hook_left_on_the_model():
     att, _ = _variable_width_run(WIDTHS)
     assert att._tok_hook is None and att._root_hook is None
     assert att._root is not None and len(att._root._forward_pre_hooks) == 0
+
+
+# ---- samples under packing: documents, not rows -------------------------------------------
+
+class _KwModel(torch.nn.Module):
+    """A model called HF-style, with keyword inputs; packing metadata rides alongside."""
+    def __init__(self):
+        super().__init__()
+        self.emb, self.head = torch.nn.Embedding(50, 16), torch.nn.Linear(16, 50)
+
+    def forward(self, input_ids, **packing):
+        return self.head(self.emb(input_ids))
+
+
+def _packed_run(batches):
+    """One optimizer step per batch; each batch is the kwargs the model is called with."""
+    torch.manual_seed(0)
+    before = nopatch.snapshot()
+    att = Attach(device="cpu", warmup=WARMUP, clean_steps=CLEAN, peak_flops=1.0, peak_mem_bw_gb_s=1.0)
+    att.install()
+    model = _KwModel()
+    opt = torch.optim.AdamW(model.parameters())
+    for kw in batches:
+        model(**kw).logsumexp(-1).mean().backward()
+        opt.step()
+        opt.zero_grad()
+    nopatch.verify(before)
+    return att
+
+
+def _pos(*doc_lens):
+    """position_ids for one row packing documents of the given lengths."""
+    return torch.cat([torch.arange(n) for n in doc_lens])
+
+
+def test_packed_rows_count_documents_via_position_ids():
+    ids = torch.randint(0, 50, (2, 12))                    # 2 rows, 3 + 2 documents packed in them
+    pos = torch.stack([_pos(4, 4, 4), _pos(6, 6)])
+    att = _packed_run([{"input_ids": ids, "position_ids": pos}] * (WARMUP + CLEAN + 2))
+    assert att.step_samples == [5] * CLEAN                 # documents, not the 2 rows
+    assert att.step_tokens == [24] * CLEAN                 # tokens unchanged: padded numel
+    assert att.micro_batches["sample_source"] == "position_ids"
+
+
+def test_broadcast_position_row_counts_every_batch_row():
+    ids = torch.randint(0, 50, (4, 8))
+    pos = torch.arange(8)[None]                            # [1, S], as HF-style scripts pass it
+    att = _packed_run([{"input_ids": ids, "position_ids": pos}] * (WARMUP + CLEAN + 2))
+    assert att.step_samples == [4] * CLEAN                 # one zero, broadcast over 4 rows
+
+
+def test_flattened_packing_counts_via_cu_seqlens():
+    ids = torch.randint(0, 50, (30,))                      # 1-D: three documents of 10
+    cu = torch.tensor([0, 10, 20, 30])
+    att = _packed_run([{"input_ids": ids, "cu_seqlens": cu}] * (WARMUP + CLEAN + 2))
+    assert att.step_samples == [3] * CLEAN
+    assert att.micro_batches["sample_source"] == "cu_seqlens"
+
+
+def test_flattened_input_without_boundaries_is_unknown_not_the_token_count():
+    ids = torch.randint(0, 50, (30,))
+    att = _packed_run([{"input_ids": ids}] * (WARMUP + CLEAN + 2))
+    assert att.step_samples == []                          # never 30
+    assert att.step_tokens == [30] * CLEAN                 # tokens still known
+    assert att.micro_batches["sample_source"].startswith("unknown")
+
+
+def _steps(kw):
+    return [kw] * (WARMUP + CLEAN + 2)
+
+
+def test_left_padding_at_position_zero_is_not_counted_as_documents():
+    mask = torch.tensor([[0, 0, 0, 1, 1, 1, 1, 1],                 # 4 rows, left-padded by 3/2/1/0
+                         [0, 0, 1, 1, 1, 1, 1, 1],
+                         [0, 1, 1, 1, 1, 1, 1, 1],
+                         [1, 1, 1, 1, 1, 1, 1, 1]])
+    pos = (mask.cumsum(-1) - 1).clamp(min=0)                       # pads get 0, like the real token
+    ids = torch.randint(0, 50, (4, 8))
+    att = _packed_run(_steps({"input_ids": ids, "position_ids": pos, "attention_mask": mask}))
+    assert att.step_samples == [4] * CLEAN                         # was 10: every pad a "start"
+    att = _packed_run(_steps({"input_ids": ids, "position_ids": pos}))
+    assert att.step_samples == [4] * CLEAN                         # no mask: a run of 0s is one start
+
+
+def test_packed_row_padded_at_position_zero():
+    pos = torch.cat([_pos(3, 3), torch.zeros(4, dtype=torch.long)])[None]   # 2 docs, then 4 pads at 0
+    mask = torch.tensor([[1] * 6 + [0] * 4])
+    ids = torch.randint(0, 50, (1, 10))
+    att = _packed_run(_steps({"input_ids": ids, "position_ids": pos, "attention_mask": mask}))
+    assert att.step_samples == [2] * CLEAN                         # masked pads never count
+    att = _packed_run(_steps({"input_ids": ids, "position_ids": pos}))
+    assert att.step_samples == [3] * CLEAN                         # no mask: the pad run counts once
+
+
+def test_multi_axis_position_ids_count_on_one_axis():
+    pos = torch.arange(8).expand(3, 4, 8)                          # mRoPE [3, B, S], unpacked
+    att = _packed_run(_steps({"input_ids": torch.randint(0, 50, (4, 8)), "position_ids": pos}))
+    assert att.step_samples == [4] * CLEAN                         # was 12: zeros on all 3 axes
+
+
+def test_2d_cu_seqlens_is_not_trusted():
+    ids = torch.randint(0, 50, (2, 12))
+    cu = torch.tensor([[0, 6, 12], [0, 4, 12]])                    # not the flash-attn 1-D layout
+    att = _packed_run(_steps({"input_ids": ids, "cu_seqlens": cu}))
+    assert att.step_samples == [2] * CLEAN and att.micro_batches["sample_source"] == "rows"
