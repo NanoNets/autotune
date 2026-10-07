@@ -177,6 +177,10 @@ it for long.)
 ### Step 2: Frame, plus the knob audit
 
 Frame the model and data the script uses as usual (`model` / `dataset` in `run.toml`).
+- **LoRA / PEFT:** if the script trains adapters on a frozen base, pass its rank and target
+  modules, as the script sets them, to Frame: `--lora-r <r> --lora-targets <names | all-linear>`
+  (`frame/README.md`, "LoRA"). Without them, Frame's memory and FLOPs assume a full fine-tune and
+  overstate this run several times over. They stay on the never-touch list (2a).
 - **The probe sample:** the script trains on its own data. Frame's `sample.jsonl` isn't a format a
   user's framework can load yet, so script probes don't carry `sample_hash`. Keep the script's data,
   seed and sampler identical across every probe.

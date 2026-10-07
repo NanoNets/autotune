@@ -18,12 +18,18 @@ worst batch a run will ever see, so the ceiling is measured on manufactured max_
 than hoping real data supplies one. build() only validates and carries it — measuring is the
 caller's job, because a real ceiling needs a real training step.
 
-The memory numbers assume a default full-fine-tune config (the run dtype + AdamW) — recorded in
-`default_config` so it's clear they move with the knobs, not a fixed truth.
+The memory numbers assume a default config (the run dtype + AdamW, a full fine-tune unless `lora`
+says otherwise) — recorded in `default_config` so it's clear they move with the knobs, not a fixed
+truth. With `lora` (rank + target modules, read from the user's script), the adapters are counted
+from the config's dims (`frame.model.lora_params`) and only they carry grads and optimizer state:
+FLOPs per token become 4 * N_total + 2 * N_trainable, the profiler's own formula.
 """
 from dataclasses import dataclass, field
 
 from frame.memory import training_memory
+from frame.model import lora_params
+
+_LORA_ADAPTER_BYTES = 4                                # peft keeps adapters in fp32 by default
 
 _DTYPE_BYTES = {"bfloat16": 2, "float16": 2, "float32": 4, "float64": 8}
 
@@ -38,7 +44,10 @@ class Profile:
     default_config: dict = field(default_factory=dict) # the (dtype, optimizer) the memory assumes
     effective_batch: int = None                        # human-owned target; the loop factorizes it, never changes it
     knobs: dict = field(default_factory=dict)          # the framework's SEARCHABLE surface (agent classifies at Frame)
-    flops_per_token: float = None                      # 6N; loop multiplies by tokens/step for the floor
+    flops_per_token: float = None                      # 6N (LoRA: 4N_total + 2N_trainable); the loop
+                                                       #   multiplies by tokens/step for the floor
+    lora: dict = None                                  # {r, targets, params_trainable, params_total};
+                                                       #   None for a full fine-tune
     activation_headroom_gb: float = None               # mem - model_state (room for activations)
     model_state_fits: bool = None                      # does MODEL STATE alone fit — says nothing
                                                        #   about activations; see the headroom
@@ -110,7 +119,7 @@ def _notes(dataset, max_len, ceiling):
 
 
 def build(model, dataset, hardware, versions, dtype="bfloat16", optimizer="adamw",
-          effective_batch=None, knobs=None, max_len=None, ceiling=None):
+          effective_batch=None, knobs=None, max_len=None, ceiling=None, lora=None):
     """model/dataset/hardware/versions: the extracted parts (see the sibling modules).
 
     dtype: the run compute dtype — drives the memory precision AND is the dtype the peak was
@@ -119,6 +128,8 @@ def build(model, dataset, hardware, versions, dtype="bfloat16", optimizer="adamw
     surface, so the agent classifies safe/off-limits at Frame from what's actually tunable.
     max_len: the human-declared sequence length. Validated against the architecture here.
     ceiling: the record from `frame.ceiling` at max_len, or None if not measured.
+    lora: {"r": rank, "targets": module names or "all-linear"} when the run trains LoRA adapters
+    on a frozen base; None for a full fine-tune.
     """
     peak_dtype = hardware.get("peak_dtype")
     if peak_dtype is not None and peak_dtype != dtype:  # a peak measured at another precision is
@@ -134,7 +145,25 @@ def build(model, dataset, hardware, versions, dtype="bfloat16", optimizer="adamw
 
     params = model["params"]
     param_bytes = _DTYPE_BYTES.get(dtype, 2)
-    mem = training_memory(params, param_bytes=param_bytes, optimizer=optimizer)
+    trainable = lora_params(model, lora["r"], lora["targets"]) if lora else None
+    lora_rec, extra_notes = None, []
+    if lora:
+        lora_rec = {"r": lora["r"], "targets": lora["targets"], "params_trainable": trainable,
+                    "params_total": params + trainable if trainable else None}
+    if trainable:                                       # base + adapters run forward and backward;
+        params += trainable                             # only the adapters get weight grads + state
+        mem = training_memory(params, param_bytes=param_bytes, optimizer=optimizer,
+                              trainable=trainable, trainable_bytes=_LORA_ADAPTER_BYTES)
+        flops_per_token = 4.0 * params + 2.0 * trainable
+    else:
+        mem = training_memory(params, param_bytes=param_bytes, optimizer=optimizer)
+        flops_per_token = 6.0 * params
+        if lora:                                        # declared, but not countable from the config
+            extra_notes.append(
+                f"LoRA targets {lora['targets']} can't be counted from this config (unknown module "
+                f"names, an ungated MLP, or MLP targets on an MoE), so the model-state memory and "
+                f"FLOPs above are FULL fine-tune numbers: they overstate memory for this run. Trust "
+                f"the measured ceiling.")
 
     mem_gb = hardware.get("mem_gb")
     headroom = round(mem_gb - mem["model_state_gb"], 1) if mem_gb is not None else None
@@ -152,16 +181,17 @@ def build(model, dataset, hardware, versions, dtype="bfloat16", optimizer="adamw
     eb_str = f" | eff-batch {effective_batch}" if effective_batch else ""
     summary = (f"{name} ({model['attention']}, {dtype}) | {params/1e9:.1f}B params{eb_str} | "
                f"{hardware.get('gpu')} {mem_str}{peak_str} | "
-               f"full-FT model-state {mem['model_state_gb']}GB {fit_str} | "
+               f"{'LoRA' if trainable else 'full-FT'} model-state {mem['model_state_gb']}GB {fit_str} | "
                f"{_ceiling_str(max_len, ceiling)} | {ds_str}")
 
     return Profile(
         model=model, dataset=dataset, hardware=hardware, versions=versions, memory=mem,
-        default_config={"dtype": dtype, "param_bytes": param_bytes, "optimizer": optimizer},
+        default_config={"dtype": dtype, "param_bytes": param_bytes, "optimizer": optimizer,
+                        "finetune": "lora" if trainable else "full"},
         effective_batch=effective_batch, knobs=_bound_knobs(knobs, ceiling),
-        flops_per_token=6.0 * params, activation_headroom_gb=headroom,
+        flops_per_token=flops_per_token, lora=lora_rec, activation_headroom_gb=headroom,
         model_state_fits=fits, max_len=max_len, ceiling=ceiling,
-        notes=_notes(dataset, max_len, ceiling), summary=summary,
+        notes=_notes(dataset, max_len, ceiling) + extra_notes, summary=summary,
     )
 
 
@@ -190,7 +220,8 @@ def framework_runner(framework):
 def frame(model, dataset, gpu, max_len, dtype="bfloat16", device="cuda", framework="hf",
           effective_batch=16, text_field="text", split="train", sample=1000, name=None,
           runner=None, seed=0, on_trial=None, sample_path=None, sample_seed=0, max_scan=None,
-          ceiling_rows_path=None, ceiling_row_template=None, ceiling_rows_format="text"):
+          ceiling_rows_path=None, ceiling_row_template=None, ceiling_rows_format="text",
+          lora=None):
     """Live: measure the peak, load config + tokenizer, scan the dataset, measure the ceiling,
     assemble.
 
@@ -211,6 +242,7 @@ def frame(model, dataset, gpu, max_len, dtype="bfloat16", device="cuda", framewo
     when `sample_path` is given the drawn rows are written there for every probe to load
     (`sample_file` in the probe config), so Frame's statistics and the probes' rows are one
     population.
+    lora: {"r", "targets"} read from a user's LoRA script (see `build`).
     """
     from frame.hardware import hardware, versions, measure
     m = measure(device, dtype)                          # measure the peak ONCE, at the run dtype
@@ -246,4 +278,4 @@ def frame(model, dataset, gpu, max_len, dtype="bfloat16", device="cuda", framewo
 
     return build(mi, ds, hw, versions(), dtype=dtype,
                  effective_batch=effective_batch, knobs=_framework_knobs(framework),
-                 max_len=max_len, ceiling=ceiling)
+                 max_len=max_len, ceiling=ceiling, lora=lora)

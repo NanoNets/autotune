@@ -636,32 +636,28 @@ rollout and update phases are timed separately and that the sample count matches
 completions per step.
 
 
-## 14. Frame's analytical FLOPs and memory assume full fine-tuning
+## 14. Frame's LoRA estimates: check them against measurements
 
-**Status:** future. Raised 2026-10-07 while adding LoRA support to the profiler (§10).
+**Status:** the estimates are implemented on branch `peft-lora` (2026-10-07): with `--lora-r` /
+`--lora-targets`, Frame counts the adapters from the config (`frame.model.lora_params`, exact
+against peft on SmolLM2-360M and Qwen2.5-0.5B), uses `4 * N_total + 2 * N_trainable` FLOPs per
+token, and charges grads + optimizer state to the adapters only (`frame/README.md`, "LoRA"). Two
+things are still open.
 
-**The claim:** Frame's analytical numbers count every weight as trained:
-- `flops_per_token = 6 * params` (`frame/profile.py`), the roofline floor the loop grounds against.
-- `training_memory` (`frame/memory.py`): weights, grads, AdamW state and fp32 master weights for
-  every parameter, about 16 bytes per param. That feeds `model_state_fits`,
-  `activation_headroom_gb` and the memory breakdown.
+**1. The model-state estimate hasn't been checked on a GPU.** It assumes a bf16 base and fp32
+adapters (peft's default), AdamW, no master copy.
+*What would settle it:* on the §10 experiment-7 configs, Frame's `model_state_gb` within ~10% of
+`torch.cuda.memory_allocated()` right after the first optimizer step (activations freed, AdamW
+state allocated).
 
-Under LoRA the real model state is about `N_total * param_bytes + N_trainable * (grad + optimizer +
-master)`. For a 7B model on a 24GB card, Frame would say ~112GB and `model_state_fits: false`; with
-LoRA it fits in about 14GB plus a few hundred MB.
-
-**Why it isn't urgent:** none of these decide anything. The measured ceiling decides whether a
-config runs, and on the script path the ceiling trial runs the user's own script, so it already
-reflects LoRA. The risk is misleading context: the agent reads Frame's summary first, and "model
-state doesn't fit" could make it escalate or rule out configs for a run that fits. Subtracting a
-full fine-tune model state from a measured peak to estimate activations also goes wrong.
-
-**Proposed:** Frame learns N_trainable before any probe (from the script contract, `program.md`
-Step 3, or a memory-only trial that already sees the optimizer) and uses
-`(4 * N_total + 2 * N_trainable)` per token and the split memory model above.
-
-**What would settle it:** Frame's model state for a LoRA run within ~10% of the measured peak
-minus activations, on the §10 experiment-7 configs.
+**2. The declared LoRA setup isn't cross-checked.** Frame trusts the rank and targets the agent
+read from the script. A script that also trains something else (`modules_to_save`, an unfrozen
+`lm_head`, biases) would make the estimate low.
+*Proposed:* the memory ceiling trial (`profiler/memtrial.py`) already runs the user's script up to
+its optimizer; have it record the optimizer's `requires_grad` count, and have `frame.ceiling` add a
+note when it differs from Frame's `params_trainable`.
+*What would settle it:* a script with `modules_to_save=["lm_head"]` is flagged; the plain LoRA
+script is not.
 
 ## 15. LoRA as a run parameter for the OG runner
 

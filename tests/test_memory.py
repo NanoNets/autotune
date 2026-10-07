@@ -43,3 +43,18 @@ if __name__ == "__main__":
         if _n.startswith("test_") and callable(_f):
             _f(); print(f"ok  {_n}")
     print("all passed")
+
+
+def test_full_fine_tune_is_unchanged_when_everything_trains():
+    assert training_memory(P, trainable=P) == training_memory(P)
+
+
+def test_lora_frozen_base_is_only_stored():
+    """bf16 base, fp32 adapters (peft's default): base 2 B/param; adapters 4 + 4 + 8, no master."""
+    t = 40e6
+    m = training_memory(P, param_bytes=2, trainable=t, trainable_bytes=4)
+    assert _close(m["weights_gb"], ((P - t) * 2 + t * 4) / 1024**3)
+    assert _close(m["grads_gb"], t * 4 / 1024**3)
+    assert _close(m["optimizer_gb"], t * 8 / 1024**3)
+    assert m["master_gb"] == 0                         # adapters already fp32
+    assert m["model_state_gb"] < training_memory(P)["model_state_gb"] / 7   # ~14GB vs ~104GB

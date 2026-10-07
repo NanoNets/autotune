@@ -75,13 +75,29 @@ What each check shows:
   CPU test (`tests/test_attach.py::test_quantized_base_is_unknown_not_its_packed_count`).
 - §10's step 3 (HFU, gradient checkpointing on vs off) was not run; it stays optional.
 
+## Frame (analytical, CPU only)
+
+Frame's LoRA estimates (`--lora-r` / `--lora-targets`) were checked against the A10 counts above:
+
+| Model, r=16, all 7 projections | Frame `params_trainable` (from the config) | peft / the profiler (measured) |
+|---|---|---|
+| SmolLM2-360M | 8,683,520 | 8,683,520 |
+| Qwen2.5-0.5B | 8,798,208 | 8,798,208 |
+
+Frame's analytical base count is within 0.02% of the measured one (it leaves out norm and bias
+weights). The model-state memory estimate (bf16 base stored only; fp32 adapters with grads and
+AdamW state) was **not** checked on a GPU: that is `design_improvements.md` §14, item 1.
+
 ## CPU tests
 
-`uv run pytest`: 255 passed, 1 failed (`test_cpu_signal_survives_a_window_too_short_to_sample`,
+`uv run pytest`: 264 passed, 1 failed (`test_cpu_signal_survives_a_window_too_short_to_sample`,
 which also fails on `main`). New: `tests/test_roofline.py` (formula), `tests/test_attach.py`
 (LoRA-shaped counts, full fine-tune, quantized guard), `tests/test_diagnostic.py` (MFU with both
 counts, unchanged full fine-tune MFU, null MFU without a total), `tests/test_backends_script.py`
-(both counts end to end through `backends.run`).
+(both counts end to end through `backends.run`). Frame: `tests/test_model.py` (adapter counts exact against peft, per
+projection, unknown names / MoE MLP targets → null), `tests/test_memory.py` (frozen base stored
+only; unchanged when everything trains), `tests/test_profile.py` (LoRA FLOPs and memory, an 8B
+flipping to `model_state_fits` on 24GB, uncountable targets keep full numbers with a note).
 
 ## Raw records
 
