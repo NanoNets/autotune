@@ -261,8 +261,10 @@ class Attach:
     def _on_optimizer_step(self, opt, args, kwargs):
         if self._opt is None:                          # adopt the first optimizer; ignore others
             self._opt = opt
-            self.params = sum(p.numel() for g in opt.param_groups for p in g["params"])
-            self._trained = {id(p) for g in opt.param_groups for p in g["params"]}
+            trained = [p for g in opt.param_groups for p in g["params"] if p.requires_grad]
+            self.params = sum(p.numel() for p in trained)   # a frozen weight handed to the
+            self._trained = {id(p) for p in trained}        # optimizer (`AdamW(model.parameters())`
+                                                            # under LoRA) gets no weight gradient
             self._root_hook = _module.register_module_forward_pre_hook(self._find_root)
         if opt is self._opt and not self.done:
             self._on_step()

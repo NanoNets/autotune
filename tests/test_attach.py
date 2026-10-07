@@ -252,12 +252,13 @@ class _LoraModel(torch.nn.Module):
         return self.head(self.proj(self.emb(input_ids)))
 
 
-def _lora_run(model):
+def _lora_run(model, all_params=False):
     torch.manual_seed(0)
     before = nopatch.snapshot()
     att = Attach(device="cpu", warmup=WARMUP, clean_steps=CLEAN, peak_flops=1.0, peak_mem_bw_gb_s=1.0)
     att.install()
-    opt = torch.optim.AdamW([p for p in model.parameters() if p.requires_grad])
+    opt = torch.optim.AdamW(model.parameters() if all_params
+                            else [p for p in model.parameters() if p.requires_grad])
     for _ in range(WARMUP + CLEAN + 2):
         model(torch.randint(0, 50, (4, 8))).logsumexp(-1).mean().backward()
         opt.step()
@@ -274,6 +275,15 @@ def test_lora_counts_trainable_from_the_optimizer_and_total_from_the_model():
     assert att.params_total == sum(p.numel() for p in model.parameters())   # base + adapters
     assert att.params_total > 10 * att.params and att._root is model     # the whole model is root
     assert att.micro_batches["params_source"] == "root module: all parameters"
+
+
+def test_frozen_weights_handed_to_the_optimizer_are_not_counted_as_trained():
+    """`AdamW(model.parameters())` under LoRA trains fine (frozen weights get no gradient, so the
+    optimizer skips them), but they must not count as trainable: that would make it 6 * N_total."""
+    model = _LoraModel()
+    att = _lora_run(model, all_params=True)
+    assert att.params == sum(p.numel() for p in model.parameters() if p.requires_grad)
+    assert att.params_total == sum(p.numel() for p in model.parameters()) and att._root is model
 
 
 def test_full_fine_tune_total_equals_trainable():

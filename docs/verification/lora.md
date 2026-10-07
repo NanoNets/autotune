@@ -67,6 +67,10 @@ What each check shows:
 
 - One card type (A10), two small models (360M, 0.5B), one LoRA config. Larger models and other
   ranks were not run.
+- `torch_lora.py` hands the optimizer only the adapters. A script that passes `model.parameters()`
+  (frozen weights included) used to count the frozen base as trainable; the count now keeps only
+  parameters with `requires_grad`, covered by a CPU test
+  (`test_frozen_weights_handed_to_the_optimizer_are_not_counted_as_trained`), not re-run on the GPU.
 - Quantized bases (QLoRA, GPTQ, AWQ) were not run on a GPU; the null-MFU guard is covered only by a
   CPU test (`tests/test_attach.py::test_quantized_base_is_unknown_not_its_packed_count`).
 - §10's step 3 (HFU, gradient checkpointing on vs off) was not run; it stays optional.

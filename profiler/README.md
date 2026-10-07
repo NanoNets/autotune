@@ -85,7 +85,7 @@ so "unknown" can't be mistaken for "measured zero".
 | 15 | `samples_per_s` | total clean rows / total clean time. **The primary metric**: what configs are ranked on (`loop/throughput.md`) | not `ok`, or rows not counted |
 | 16 | `flops` | estimated training FLOPs of the **mean** clean step: `(4·params_total + 2·params_trainable)·D` over `tokens_per_step`, which is 6ND when every weight trains. Model FLOPs, not executed: recompute isn't counted | not `ok`, or `params_total` unknown |
 | 17 | `params_total` | N: every weight of the model, trained or frozen. Runner: the model's parameters. Script: the parameters of the module the optimizer's weights live in (under PEFT, the base model plus the adapters) | unknown: no model found, or a quantized base (`micro_batches.params_source` says why) |
-| 18 | `params_trainable` | the weights the optimizer trains. Equals `params_total` in a full fine-tune; under LoRA, the adapters only | no optimizer step seen |
+| 18 | `params_trainable` | the weights the optimizer trains: its parameters with `requires_grad`, so a frozen weight handed to it (`AdamW(model.parameters())` under LoRA) doesn't count. Equals `params_total` in a full fine-tune; under LoRA, the adapters only | no optimizer step seen |
 | 19 | `roofline_floor_s` | compute-bound floor on the mean step's time at peak | not `ok` |
 | 20 | `mfu` | achieved / peak over the clean window's **totals**: `flops / step_time_mean_s / peak_flops` | not `ok` |
 | 21 | `gpu_busy_s` | time the GPU was busy on the **reference batch**: the union of kernel intervals in its trace, so concurrent streams don't count twice | not `ok`; **`null` when a CUDA trace recorded no kernels** (a failed trace, not an idle GPU) |
