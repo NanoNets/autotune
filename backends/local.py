@@ -160,7 +160,8 @@ def ceiling_trial(config):
         from frame.ceiling import runner_trial
         runner = _make_runner(config.get("framework", "torch"))
         return runner_trial(runner, config, config["max_len"], config.get("vocab"), steps,
-                            config.get("seed", 0))(config["micro_batch"])
+                            config.get("seed", 0),
+                            effective_batch=config.get("effective_batch"))(config["micro_batch"])
     for f in config.get("script_files") or []:
         _script_path(f)
     out = os.path.join(tempfile.mkdtemp(prefix="autotune_trial_"), "trial.json")

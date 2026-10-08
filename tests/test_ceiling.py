@@ -171,10 +171,10 @@ def test_live_ceiling_records_the_divisor_and_the_oom():
     assert rec["config"]["attn_implementation"] == "sdpa"         # defaults stamped
 
 
-def test_every_trial_is_a_short_worst_case_run_at_accumulation_one():
+def test_every_trial_is_a_short_worst_case_run_at_accumulation_two():
     r, _ = _find(4)
     assert all(c["data"] == "synthetic" and c["max_len"] == 2048 for c in r.setups)
-    assert all(c["effective_batch"] == c["micro_batch"] for c in r.setups)
+    assert all(c["effective_batch"] == 2 * c["micro_batch"] for c in r.setups)
     assert r.steps == 3 * 3                            # 3 trials that got past setup, 3 steps each
 
 
@@ -282,3 +282,17 @@ def test_measure_passes_trial_records_through():
                              "peak_gb": 1.0, "reserved_gb": 2.0, "total_gb": 4.0},
                   16, 512, {"dtype": "bfloat16"})
     assert rec["micro_batch_max"] == 4 and rec["card_frac"] == 0.5 and rec["frag_gb"] == 1.0
+
+
+def test_trials_accumulate_when_the_run_does():
+    """Below the run's effective batch a trial runs at accumulation 2, so the grad buffer is live
+    through a forward as in training; at the whole effective batch it runs at 1. Rendering for the
+    backend and re-applying on the box is idempotent."""
+    assert C.trial_effective_batch(1, 16) == 2
+    assert C.trial_effective_batch(8, 16) == 16
+    assert C.trial_effective_batch(16, 16) == 16
+    assert C.trial_effective_batch(4, None) == 4
+    cfg = C._render({"framework": "hf", "effective_batch": 16}, 2, 3)
+    assert cfg["micro_batch"] == 2 and cfg["effective_batch"] == 4
+    assert C.trial_effective_batch(2, cfg["effective_batch"]) == 4
+    assert C._render({"framework": "hf", "effective_batch": 16}, 16, 3)["effective_batch"] == 16
