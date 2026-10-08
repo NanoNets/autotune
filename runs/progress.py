@@ -157,7 +157,7 @@ def main():
             fontsize=8.5, color=INK_3, family="monospace")
 
     for r in rows:
-        if not r["ok"]:
+        if not r["sps"]:                                # crash / oom / timeout: no reading
             ax.plot(r["n"], y_lo * 1.5, marker="x", ms=7, mew=2, color=FAILED, zorder=4)
         elif r["unreliable"]:                           # drawn, but never on the staircase
             ax.plot(r["n"], r["sps"], marker="s", ms=6.5, mfc="white",
