@@ -134,6 +134,9 @@ anything but the shipped defaults, "faster by X%" means nothing.
 
 ### Step 5 — End-of-run review → `experience/README.md`, then `beliefs/README.md`
 
+- **ALWAYS** render the run's plot: `python runs/progress.py <run_name>` →
+  `runs/<run_name>/progress.png` (`runs/README.md`), and quote its headline (baseline → best
+  samples/s) to the user.
 - Review the full `results.tsv` + `research.md`.
 - Write a dated entry to `experience/<run_name>.md` (findings, surprises, open hypotheses for next
   time) and append its line, `Context:` verbatim, to `experience/index.md` (`experience/README.md`).
