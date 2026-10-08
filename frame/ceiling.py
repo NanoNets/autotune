@@ -46,6 +46,7 @@ TRIAL_STEPS = 3
 _MEMORY_KNOBS = (
     "dtype", "optimizer", "shard_degree", "offload", "packing",
     "recompute", "gradient_checkpointing",              # canonical, hf
+    "recompute_layers",                                 # hf: partial recompute
     "attn_kernel", "attn_implementation",               # canonical, hf
     "compile", "torch_compile",                         # canonical, hf: compile fuses the CE and
                                                         #   moved a measured ceiling 2 -> 4

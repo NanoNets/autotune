@@ -35,6 +35,9 @@ _DEFAULTS = {
                                        # "fused optimizer" under Kernels). Matters most when the
                                        # optimizer is a large share of the step: its cost is per
                                        # PARAMETER, so it does not shrink with the batch.
+    "recompute_layers": None,          # with gradient_checkpointing: how many decoder layers (the
+                                       # first N) to checkpoint. None = all. Fewer = less re-run
+                                       # forward for more activation memory. Same math either way.
     "compile_optimizer": False,        # torch.compile the optimizer step: inductor fuses the foreach
                                        # AdamW chain (~10 elementwise passes over every param) into a
                                        # few kernels. SAME AdamW algorithm and state -- a kernel swap,
@@ -84,6 +87,7 @@ def knobs():
         "tf32":                   {"type": "bool"},
         "fused_optimizer":        {"type": "bool"},   # AdamW(fused=True); CUDA + float params only
         "compile_optimizer":      {"type": "bool"},   # torch.compile(opt.step)
+        "recompute_layers":       {"type": "int",    "min": 0},   # with gradient_checkpointing; None = all
         "padding":                {"type": "choice", "options": ["max_length", "longest"]},
         "length_grouped":         {"type": "bool"},   # pairs with padding="longest"
         "chunked_ce":             {"type": "int",    "min": 0},   # 0 = off; N = chunks
@@ -246,6 +250,12 @@ class HFRunner:
         self.attention_parts, self.attention_skipped = spec(self.model.config)   # over what
         if self.cfg["gradient_checkpointing"]:
             self.model.gradient_checkpointing_enable()
+            n = self.cfg["recompute_layers"]
+            if n is not None:                           # partial: un-checkpoint all but the first n
+                from transformers.modeling_layers import GradientCheckpointingLayer
+                layers = [m for m in self.model.modules() if isinstance(m, GradientCheckpointingLayer)]
+                for m in layers[n:]:
+                    m.gradient_checkpointing = False
         self.model.train()
         compile_mode = self.cfg["torch_compile"]
         if compile_mode:                                # True -> inductor default; str -> that mode
