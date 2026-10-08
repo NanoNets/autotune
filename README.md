@@ -141,5 +141,6 @@ loop/          design notes and data contracts
 
 
 ## Platform support
-
-Single NVIDIA GPU for now. Multi-GPU and a learned model that ranks candidates are next. MoE's are also not validated on this loop at this moment.
+Training Methods: SFT, PEFT
+Models: LLMs, VLMs (MoE's are out of scope for now)
+HW Support: Single NVIDIA GPU
