@@ -153,8 +153,7 @@ frame: measuring the memory ceiling at max_len=2048 (synthetic, seed 0, framewor
 - **The ceiling is NOT a run constant.** `recompute`, `attn_kernel`, `optimizer`, `dtype`,
   sharding and **`compile`** all move it. `compile` is not an obvious member of that list but was
   measured moving a ceiling from 2 to 4: Inductor fuses the cross-entropy and never materializes
-  the fp32 logits copies, cutting peak memory 5.4GB
-  (`beliefs/compile-cuts-memory-not-just-time.md`). Before trusting a ceiling, compare the
+  the fp32 logits copies, cutting peak memory 5.4GB. Before trusting a ceiling, compare the
   Config against the record's stamp (`frame.ceiling.is_stale`). Moved → **re-measure**, don't
   extrapolate. Turning on `recompute` can easily take a ceiling of 8 to 32; the search space is
   meant to widen on that evidence. Micro-batch, accumulation, padding, workers and other

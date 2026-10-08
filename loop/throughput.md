@@ -17,14 +17,13 @@ samples_per_s — a higher samples/s is strictly shorter training, whatever the 
 
 `tokens/s` counts pad tokens as work, so it **rewards computing padding** — and removing padding has
 been the single largest real lever in every run so far. Measured on `test_a10G`: `micro_batch` 4 → 8
-was **+15% per token and -14% on samples/s** (`beliefs/micro-batch-interacts-with-dynamic-padding.md`).
+was **+15% per token and -14% on samples/s**.
 One experiment, opposite verdicts. Rank on samples/s.
 
 The converse is equally real, which is why tokens/s is not deleted. Under `padding="longest"` batch
 width *is* the rows drawn, so `samples/s` is **sample-sensitive**: on
 `smollm2_1.7b_a100_wikitext` the same config moved **1.9x** (264.4 → 138.1) on nothing but the
-probe's row sample, while tokens/s moved **1.3%**
-(`beliefs/probe-sample-must-match-length-distribution.md`).
+probe's row sample, while tokens/s moved **1.3%**.
 
 **Packing** is not a lever (see *Safe vs off-limits*), but a user's script may already pack, and
 its samples must still be counted right. A packed row holds several examples, so samples are counted from document boundaries

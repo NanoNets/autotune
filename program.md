@@ -115,7 +115,7 @@ anything but the shipped defaults, "faster by X%" means nothing.
   sharding, chunked CE, the allocator setting, **compile**) it re-measures from the previous
   ceiling, usually in 1-2 short trials; otherwise it runs nothing. Then choose the probe's
   `micro_batch` against the bound it reports (`frame/README.md`). `compile` is in that list on measured evidence: fusing the
-  cross-entropy cut peak memory 5.4GB and moved a measured ceiling from 2 to 4 (`experience/test_a10G.md`).
+  cross-entropy cut peak memory 5.4GB and moved a measured ceiling from 2 to 4.
 - **NEVER** raise `micro_batch` above the ceiling because a probe reported spare `headroom_gb`.
   Under `padding="longest"` a probe's peak reflects the rows it drew, not the dataset's longest —
   the ceiling is the bound, the observed peak is not. Dynamic padding is safe *because*
