@@ -37,8 +37,9 @@ traced step's tokens over the clean window's time would be off by (traced width 
 silently, and differently for every config.
 
 The boundary fires inside torch's own `Optimizer.step#...` label (that's where the post-hook
-runs), so the profiled window opens and closes inside one. `derive.py` only reads spans fully
-inside our `step` label.
+runs), so the profiled window opens and closes inside one. `derive.py` only reads spans that start
+inside our `step` label, and ends any annotation still open at `step`'s end there, so the sync and
+profiler teardown after `step` aren't counted as optimizer time.
 """
 import json
 import os
@@ -63,17 +64,117 @@ from profiler.capture import (Capture, _MIN_SAMPLE_S, _cpu_stats, _default_trace
 # `same-reference-batch` evidence (`profiler/README.md`, "Attached capture").
 POPULATION = {"driver": "script", "clean_window": "fixed-position", "trace_basis": "traced-step"}
 MIN_WARMUP = 2      # step 1 identifies the trained parameters; step 2 finds the model that owns them
+# Image inputs a VLM's forward takes. When one is seen, the vision tower runs per image PATCH and
+# the language model per token, so FLOPs are counted per part (`roofline.vlm_training_flops`).
+_IMAGE_KWARGS = ("pixel_values", "pixel_values_videos")
+# Module names that hold a VLM's vision tower (the same rule as `frame.model.exact_counts`).
+_VISION_PREFIXES = ("visual", "vision_tower", "vision_model", "vision_encoder")
+
+
+def _patches(kwargs, config):
+    """Image patches the vision tower runs on in one forward, from the image tensors' SHAPES (no
+    sync): a 2-D `[patches, dim]` (Qwen-VL flattens them) counts its rows; an image batch
+    `[..., C, H, W]` counts images x (H / patch) x (W / patch), the patch size from the model's
+    `vision_config`. None when the layout is neither, or the patch size is unknown."""
+    total = 0
+    for key in _IMAGE_KWARGS:
+        x = kwargs.get(key)
+        if not isinstance(x, torch.Tensor):
+            continue
+        if x.dim() == 2:
+            total += x.shape[0]
+        elif x.dim() >= 4:
+            vc = getattr(config, "vision_config", None)
+            p = getattr(vc, "patch_size", None)
+            if not isinstance(p, int) or p <= 0:
+                return None
+            n = 1
+            for d in x.shape[:-3]:
+                n *= d
+            total += n * (x.shape[-2] // p) * (x.shape[-1] // p)
+        else:
+            return None
+    return total
+
+
+def _segment_lengths(x, kwargs):
+    """The sequence lengths one micro-batch attends over, as a 1-D tensor, or None when every
+    row is one sequence of the padded width (then it's rows x width^2, no tensor needed). A
+    packed batch attends within each document: lengths from a 1-D `cu_seqlens`, or from where
+    `position_ids` reset to 0 (the same reading as `_samples`). Device ops only, no sync."""
+    cu = next((kwargs[k] for k in ("cu_seqlens", "cu_seq_lens_q")
+               if isinstance(kwargs.get(k), torch.Tensor) and kwargs[k].dim() == 1), None)
+    if cu is not None:
+        return (cu[1:] - cu[:-1]).to(torch.int64)
+    pos = kwargs.get("position_ids")
+    if not isinstance(pos, torch.Tensor) or not pos.dim() or x.dim() < 2:
+        return None
+    if pos.dim() > 2:
+        pos = pos[0]
+    if pos.dim() == 1:
+        pos = pos[None]
+    if pos.shape[0] == 1 and x.shape[0] > 1:
+        pos = pos.expand(x.shape[0], -1)
+    zero = pos == 0
+    prev = torch.cat([torch.zeros_like(zero[:, :1]), zero[:, :-1]], dim=1)
+    starts = zero & ~prev
+    starts[:, 0] = True                                # a row always starts a sequence
+    b, s = starts.shape
+    seg = starts.to(torch.int64).cumsum(1) - 1 + torch.arange(b, device=pos.device)[:, None] * s
+    return torch.zeros(b * s, dtype=torch.int64, device=pos.device).scatter_add_(
+        0, seg.flatten(), torch.ones(b * s, dtype=torch.int64, device=pos.device))
+
+
+def _image_patches(kwargs, config):
+    """Patches in each image, as a tensor or a list, for the vision tower's attention (it attends
+    within each image), or None when the layout doesn't say: `image_grid_thw` /
+    `video_grid_thw` rows (t * h * w), else `[..., C, H, W]` images x (H / patch)(W / patch)."""
+    out = []
+    for grid_key, pix_key in (("image_grid_thw", "pixel_values"), ("video_grid_thw", "pixel_values_videos")):
+        g, x = kwargs.get(grid_key), kwargs.get(pix_key)
+        if isinstance(g, torch.Tensor) and g.dim() == 2:
+            out.append(g.to(torch.int64).prod(-1))
+        elif isinstance(x, torch.Tensor):
+            vc = getattr(config, "vision_config", None)
+            p = getattr(vc, "patch_size", None)
+            if x.dim() < 4 or not isinstance(p, int) or p <= 0:
+                return None
+            n = 1
+            for d in x.shape[:-3]:
+                n *= d
+            out.append(torch.full((n,), (x.shape[-2] // p) * (x.shape[-1] // p), dtype=torch.int64,
+                                  device=x.device))
+    return torch.cat(out) if out else None
+
+
+def _vision_params(model, trained):
+    """(vision weights, trained vision weights): parameters under a vision-tower module."""
+    total = tr = 0
+    for name, p in model.named_parameters():
+        if any(part in _VISION_PREFIXES for part in name.split(".")):
+            total += p.numel()
+            tr += p.numel() if id(p) in trained else 0
+    return total, tr
+
+
+def _token_input(args, kwargs):
+    """The tensor the model's tokens are read from: the `input_ids` keyword, else the first
+    positional INTEGER tensor (ids), else the first positional tensor (a float activation). Ids
+    first, so `model(pixel_values, input_ids)` counts the text, not the image."""
+    x = kwargs.get("input_ids")
+    if x is None:
+        tensors = [a for a in args if isinstance(a, torch.Tensor)]
+        x = next((a for a in tensors if not a.is_floating_point()), tensors[0] if tensors else None)
+    return x
 
 
 def _padded_tokens(args, kwargs):
     """Tokens in one micro-batch as the model receives it: padded, like OG (`input_ids.numel()`).
 
     Reads shapes only, so it never syncs the GPU. Integer ids (B, S) count every element; a float
-    activation (B, S, D) counts B*S. None when the first input isn't a tensor.
+    activation (B, S, D) counts B*S. None when the input isn't a tensor.
     """
-    x = kwargs.get("input_ids")
-    if x is None:
-        x = next((a for a in args if isinstance(a, torch.Tensor)), None)
+    x = _token_input(args, kwargs)
     if not isinstance(x, torch.Tensor):
         return None
     if not x.is_floating_point():
@@ -87,15 +188,15 @@ def _samples(args, kwargs):
     Unpacked, a row is a sample. A packed batch holds several documents per row, marked where each
     starts: `position_ids` reset to 0 (TRL `padding_free`, HF packed collators) or a 1-D
     `cu_seqlens` lists the offsets (flash-attn varlen). A document start is a run of 0s, so padding
-    that sits at position 0 counts once, not per token; masked positions never count; multi-axis
+    that sits at position 0 counts once, not per token; masked positions never count; with no mask,
+    a run of 0s that ends the row is padding (else the count would grow by one per row, so a
+    smaller micro-batch would read as more samples per step); multi-axis
     positions (mRoPE `[3, B, S]`) are read on one axis. A 1-D input with neither carries no
     boundaries, so its count is unknown, never the token count. Supported layouts and which way the
     count errs outside them: `profiler/README.md`, "Attached capture". The count is a device tensor
     (no sync here); it is read at the step boundary, where we sync anyway.
     """
-    x = kwargs.get("input_ids")
-    if x is None:
-        x = next((a for a in args if isinstance(a, torch.Tensor)), None)
+    x = _token_input(args, kwargs)
     if not isinstance(x, torch.Tensor) or x.dim() == 0:
         return None, None
     pos = kwargs.get("position_ids")
@@ -110,6 +211,9 @@ def _samples(args, kwargs):
         mask = kwargs.get("attention_mask")
         if isinstance(mask, torch.Tensor) and mask.shape == zero.shape:
             zero = zero & (mask != 0)                # padding is never a document start
+        else:                                        # no mask: a run of 0s that ends the row is
+            trail = zero.flip(1).to(torch.int32).cumprod(1).flip(1).bool()   # right padding (TRL
+            zero = zero & ~trail                     # `padding_free` + `pad_to_multiple_of`)
         prev = torch.cat([torch.zeros_like(zero[:, :1]), zero[:, :-1]], dim=1)
         return (zero & ~prev).sum(), "position_ids"  # a run of 0s is one start
     cu = next((kwargs[k] for k in ("cu_seqlens", "cu_seq_lens_q")
@@ -121,16 +225,26 @@ def _samples(args, kwargs):
     return None, "unknown: 1-D input without position_ids or cu_seqlens"
 
 
+_QUANT_PARAM_CLASSES = {"Params4bit", "Int8Params"}       # bitsandbytes
+
+
+def _is_quantized(p):
+    """A packed quantized weight, whatever its storage dtype: bitsandbytes' 4-bit weights can be
+    stored as bf16 / fp16 / fp32 (`bnb_4bit_quant_storage`), so a dtype check alone counts their
+    packed numel (final_boss_report T3-C2: 0.466x N on an A10)."""
+    return type(p).__name__ in _QUANT_PARAM_CLASSES or getattr(p, "quant_state", None) is not None
+
+
 def _count_params(model):
     """(N_total, source): every parameter of the model, trained or frozen — the N the forward and
     the activation gradients run through (LoRA / PEFT: the base weights plus the adapters).
 
-    A quantized base (QLoRA's 4-bit `Params4bit`, int8, or GPTQ / AWQ `qweight` buffers) packs
-    several weights per element or keeps them outside `parameters()`, so `numel` would understate
-    N: unknown (None), never a guess.
+    A quantized base (QLoRA's 4-bit `Params4bit` in any storage dtype, int8, or GPTQ / AWQ `qweight`
+    buffers) packs several weights per element or keeps them outside `parameters()`, so `numel`
+    would understate N: unknown (None), never a guess.
     """
     params = list(model.parameters())
-    packed = [p for p in params if not p.is_floating_point()]
+    packed = [p for p in params if not p.is_floating_point() or _is_quantized(p)]
     if packed or any(name.endswith("qweight") for name, _ in model.named_buffers()):
         return None, "unknown: quantized weights (packed numel understates the count)"
     return sum(p.numel() for p in params), "root module: all parameters"
@@ -169,6 +283,13 @@ class Attach:
         self.model_trained = None                      # the model's checkpoint name, when it has one
         self.params_total = None                       # every parameter of the model, trained or not
         self.params_source = None                      # how params_total was counted, or why it can't be
+        self._multimodal = False                       # an image input reached the model
+        self._acc_patches, self._patches_bad = 0, False   # image patches this step / unreadable
+        self.step_patches = []                         # image patches of each CLEAN step
+        self.params_vision = self.params_vision_trainable = None
+        self.attention_parts, self.attention_skipped = None, None   # profiler.attention.spec
+        self._acc_pairs, self.step_attention_pairs = {}, []         # (query, key) pairs per part
+        self._vision_pairs_bad = False
 
     # ---- lifecycle -------------------------------------------------------------------------
     def install(self):
@@ -195,9 +316,24 @@ class Attach:
         cfg = getattr(mod, "config", None)              # HF models (and peft wrappers) carry the
         self.model_trained = getattr(cfg, "_name_or_path", None) or None   # checkpoint they came from
         self.params_total, self.params_source = _count_params(mod)
+        self.params_vision, self.params_vision_trainable = _vision_params(mod, self._trained)
+        from profiler.attention import spec                 # PaLM's attention term
+        self.attention_parts, self.attention_skipped = spec(
+            cfg, backward=True, vision_backward=bool(self.params_vision_trainable))
 
     def _count(self, mod, args, kwargs):
+        if not torch.is_grad_enabled():                 # eval / `generate()` inside the window:
+            return                                      # not training rows (they'd inflate the rates)
+        if any(isinstance(kwargs.get(k), torch.Tensor) for k in _IMAGE_KWARGS):
+            self._multimodal = True
+            p = _patches(kwargs, getattr(mod, "config", None))
+            if p is None:
+                self._patches_bad = True
+            else:
+                self._acc_patches += p
         n = _padded_tokens(args, kwargs)
+        if n is not None and self.attention_parts:
+            self._count_pairs(_token_input(args, kwargs), kwargs, getattr(mod, "config", None))
         if n is None:                                   # no token tensor: this step's count is
             self._step_bad = True                       # unknown, not a smaller number
         else:
@@ -206,6 +342,28 @@ class Attach:
             self._step_sources.add(src)
             if rows is not None:
                 self._acc_rows = self._acc_rows + rows   # int or device tensor
+
+    def _count_pairs(self, x, kwargs, config):
+        """(query, key) pairs this micro-batch attends over, per attention part. Device tensors
+        accumulate unsynced; they're read at the step boundary, where we sync anyway."""
+        lens = _segment_lengths(x, kwargs)
+        rows, width = (x.shape[0], x.shape[1]) if x.dim() >= 2 else (1, x.shape[0])
+        images = None
+        for p in self.attention_parts:
+            w = p["window"]
+            if p["part"] == "vision":
+                if images is None:
+                    images = _image_patches(kwargs, config)
+                if images is None:
+                    if any(isinstance(kwargs.get(k), torch.Tensor) for k in _IMAGE_KWARGS):
+                        self._vision_pairs_bad = True
+                    continue
+                add = (images * images).sum()
+            elif lens is None:
+                add = rows * width * min(width, w or width)
+            else:
+                add = (lens * (lens.clamp(max=w) if w else lens)).sum()
+            self._acc_pairs[p["part"]] = self._acc_pairs.get(p["part"], 0) + add
 
     def uninstall(self):
         """Leave the process as it was: hook removed, and a profiler still running (the run ended
@@ -276,6 +434,8 @@ class Attach:
         step_rows, self._acc_rows = self._acc_rows, 0
         step_src, self._step_sources = self._step_sources, set()
         step_bad, self._step_bad = self._step_bad, False
+        step_patches, self._acc_patches = self._acc_patches, 0
+        step_pairs, self._acc_pairs = self._acc_pairs, {}
         if n < w:
             return
         if n > w + c:                                  # the profiled step ended: close `step`
@@ -283,13 +443,13 @@ class Attach:
             self._stop_profiled()                      # BEFORE syncing, or the GPU drain lands
             return                                     # in its host-dispatch time
         _sync(self.device)
-        now = time.perf_counter()
         if n == w:                                     # warmup over: open the clean window
             if self.device == "cuda":
                 torch.cuda.reset_peak_memory_stats()
-            self._start_cpu()
-            self._t_last = now
+            self._start_cpu()                          # before the clock, as `capture()` does: its
+            self._t_last = time.perf_counter()         # start-up isn't clean step 1's time
         else:                                          # one clean step ended
+            now = time.perf_counter()
             self._times.append(now - self._t_last)
             self._t_last = now
             if self._tok_hook is None:                 # same step as the time just recorded
@@ -299,6 +459,8 @@ class Attach:
             else:
                 self.step_tokens.append(step_tok)
                 self.step_samples.append(int(step_rows))   # synced above: safe to read
+                self.step_patches.append(step_patches)
+                self.step_attention_pairs.append({k: int(v) for k, v in step_pairs.items()})
                 self._sample_sources |= step_src
             if n == w + c:
                 self._stop_cpu()
@@ -336,6 +498,22 @@ class Attach:
         else:                                          # B1: the timed steps' own tokens
             self.tokens = sum(self.step_tokens) / len(self.step_tokens)
             found["token_source"] = f"hook: mean of {len(self.step_tokens)} clean steps (padded)"
+        if self._multimodal:                           # FLOPs per part: tokens and image patches
+            if self._patches_bad or not self.params_vision:
+                why = ("its image tensor layout gives no patch count" if self._patches_bad else
+                       "no vision-tower module found to split off")
+                self.params_total, self.step_patches = None, []
+                self.params_source = (f"unknown: multimodal input, but {why}, so the vision "
+                                      f"tower's per-patch work can't be counted")
+            else:
+                self.params_source = (f"root module: all parameters; vision tower "
+                                      f"({self.params_vision:,}) counted per image patch")
+        else:
+            self.step_patches = []
+        if self._vision_pairs_bad and self.attention_parts:  # an image layout with no per-image count
+            self.attention_parts = [p for p in self.attention_parts if p["part"] != "vision"]
+            self.attention_skipped = (self.attention_skipped or []) + [
+                "vision tower: its image tensors give no per-image patch count"]
         found["params_source"] = self.params_source
         unknown = [s for s in self._sample_sources if s is None or s.startswith("unknown")]
         if unknown:                                    # any uncounted micro-batch: no partial count
@@ -350,6 +528,13 @@ class Attach:
         self._cap = Capture(status="ok", step_times_s=self._times, trace=self.trace_path,
                             step_tokens=list(self.step_tokens),
                             step_samples=list(self.step_samples),
+                            step_patches=list(self.step_patches),
+                            params_vision=self.params_vision if self.step_patches else None,
+                            params_vision_trainable=(self.params_vision_trainable
+                                                     if self.step_patches else None),
+                            attention_parts=self.attention_parts,
+                            attention_skipped=self.attention_skipped,
+                            step_attention_pairs=list(self.step_attention_pairs),
                             clean_steps_requested=self.clean_steps,
                             profiled_step_s=profiled_s,
                             population={**POPULATION, "model_trained": self.model_trained},

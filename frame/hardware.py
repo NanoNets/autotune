@@ -33,7 +33,7 @@ def hardware(gpu, peak_flops, mem_gb, dtype, device_name=None, num_sms=None,
     }
 
 
-def measure(device="cuda", dtype="bfloat16"):
+def measure(device, dtype):
     """On-device: measure BOTH roofline ceilings + read the card's facts. Needs torch + the GPU.
 
     Both ceilings are measured once here and threaded to every probe

@@ -89,6 +89,9 @@ def main():
     ap.add_argument("--memory-only", action="store_true", help="a ceiling trial: memory, no timing")
     ap.add_argument("--steps", type=int, default=3, help="memory-only: optimizer steps to run")
     ap.add_argument("--expect-shape", default=None, help="memory-only: B,S every batch must have")
+    ap.add_argument("--expect-image-tokens", type=int, default=None,
+                    help="memory-only, VLM: image tokens every row must carry")
+    ap.add_argument("--image-token-id", type=int, default=None, help="memory-only, VLM: their id")
     a = ap.parse_args(ours)
     if not theirs:
         raise SystemExit("no script given after --")
@@ -159,7 +162,8 @@ def _memory_trial(a, script, theirs):
     from profiler.memtrial import MemoryTrial, TrialDone
     try:
         expect = tuple(int(x) for x in a.expect_shape.split(",")) if a.expect_shape else None
-        trial = MemoryTrial(device=a.device, steps=a.steps, expect_shape=expect)
+        trial = MemoryTrial(device=a.device, steps=a.steps, expect_shape=expect,
+                            expect_image_tokens=a.expect_image_tokens, image_token_id=a.image_token_id)
     except ValueError as e:
         _write(a.out, {"trial": {"status": "error", "error": f"invalid trial settings: {e}"}})
         raise SystemExit(2)

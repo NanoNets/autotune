@@ -14,6 +14,10 @@ max_len         = 2048                    # REQUIRED. the sequence length your a
                                            # length the OOM ceiling is measured at (frame/README.md).
                                            # must be <= the model's context length, or Frame refuses.
 
+# Vision-language models only: the image worst case, declared like max_len (frame/README.md).
+# max_image_size = "672x672"   # the largest image the training code lets through, W x H pixels
+# max_images     = 1           # most images per sample; omit to have Frame scan the data for it
+
 backend = "local"   # "local" or "ssh" — see backends/README.md
 device  = "cuda"    # what the probe runs ON. "cuda" for any GPU box; single-GPU only, so no
                     # "cuda:0". "cpu" is a smoke test — a well-formed Observation whose MFU is

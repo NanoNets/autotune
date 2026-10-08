@@ -18,7 +18,9 @@ supply one only by luck. `teardown()` frees a trial's weights before the next on
 
 _DEFAULTS = {
     "device": "cuda",
-    "dtype": "bfloat16",               # run PARAMETER (off-limits precision), not a searchable knob
+    "dtype": None,                     # run PARAMETER (off-limits precision), not a searchable knob.
+                                       # None: the checkpoint's own dtype, which is what
+                                       # transformers loads when the code names none. Never defined here.
     "seq_len": 1024,                   # run PARAMETER (off-limits max_length), not a searchable knob
     "effective_batch": 16,             # human-owned target; the loop factorizes it, never changes it
     "micro_batch": 1,                  # the free batch knob; grad_accum is derived to hold effective_batch
@@ -164,6 +166,28 @@ def _length_grouped(rows, micro_batch, seed=0):
     return [rows[i] for chunk in chunks for i in chunk]
 
 
+def checkpoint_dtype(model):
+    """The dtype transformers loads `model` in when the code names none: the checkpoint's own
+    (`config.json` `dtype` / `torch_dtype`, the text config's for a nested one), else torch's
+    default, float32. A name: 'bfloat16', 'float16', 'float32'."""
+    from transformers import AutoConfig
+    try:
+        cfg = AutoConfig.from_pretrained(model)
+    except ValueError:                                  # an architecture transformers doesn't ship
+        cfg = AutoConfig.from_pretrained(model, trust_remote_code=True)
+    for c in (cfg, getattr(cfg, "text_config", None)):
+        d = getattr(c, "dtype", None) or getattr(c, "torch_dtype", None) if c is not None else None
+        if d is not None:
+            return str(d).replace("torch.", "")
+    return "float32"
+
+
+def resolve_dtype(config):
+    """The dtype this runner trains `config` in: the config's, else the checkpoint's. The profiler
+    measures the peak at it (`profiler/capture.py`)."""
+    return config.get("dtype") or checkpoint_dtype(config["model"])
+
+
 def _resolve(config):
     """Fill defaults + derived values. Pure — no torch/transformers, so it's unit-testable."""
     c = {**_DEFAULTS, **config}
@@ -195,6 +219,7 @@ class HFRunner:
         from transformers import AutoModelForCausalLM, AutoTokenizer
 
         self.cfg = _resolve(config)
+        self.cfg["dtype"] = resolve_dtype(self.cfg)    # recorded: what it actually trained in
         self.device = self.cfg["device"]
         self._rf = record_function
         dtype = getattr(torch, self.cfg["dtype"])
@@ -211,6 +236,8 @@ class HFRunner:
             attn_implementation=self.cfg["attn_implementation"],
             trust_remote_code=True).to(self.device)
         self.params = sum(p.numel() for p in self.model.parameters())   # before compile wrapping
+        from profiler.attention import spec                 # PaLM's attention term: what attends
+        self.attention_parts, self.attention_skipped = spec(self.model.config)   # over what
         if self.cfg["gradient_checkpointing"]:
             self.model.gradient_checkpointing_enable()
         self.model.train()
@@ -380,8 +407,14 @@ class HFRunner:
         """Rows the most recent `step()` pushed through the model."""
         return self._samples
 
+    def last_step_attention_pairs(self):
+        """(query, key) pairs the most recent `step()` attended over, per attention part
+        (`profiler/attention.py`): rows x width x min(width, window). Padded, like the tokens."""
+        return dict(self._pairs)
+
     def step(self):
         self._tokens = self._samples = 0                   # measured, not assumed (see tokens_per_step)
+        self._pairs = {}
         self._steps = getattr(self, "_steps", 0) + 1
         self._train_step(self._next, count=True)
 
@@ -402,6 +435,10 @@ class HFRunner:
             if count:
                 self._tokens += input_ids.numel()
                 self._samples += input_ids.shape[0]
+                b, s = input_ids.shape[0], input_ids.shape[-1]
+                for p in self.attention_parts:
+                    self._pairs[p["part"]] = (self._pairs.get(p["part"], 0)
+                                              + b * s * min(s, p["window"] or s))
                 self._tokens_total = getattr(self, "_tokens_total", 0) + input_ids.numel()
             input_ids = input_ids.to(self.device)
             attention = attention.to(self.device)

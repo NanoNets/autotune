@@ -237,3 +237,15 @@ def test_ssh_pushes_run_files_even_without_a_code_sync(monkeypatch):
     finally:
         import shutil
         shutil.rmtree(d, ignore_errors=True)
+
+
+def test_script_peak_dtype_is_the_scripts_never_defined_here(monkeypatch):
+    """The peak is measured at the dtype the script's matmuls run in: its autocast dtype, else its
+    load dtype, else the checkpoint's (what transformers loads when the script names none)."""
+    import frameworks.hf as hf
+    from backends.local import _script_compute_dtype
+    monkeypatch.setattr(hf, "checkpoint_dtype", lambda model: "bfloat16")
+    assert _script_compute_dtype({"model": "m"}) == "bfloat16"
+    assert _script_compute_dtype({"model": "m", "dtype": "float32"}) == "float32"
+    assert _script_compute_dtype({"model": "m", "dtype": "float32", "compute_dtype": "bfloat16"}) == "bfloat16"
+    assert _script_compute_dtype({}) is None                       # nothing to read it from

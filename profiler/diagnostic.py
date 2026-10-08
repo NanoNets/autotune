@@ -18,7 +18,9 @@ mixed or the instrument failed, so the Observation is marked `invalid` rather th
 import statistics
 from dataclasses import dataclass, field
 
-from profiler.roofline import training_flops, step_time_floor_s, mfu
+from profiler.attention import describe
+from profiler.roofline import (attention_flops, training_flops, vlm_training_flops,
+                               step_time_floor_s, mfu)
 from profiler.trace import (load_trace, phase_times_us, gpu_phase_times_us, kernels, gpu_busy_us,
                             kernel_gaps, provenance, device_props, occupancy)
 
@@ -60,6 +62,11 @@ class Observation:
                                        #   (4 * params_total + 2 * params_trainable) * D, = 6ND
     params_total: int = None           # every weight of the model (N in the forward)
     params_trainable: int = None       # weights the optimizer trains (LoRA: the adapters only)
+    params_vision: int = None          # a VLM: the vision tower's share of params_total, whose FLOPs
+                                       #   are charged per image patch, not per token
+    patches_per_step: float = None     # a VLM: mean image patches per clean step
+    attention_flops: float = None      # PaLM's attention term of `flops`, mean clean step
+    attention_source: str = None       # what that term covers, and what it leaves out
     roofline_floor_s: float = None
     mfu: float = None                  # achieved / peak over clean-window totals
     gpu_busy_s: float = None           # reference batch: union of kernel intervals, profiled run
@@ -140,6 +147,7 @@ def diagnose(capture, params, tokens, gpu, trainable=None):
     base = dict(
         status=capture.status, gpu=gpu, error=capture.error, trace_path=trace_path,
         params_total=params or None, params_trainable=trainable or None,
+        params_vision=getattr(capture, "params_vision", None),
         peak_flops=peak, peak_dtype=getattr(capture, "peak_dtype", None),
         peak_mem_bw_gb_s=getattr(capture, "peak_mem_bw_gb_s", None),
         device_type=getattr(capture, "device", None),
@@ -166,13 +174,41 @@ def diagnose(capture, params, tokens, gpu, trainable=None):
     step_tok = timing.setdefault("tokens_per_step", tokens)   # per-step counts, else the caller's
     trace = load_trace(capture.trace)
     known = bool(step_tok and params)                  # tokens or N_total unknown (no token tensor,
-    flops = (training_flops(params, step_tok, trainable)   # or a quantized base): no FLOP count,
-             if known else None)                       # so no MFU, rather than a crash or a guess
+    patches = getattr(capture, "step_patches", None) or []
+    vision = getattr(capture, "params_vision", None)
+    timing["patches_per_step"] = sum(patches) / len(patches) if patches and vision else None
+    if known and patches and vision:                   # a VLM: tokens and image patches, per part
+        flops = vlm_training_flops(params, step_tok, trainable, vision,
+                                   getattr(capture, "params_vision_trainable", None) or 0,
+                                   sum(patches) / len(patches))
+    else:
+        flops = (training_flops(params, step_tok, trainable)   # or a quantized base): no FLOP
+                 if known else None)                   # count, so no MFU, rather than a guess
+    parts = getattr(capture, "attention_parts", None)  # PaLM's attention term (arXiv:2204.02311
+    pairs = getattr(capture, "step_attention_pairs", None) or []   # App. B), over the same steps
+    attn = (sum(attention_flops(parts, p) for p in pairs) / len(pairs)
+            if parts and pairs and len(pairs) == len(times) else None)
+    if flops is not None and attn is not None:
+        flops += attn
+    timing["attention_flops"] = attn if flops is not None else None
+    timing["attention_source"] = (describe(parts or [], getattr(capture, "attention_skipped", None) or [])
+                                  if parts is not None else None)
     floor = step_time_floor_s(flops, peak) if known else None
     mfu_v = mfu(flops, mean_wall, peak) if known else None
     tok_s = step_tok / mean_wall if step_tok and mean_wall else None
     step_rows = timing.get("samples_per_step")
     samples_s = step_rows / mean_wall if step_rows and mean_wall else None
+
+    prov = provenance(trace)
+    peak_dtype = base["peak_dtype"]
+    half = sorted({"bf16", "fp16"} & set(prov["dtypes"]))
+    # An fp32 peak under half-precision kernels inflates MFU ~5x (A10: 0.92 read for a true 0.19),
+    # and only a true MFU above ~0.2 trips the > 1 check. No MFU, with the reason, instead.
+    peak_mismatch = None
+    if peak_dtype == "float32" and half and mfu_v is not None:
+        peak_mismatch = (f"MFU n/a: peak measured at float32 but the trace's kernels ran "
+                         f"{'/'.join(half)}; pass the run's dtype")
+        mfu_v = floor = None
 
     ph_s = {k: v / 1e6 for k, v in phase_times_us(trace).items()}   # all of them, not just PHASES
     ks = kernels(trace)                                # all kernels, by name (desc)
@@ -230,6 +266,8 @@ def diagnose(capture, params, tokens, gpu, trainable=None):
                f"idle {pct(frac(gap, ref_wall))}{cpu_str} | step cv {cv:.0%}{occ_str}{mem_str}")
     if busy is None:
         summary += " | trace recorded no kernels: GPU signals unknown"
+    if peak_mismatch:
+        summary += f" | {peak_mismatch}"
     if impossible:
         summary = f"{dev_str}INVALID ({'; '.join(impossible)}) | " + summary[len(dev_str):]
 
@@ -239,7 +277,7 @@ def diagnose(capture, params, tokens, gpu, trainable=None):
         reference_step_s=ref_wall, profiled_step_s=profiled,
         gpu_phase_times_s=gpu_ph_s, gpu_phase_coverage=gpu_ph_cov,
         data_wait_s=data_wait, data_wait_frac=wait, gap_s=gap, gap_frac=frac(gap, ref_wall),
-        provenance=provenance(trace), top_kernels=top8,
+        provenance=prov, top_kernels=top8,
         kernel_count=len(ks), top8_coverage=top8_cov,
         gap_count=gap_count, max_gap_s=None if max_gap_us is None else max_gap_us / 1e6,
         achieved_occupancy_pct=occ_pct, limiting_factor=occ.get("limiting_factor"),

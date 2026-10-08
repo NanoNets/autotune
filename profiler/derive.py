@@ -79,6 +79,21 @@ def _tokens_in(ops):
     return None, None
 
 
+def _clip_to_step(ev, step):
+    """End every annotation that starts inside `step` but runs past it at `step`'s end; return how
+    many. The profiled window closes inside torch's `Optimizer.step#…` label (the step boundary is
+    its post-hook), and the sync and profiler teardown that follow `step` would otherwise count as
+    that phase's host time (final_boss_report T4-C1: 78-143 ms vs ~6-9 ms on an A10)."""
+    s0, s1, n = step["ts"], _end(step), 0
+    for e in ev:
+        if (e is not step and e.get("cat") == "user_annotation" and "dur" in e
+                and s0 <= e["ts"] <= s1 < _end(e)):
+            e["dur"] = s1 - e["ts"]
+            e.setdefault("args", {})["clipped_at_step_end"] = True
+            n += 1
+    return n
+
+
 def augment(trace):
     """Add derived forward / backward / dataloader spans; return what was found.
 
@@ -92,6 +107,7 @@ def augment(trace):
                 "notes": ["no `step` annotation"]}
     step = max(steps, key=lambda e: e["dur"])
     s0, s1, main, pid = step["ts"], _end(step), step.get("tid"), step.get("pid")
+    _clip_to_step(ev, step)
 
     def inside(e):
         return s0 <= e["ts"] <= s1

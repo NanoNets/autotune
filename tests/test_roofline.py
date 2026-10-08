@@ -59,3 +59,13 @@ if __name__ == "__main__":
             _fn()
             print(f"ok  {_name}")
     print("all passed")
+
+
+def test_vlm_flops_charge_the_vision_tower_per_patch():
+    from profiler.roofline import vlm_training_flops
+    n, nt, v, d, p = 1000, 100, 300, 10, 40
+    # trained tower: forward + both backward halves for the vision part, per patch
+    assert vlm_training_flops(n, d, nt, v, 50, p) == (4 * 700 + 2 * 50) * d + (4 * 300 + 2 * 50) * p
+    # frozen tower below the trained weights: forward only
+    assert vlm_training_flops(n, d, nt, v, 0, p) == (4 * 700 + 2 * 100) * d + 2 * 300 * p
+    assert vlm_training_flops(n, d, nt, 0, 0, 0) == training_flops(n, d, nt)   # no tower: unchanged

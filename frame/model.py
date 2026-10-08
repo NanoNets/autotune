@@ -103,7 +103,9 @@ def internals(config):
         "context_len": _get(cfg, "max_position_embeddings", "n_positions"),
         "attention": attention,
         "gated_mlp": gated,
-        "dtype": _get(cfg, "torch_dtype", "dtype"),    # transformers 5.x renamed torch_dtype -> dtype
+        "tied": tied,
+        "dtype": (str(_get(cfg, "dtype", "torch_dtype")).replace("torch.", "")   # the checkpoint's:
+                  if _get(cfg, "dtype", "torch_dtype") is not None else None),   # 5.x renamed it
         "modality": "multimodal" if _get(cfg, "vision_config") else "text",
         "moe": bool(experts),
         "experts": experts,
@@ -142,7 +144,125 @@ def lora_params(internals, r, targets):
     return internals["layers"] * per_layer
 
 
-def load(model):
-    """model: an HF hub id or local path. Needs `transformers`."""
+# ---- exact counts: the real module tree, built with no weights ----------------------------
+# The analytical count above is a llama-shaped template: it misses gating it can't see in the
+# activation name (Gemma), hybrid layers (Qwen3.5), fused projections for LoRA (Phi-3) and the vision
+# tower (VLMs). Building the model on torch's `meta` device runs transformers' own model code on the
+# config: every tensor has its real shape and no storage, so it costs ~1 s and no memory, and the
+# counts are exact for any architecture transformers ships. The template stays as the fallback,
+# always labelled an estimate (`params_source`).
+
+def build_meta(config):
+    """The model transformers would build for `config`, on the meta device: the class
+    `AutoModelForCausalLM` maps it to (what our runner and most SFT scripts load), else the class
+    the config's `architectures` names, else `AutoModelForImageTextToText` (VLMs). Raises when
+    none builds."""
+    import torch
+    import transformers
+    from transformers import AutoModelForCausalLM
+    if not type(config).__module__.startswith("transformers."):
+        raise ValueError(f"{type(config).__name__} comes from the checkpoint's own code, "
+                         "which Frame doesn't run")
+    with torch.device("meta"):
+        try:
+            return AutoModelForCausalLM.from_config(config)
+        except ValueError:                             # no causal-LM mapping (e.g. Qwen2-VL)
+            arch = (getattr(config, "architectures", None) or [None])[0]
+            cls = getattr(transformers, arch or "", None)
+            if cls is not None:
+                return cls._from_config(config)
+            return transformers.AutoModelForImageTextToText.from_config(config)
+
+
+_VISION_PREFIXES = ("visual", "vision_tower", "vision_model", "vision_encoder")
+
+
+def exact_counts(model):
+    """(total, vision) parameters of a built model. `parameters()` yields a shared (tied) weight
+    once, so tied embeddings count once, as they should."""
+    total = vision = 0
+    for name, p in model.named_parameters():
+        total += p.numel()
+        if any(part in _VISION_PREFIXES for part in name.split(".")):
+            vision += p.numel()
+    return total, vision
+
+
+def quantizable_params(model):
+    """Weights a 4-/8-bit load quantizes: every `Linear` / `Conv1D` weight but the output head's.
+    Embeddings, norms, biases and the head stay at the compute dtype."""
+    import torch
+    from transformers.pytorch_utils import Conv1D
+    out = model.get_output_embeddings() if hasattr(model, "get_output_embeddings") else None
+    seen, n = set(), 0
+    for m in model.modules():
+        if isinstance(m, (torch.nn.Linear, Conv1D)) and m is not out and id(m.weight) not in seen:
+            seen.add(id(m.weight))
+            n += m.weight.numel()
+    return n
+
+
+def lora_trainable(model, r, targets):
+    """(params, why_not): the parameters LoRA adds to a built model, matched the way peft matches
+    them. "all-linear": every `nn.Linear` / `Conv1D` except the output head
+    (peft `_maybe_include_all_linear_layers`); a list: every module whose name is a target or ends
+    with `.<target>` (peft `check_target_module_exists`). Each adds `r * (d_in + d_out)`.
+    params None, with why: no module matches (peft would refuse the config), or a match is a layer
+    type this doesn't count."""
+    import torch
+    from transformers.pytorch_utils import Conv1D
+    modules = dict(model.named_modules())
+    if targets == "all-linear" or targets == ["all-linear"]:
+        out = model.get_output_embeddings() if hasattr(model, "get_output_embeddings") else None
+        chosen = [n for n, m in modules.items() if isinstance(m, (torch.nn.Linear, Conv1D)) and m is not out]
+    else:
+        ts = [targets] if isinstance(targets, str) else list(targets)
+        chosen = [n for n in modules if n and any(n == t or n.endswith("." + t) for t in ts)]
+    if not chosen:
+        return None, (f"LoRA targets {targets} match no module of {type(model).__name__}: "
+                      f"peft would refuse this config")
+    total = 0
+    for n in chosen:
+        m = modules[n]
+        if isinstance(m, torch.nn.Linear):
+            total += r * (m.in_features + m.out_features)
+        elif isinstance(m, Conv1D):                    # weight is (d_in, d_out)
+            total += r * (m.weight.shape[0] + m.weight.shape[1])
+        elif isinstance(m, torch.nn.Embedding):
+            total += r * (m.num_embeddings + m.embedding_dim)
+        else:
+            return None, f"LoRA target {n} is a {type(m).__name__}, which this doesn't count"
+    return total, None
+
+
+def with_exact_counts(info, config, lora=None):
+    """`internals(config)` plus exact counts from a meta-device build. On success: `params` /
+    `params_total` exact (dense; an MoE keeps the analytical active count as `params`),
+    `vision_params`, and with `lora`, `lora_trainable` (or None + `lora_note`). On failure: the
+    analytical numbers, labelled estimates, with the reason in `params_source`."""
+    info = dict(info)
+    try:
+        model = build_meta(config)
+    except Exception as e:                             # custom code, or a model that can't build
+        info["params_source"] = f"estimated from config dims ({type(e).__name__}: {str(e)[:160]})"
+        return info
+    total, vision = exact_counts(model)
+    info["params_total"] = total
+    if not info.get("moe"):
+        info["params"] = total
+    info["vision_params"] = vision
+    info["quantizable_params"] = quantizable_params(model)
+    info["params_source"] = f"exact: {type(model).__name__} built on the meta device"
+    if lora:
+        info["lora_trainable"], info["lora_note"] = lora_trainable(model, lora["r"], lora["targets"])
+    return info
+
+
+def load(model, lora=None):
+    """model: an HF hub id or local path. Needs `transformers`. lora: {"r", "targets"}."""
     from transformers import AutoConfig
-    return internals(AutoConfig.from_pretrained(model, trust_remote_code=True))
+    try:                                               # transformers' own class first: a hub repo
+        config = AutoConfig.from_pretrained(model)     # may ship a copy of a native one (Phi-3)
+    except ValueError:                                 # an architecture transformers doesn't know
+        config = AutoConfig.from_pretrained(model, trust_remote_code=True)
+    return with_exact_counts(internals(config), config, lora)

@@ -181,9 +181,28 @@ Frame the model and data the script uses as usual (`model` / `dataset` in `run.t
   modules, as the script sets them, to Frame: `--lora-r <r> --lora-targets <names | all-linear>`
   (`frame/README.md`, "LoRA"). Without them, Frame's memory and FLOPs assume a full fine-tune and
   overstate this run several times over. They stay on the never-touch list (2a).
+- **Precision: never chosen, only read.** If the script sets the dtype it loads the trained
+  weights in, however it does that, pass it as `--dtype` (and `dtype` in probe configs); if it sets
+  none, pass nothing: Frame and the profiler use the checkpoint's own, which is what the script gets.
+  If its matmuls run in a different dtype (autocast, a mixed-precision setting), also pass
+  `--compute-dtype` (`compute_dtype`). These are facts about the script, never knobs.
+- **A vision-language model:** the image worst case is declared like `max_len`, never chosen.
+  Read the largest image the script's image processing lets through (however it caps it: a pixel
+  budget, a longest edge, a fixed resize) and pass it as `--max-image-size WxH` (a pixel budget P →
+  √P × √P). Pass the most images one sample can carry as `--max-images` if the script or its data
+  format limits it; otherwise leave it out and Frame scans the data for it (`--image-field` if it
+  can't find the column). Put `"{IMAGE}"` in `--ceiling-row-template` wherever the script reads an
+  image, **before the text**. Every ceiling trial then checks each row reached the model with the
+  expected image tokens; a mismatch means the size you read isn't the script's cap. Both are
+  never-touch: resolution and image count change what the model sees.
+- **A quantized base (QLoRA):** if the script loads the frozen base model with 4- or 8-bit
+  weights, however it sets that up, also pass `--base-quant 4bit | 8bit`. Without it, Frame charges
+  the base at `--dtype` and overstates model state ~2.6x (a 7B on an A10). It changes the model, so
+  it's on the never-touch list too.
 - **The probe sample:** the script trains on its own data. Frame's `sample.jsonl` isn't a format a
   user's framework can load yet, so script probes don't carry `sample_hash`. Keep the script's data,
-  seed and sampler identical across every probe.
+  seed and sampler identical across every probe: length grouping and packing aren't script levers
+  (`loop/throughput.md`).
 - **The ceiling** (`frame/README.md`, "User scripts"). Micro-batch is a lever for a script like
   for our runner, bounded by the ceiling; only `effective_batch` is fixed.
   1. Frame with `--ceiling-rows-out runs/<run_name>/ceiling_rows.jsonl` (plus
@@ -214,11 +233,13 @@ record in `research.md` **where it lives**:
 
 Record the **data source** the same way: the ceiling trials point it at the ceiling rows.
 
-Also record the **never-touch list:** learning rate, schedule, dataset, `max_len`, precision, seed,
+Also record the **never-touch list:** learning rate, schedule, dataset, `max_len`, precision (base
+quantization included), seed,
 LoRA rank, and anything else that changes the model (`loop/throughput.md`).
 
 **2b. If anything needed is hardcoded, ask the user before Step 3.** That covers a speed knob, a
-config file's path, the step budget, or the data source (a hardcoded path, or a hub id only). Ask once, listing every such item, and offer:
+config file's path, the step budget, the data source (a hardcoded path, or a hub id only), or eval /
+generation that runs inside the training loop with no way to switch it off. Ask once, listing every such item, and offer:
 1. **Move them into a config file** (recommended): a copy of the script at `runs/<run_name>/train.py`
    that reads those values from `runs/<run_name>/train_config.yaml` (passed by a new flag), so every
    probe's settings live in a file on disk.

@@ -48,7 +48,7 @@ One hypothesis — a point in the space.
 
 | Field | Meaning |
 |---|---|
-| `knobs` | assignments in **canonical** names, e.g. `{micro_batch: 4, shard_degree: 2, packing: true}` |
+| `knobs` | assignments in **canonical** names, e.g. `{micro_batch: 4, shard_degree: 2, compile: default}` |
 | `rationale` | why proposed: parent(s), surrogate prediction, expected outcome |
 
 Canonical only. The framework adapter translates to concrete flags/API.

@@ -118,6 +118,56 @@ def test_b1_float_activation_input_counts_rows_times_seq():
     assert att.step_tokens == expected[WARMUP:WARMUP + CLEAN]
 
 
+def test_eval_forwards_inside_the_window_are_not_training_rows():
+    """An eval / generate() forward under no_grad (HF Trainer `eval_steps`) must not add rows or
+    tokens to the step it falls in (final_boss_report T2-C1)."""
+    att = _packed_run(_steps({"input_ids": torch.randint(0, 50, (4, 8))}), eval_every_step=True)
+    assert att.step_samples == [4] * CLEAN and att.step_tokens == [32] * CLEAN
+
+
+class _ImageFirstModel(torch.nn.Module):
+    """`model(pixel_values, input_ids)`: a hand-written VLM wrapper, positional inputs, image first."""
+    def __init__(self):
+        super().__init__()
+        self.emb, self.head = torch.nn.Embedding(50, 16), torch.nn.Linear(16, 50)
+
+    def forward(self, pixel_values, input_ids):
+        return self.head(self.emb(input_ids) + pixel_values.mean())
+
+
+def test_positional_ids_are_counted_not_the_image_before_them():
+    """final_boss_report T2-C3: the first positional tensor was the image (12 "tokens", not 80)."""
+    torch.manual_seed(0)
+    att = Attach(device="cpu", warmup=WARMUP, clean_steps=CLEAN, peak_flops=1.0, peak_mem_bw_gb_s=1.0)
+    att.install()
+    model = _ImageFirstModel()
+    opt = torch.optim.AdamW(model.parameters())
+    for _ in range(WARMUP + CLEAN + 2):
+        model(torch.randn(4, 3, 8, 8), torch.randint(0, 50, (4, 20))).logsumexp(-1).mean().backward()
+        opt.step()
+        opt.zero_grad()
+    assert att.step_tokens == [80] * CLEAN and att.step_samples == [4] * CLEAN
+
+
+def test_a_no_grad_reference_forward_of_the_same_model_counts_its_rows_once():
+    """A training-side `no_grad` forward (e.g. a reference pass with adapters off, for a KL term)
+    sees the same rows as the training forward: the rows are counted once, not twice."""
+    torch.manual_seed(0)
+    att = Attach(device="cpu", warmup=WARMUP, clean_steps=CLEAN, peak_flops=1.0, peak_mem_bw_gb_s=1.0)
+    att.install()
+    model = _KwModel()
+    opt = torch.optim.AdamW(model.parameters())
+    for _ in range(WARMUP + CLEAN + 2):
+        ids = torch.randint(0, 50, (4, 8))
+        with torch.no_grad():
+            ref = model(input_ids=ids).log_softmax(-1)
+        out = model(input_ids=ids).log_softmax(-1)
+        (out - ref).square().mean().backward()
+        opt.step()
+        opt.zero_grad()
+    assert att.step_samples == [4] * CLEAN and att.step_tokens == [32] * CLEAN
+
+
 def test_b1_no_hook_left_on_the_model():
     att, _ = _variable_width_run(WIDTHS)
     assert att._tok_hook is None and att._root_hook is None
@@ -136,8 +186,9 @@ class _KwModel(torch.nn.Module):
         return self.head(self.emb(input_ids))
 
 
-def _packed_run(batches):
-    """One optimizer step per batch; each batch is the kwargs the model is called with."""
+def _packed_run(batches, micro_batches=1, eval_every_step=False):
+    """One optimizer step per batch (accumulated over `micro_batches` forwards); each batch is the
+    kwargs the model is called with."""
     torch.manual_seed(0)
     before = nopatch.snapshot()
     att = Attach(device="cpu", warmup=WARMUP, clean_steps=CLEAN, peak_flops=1.0, peak_mem_bw_gb_s=1.0)
@@ -145,7 +196,11 @@ def _packed_run(batches):
     model = _KwModel()
     opt = torch.optim.AdamW(model.parameters())
     for kw in batches:
-        model(**kw).logsumexp(-1).mean().backward()
+        for _ in range(micro_batches):
+            model(**kw).logsumexp(-1).mean().backward()
+        if eval_every_step:
+            with torch.no_grad():
+                model(**kw)
         opt.step()
         opt.zero_grad()
     nopatch.verify(before)
@@ -213,7 +268,21 @@ def test_packed_row_padded_at_position_zero():
     att = _packed_run(_steps({"input_ids": ids, "position_ids": pos, "attention_mask": mask}))
     assert att.step_samples == [2] * CLEAN                         # masked pads never count
     att = _packed_run(_steps({"input_ids": ids, "position_ids": pos}))
-    assert att.step_samples == [3] * CLEAN                         # no mask: the pad run counts once
+    assert att.step_samples == [2] * CLEAN                         # no mask: a trailing 0-run is padding
+
+
+def test_trailing_position_zero_padding_does_not_grow_as_micro_batch_shrinks():
+    """TRL `padding_free` + `pad_to_multiple_of`: each flattened row is right-padded with position
+    0 and no mask. The same 8 documents per step must read 8 at every micro-batch split, or a
+    smaller micro-batch reads as more samples/s (final_boss_report T11-C1)."""
+    def row(doc_lens, pad):
+        return torch.cat([_pos(*doc_lens), torch.zeros(pad, dtype=torch.long)])[None]
+    for n_micro in (1, 2, 4, 8):
+        per = 8 // n_micro
+        pos = row([5] * per, 3)
+        kw = {"input_ids": torch.randint(0, 50, tuple(pos.shape)), "position_ids": pos}
+        att = _packed_run(_steps(kw), micro_batches=n_micro)
+        assert att.step_samples == [8] * CLEAN, n_micro
 
 
 def test_multi_axis_position_ids_count_on_one_axis():
@@ -299,3 +368,66 @@ def test_quantized_base_is_unknown_not_its_packed_count():
     att = _lora_run(model)
     assert att.params_total is None and att.params is not None
     assert att.micro_batches["params_source"].startswith("unknown: quantized")
+
+
+class Params4bit(torch.nn.Parameter):
+    """Stands in for bitsandbytes' class, matched by name: a 4-bit weight stored as bf16."""
+
+
+def test_quantized_base_in_float_storage_is_unknown_too():
+    """`bnb_4bit_quant_storage=torch.bfloat16`: the packed weight is a float tensor, so a dtype
+    check alone counts its packed numel (final_boss_report T3-C2)."""
+    model = _LoraModel()
+    model.packed = Params4bit(torch.zeros(8, dtype=torch.bfloat16), requires_grad=False)
+    att = _lora_run(model)
+    assert att.params_total is None
+    assert att.micro_batches["params_source"].startswith("unknown: quantized")
+
+
+def test_image_input_without_a_vision_tower_to_split_means_no_param_count():
+    """No module named like a vision tower: the per-patch work can't be split off, so no FLOP
+    count, never 6ND over text tokens (final_boss_report VLM theme: 0.78-1.29x on Qwen2-VL-2B)."""
+    att = _packed_run(_steps({"input_ids": torch.randint(0, 50, (4, 8)),
+                              "pixel_values": torch.randn(4, 3, 8, 8)}))
+    assert att.params_total is None and att.step_tokens == [32] * CLEAN
+    assert att.micro_batches["params_source"].startswith("unknown: multimodal")
+
+
+class _TinyVLM(torch.nn.Module):
+    """A vision tower (`visual`) over image patches, merged into the text embedding."""
+    def __init__(self, patch=4):
+        super().__init__()
+        self.config = type("Cfg", (), {"vision_config": type("V", (), {"patch_size": patch})()})()
+        self.visual = torch.nn.Linear(16, 16)
+        self.emb, self.head = torch.nn.Embedding(50, 16), torch.nn.Linear(16, 50)
+
+    def forward(self, input_ids, pixel_values):
+        img = pixel_values.flatten(1)[:, :16] if pixel_values.dim() > 2 else pixel_values
+        return self.head(self.emb(input_ids) + self.visual(img).mean())
+
+
+def _vlm_run(pixel_values, train_vision=True):
+    torch.manual_seed(0)
+    att = Attach(device="cpu", warmup=WARMUP, clean_steps=CLEAN, peak_flops=1.0, peak_mem_bw_gb_s=1.0)
+    att.install()
+    model = _TinyVLM()
+    model.visual.requires_grad_(train_vision)
+    opt = torch.optim.AdamW([p for p in model.parameters() if p.requires_grad])
+    for _ in range(WARMUP + CLEAN + 2):
+        model(input_ids=torch.randint(0, 50, (2, 8)), pixel_values=pixel_values).logsumexp(-1).mean().backward()
+        opt.step()
+        opt.zero_grad()
+    return att, model
+
+
+def test_vlm_patches_from_a_flattened_patch_tensor():
+    """Qwen-VL passes patches flattened, [patches, dim]: one row per patch."""
+    att, model = _vlm_run(torch.randn(36, 16))
+    assert att.step_patches == [36] * CLEAN and att.params_total == sum(p.numel() for p in model.parameters())
+    assert att.params_vision == 16 * 16 + 16 and att.params_vision_trainable == att.params_vision
+    assert "per image patch" in att.micro_batches["params_source"]
+
+
+def test_vlm_patches_from_an_image_batch_use_the_patch_size():
+    att, _ = _vlm_run(torch.randn(2, 3, 8, 12), train_vision=False)   # 2 images, 4px patches
+    assert att.step_patches == [2 * 2 * 3] * CLEAN and att.params_vision_trainable == 0
