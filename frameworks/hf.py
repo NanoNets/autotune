@@ -35,6 +35,11 @@ _DEFAULTS = {
                                        # "fused optimizer" under Kernels). Matters most when the
                                        # optimizer is a large share of the step: its cost is per
                                        # PARAMETER, so it does not shrink with the batch.
+    "compile_optimizer": False,        # torch.compile the optimizer step: inductor fuses the foreach
+                                       # AdamW chain (~10 elementwise passes over every param) into a
+                                       # few kernels. SAME AdamW algorithm and state -- a kernel swap,
+                                       # like fused_optimizer. Matters when the optimizer is a large
+                                       # share of the step (per PARAMETER, doesn't shrink with batch).
     "chunked_ce": 0,                   # 0 = off (the model computes its own loss). N > 0 = compute
                                        # cross-entropy in N chunks over the token axis, each chunk
                                        # checkpointed so its [chunk, vocab] logits are freed after
@@ -78,6 +83,7 @@ def knobs():
                                                "max-autotune", "max-autotune-no-cudagraphs"]},
         "tf32":                   {"type": "bool"},
         "fused_optimizer":        {"type": "bool"},   # AdamW(fused=True); CUDA + float params only
+        "compile_optimizer":      {"type": "bool"},   # torch.compile(opt.step)
         "padding":                {"type": "choice", "options": ["max_length", "longest"]},
         "length_grouped":         {"type": "bool"},   # pairs with padding="longest"
         "chunked_ce":             {"type": "int",    "min": 0},   # 0 = off; N = chunks
@@ -254,6 +260,9 @@ class HFRunner:
         self.opt = torch.optim.AdamW(
             self.model.parameters(), lr=self.cfg["lr"],
             **({"fused": True} if self.cfg["fused_optimizer"] else {}))
+        self._opt_step = self.opt.step
+        if self.cfg["compile_optimizer"]:
+            self._opt_step = torch.compile(self.opt.step, fullgraph=False)
         self._reference = self._population = self.steps_per_pass = None
         if self.cfg.get("data") == "synthetic":
             self._loader = self._it = None
@@ -458,7 +467,7 @@ class HFRunner:
             with self._rf("backward"):
                 loss.backward()
         with self._rf("optimizer"):
-            self.opt.step()
+            self._opt_step()
 
     def _chunked_loss(self, input_ids, attention, labels, chunks):
         """Causal-LM cross-entropy computed in `chunks` slices of the token axis.

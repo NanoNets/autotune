@@ -50,6 +50,7 @@ _MEMORY_KNOBS = (
     "compile", "torch_compile",                         # canonical, hf: compile fuses the CE and
                                                         #   moved a measured ceiling 2 -> 4
     "chunked_ce",                                       # hf: frees the [tokens, vocab] logits
+    "compile_optimizer",                                # hf: changes the optimizer's temporaries
 )
 _ALLOC_ENV = "PYTORCH_CUDA_ALLOC_CONF"                  # moves fragmentation, so the ceiling
 
