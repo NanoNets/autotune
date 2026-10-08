@@ -243,8 +243,13 @@ class HFRunner:
         self.model.train()
         compile_mode = self.cfg["torch_compile"]
         if compile_mode:                                # True -> inductor default; str -> that mode
-            self.model = torch.compile(
-                self.model, **({} if compile_mode is True else {"mode": compile_mode}))
+            kw = {} if compile_mode is True else {"mode": compile_mode}
+            if self.cfg["chunked_ce"]:
+                # The chunked loss calls the backbone (self.model.model) directly, which would bypass a
+                # compiled wrapper and leave compile a silent no-op. Compile the backbone instead.
+                self.model.model = torch.compile(self.model.model, **kw)
+            else:
+                self.model = torch.compile(self.model, **kw)
 
         self.opt = torch.optim.AdamW(
             self.model.parameters(), lr=self.cfg["lr"],
