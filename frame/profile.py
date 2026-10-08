@@ -21,7 +21,9 @@ caller's job, because a real ceiling needs a real training step.
 The memory numbers assume a default config (the run dtype + AdamW, a full fine-tune unless `lora`
 says otherwise) — recorded in `default_config` so it's clear they move with the knobs, not a fixed
 truth. With `lora` (rank + target modules, read from the user's script), the adapters are counted
-from the config's dims (`frame.model.lora_params`) and only they carry grads and optimizer state:
+on the model built on the meta device, matched the way peft matches them (`frame.model.load`), or
+from the config's dims when it can't be built (`frame.model.lora_params`, an estimate that says
+so), and only they carry grads and optimizer state:
 FLOPs per token become 4 * N_total + 2 * N_trainable, the profiler's own formula.
 """
 from dataclasses import dataclass, field
@@ -30,6 +32,10 @@ from frame.memory import training_memory
 from frame.model import lora_params
 
 _LORA_ADAPTER_BYTES = 4                                # peft keeps adapters in fp32 by default
+# A quantized frozen base (QLoRA), bytes per quantized weight. 4-bit: half a byte plus one fp32
+# scale per 64-weight block. With nested ("double") quantization the scales cost ~0.05 B/weight
+# less, so this overstates slightly, the safe side. 8-bit: one byte; per-row scales are negligible.
+_QUANT_BYTES = {"4bit": 0.5 + 4 / 64, "8bit": 1.0}
 
 _DTYPE_BYTES = {"bfloat16": 2, "float16": 2, "float32": 4, "float64": 8}
 
@@ -52,6 +58,8 @@ class Profile:
     model_state_fits: bool = None                      # does MODEL STATE alone fit — says nothing
                                                        #   about activations; see the headroom
     max_len: int = None                                # human-declared sequence length (off-limits)
+    images: dict = None                                # VLM worst case: max_image_size, max_images,
+                                                       #   image_tokens_per_row (frame/images.py)
     ceiling: dict = None                               # MEASURED micro_batch ceiling at max_len;
                                                        #   None when it wasn't measured
     notes: list = field(default_factory=list)          # things the agent must see, not errors
@@ -59,7 +67,7 @@ class Profile:
 
 
 # max_len this many times the dataset's p99 means most of every batch is padding — worth the
-# agent's attention (packing is likely a large win), never an error: it's the human's call.
+# agent's attention, never an error: it's the human's call.
 _PADDING_FLAG = 4
 
 
@@ -97,8 +105,9 @@ def _notes(dataset, max_len, ceiling):
     if max_len and p99 and max_len >= _PADDING_FLAG * p99:
         notes.append(
             f"max_len {max_len} is {max_len // p99}x the dataset p99 ({p99} tok): most of every "
-            f"unpacked batch is padding. Expect packing to be a large win, or max_len is set "
-            f"higher than this data needs — confirm with the human.")
+            f"unpacked batch is padding. Dynamic padding / padding-free batching recover it; "
+            f"packing would too, but it changes examples per optimizer step, so it's off-limits "
+            f"to the loop. Or max_len is set higher than this data needs — confirm with the human.")
     if ceiling and not ceiling.get("fits"):
         notes.append(
             f"micro_batch=1 OOMs at max_len {ceiling['seq_len']}: this job does not fit on this "
@@ -118,23 +127,36 @@ def _notes(dataset, max_len, ceiling):
     return notes
 
 
-def build(model, dataset, hardware, versions, dtype="bfloat16", optimizer="adamw",
-          effective_batch=None, knobs=None, max_len=None, ceiling=None, lora=None):
+def build(model, dataset, hardware, versions, dtype=None, optimizer="adamw",
+          effective_batch=None, knobs=None, max_len=None, ceiling=None, lora=None,
+          base_quant=None, compute_dtype=None, images=None):
     """model/dataset/hardware/versions: the extracted parts (see the sibling modules).
 
-    dtype: the run compute dtype — drives the memory precision AND is the dtype the peak was
-    measured at (carried in default_config so the loop passes the matching config["dtype"]).
+    dtype: the dtype the trained weights are held in, as the training code holds them (never
+    defined by Frame: the script's, else the checkpoint's). Drives the memory model.
+    compute_dtype: the dtype the matmuls run in when it differs (autocast); the peak must have
+    been measured at it. None: same as dtype.
     effective_batch: the human's target (carried, not searched). knobs: the framework's searchable
     surface, so the agent classifies safe/off-limits at Frame from what's actually tunable.
     max_len: the human-declared sequence length. Validated against the architecture here.
     ceiling: the record from `frame.ceiling` at max_len, or None if not measured.
     lora: {"r": rank, "targets": module names or "all-linear"} when the run trains LoRA adapters
     on a frozen base; None for a full fine-tune.
+    base_quant: "4bit" / "8bit" when the script loads that frozen base with quantized weights
+    (QLoRA). Its linear weights are then charged at `_QUANT_BYTES`; embeddings, norms and the
+    output head stay at `dtype`.
     """
+    if base_quant is not None and base_quant not in _QUANT_BYTES:
+        raise ValueError(f"base_quant must be one of {sorted(_QUANT_BYTES)}, got {base_quant!r}")
+    if base_quant and not lora:
+        raise ValueError("a quantized base can't be fully fine-tuned: pass the script's LoRA "
+                         "rank and targets too")
+    dtype = dtype or model.get("dtype") or "float32"   # the code's, else the checkpoint's
     peak_dtype = hardware.get("peak_dtype")
-    if peak_dtype is not None and peak_dtype != dtype:  # a peak measured at another precision is
+    run_compute = compute_dtype or dtype
+    if peak_dtype is not None and peak_dtype != run_compute:   # a peak at another precision is
         raise ValueError(                               # not a ceiling for THIS run
-            f"peak was measured at {peak_dtype!r} but the run dtype is {dtype!r}; "
+            f"peak was measured at {peak_dtype!r} but the run computes in {run_compute!r}; "
             "MFU against a mismatched peak is meaningless")
 
     ctx = model.get("context_len")
@@ -145,29 +167,68 @@ def build(model, dataset, hardware, versions, dtype="bfloat16", optimizer="adamw
 
     params = model["params"]
     param_bytes = _DTYPE_BYTES.get(dtype, 2)
-    trainable = lora_params(model, lora["r"], lora["targets"]) if lora else None
     lora_rec, extra_notes = None, []
+    if lora and "lora_trainable" in model:              # matched on the built model, as peft does
+        trainable = model["lora_trainable"]
+    elif lora:                                          # template estimate: llama-style names only
+        trainable = lora_params(model, lora["r"], lora["targets"])
+    else:
+        trainable = None
+    if str(model.get("params_source", "")).startswith("estimated"):
+        extra_notes.append(
+            f"params are an estimate from the config's dims (a llama-shaped template), because "
+            f"the model couldn't be built: {model['params_source']}. Gated activations it can't "
+            f"see, hybrid layers, fused projections and vision towers make it wrong.")
     if lora:
         lora_rec = {"r": lora["r"], "targets": lora["targets"], "params_trainable": trainable,
                     "params_total": params + trainable if trainable else None}
     if trainable:                                       # base + adapters run forward and backward;
         params += trainable                             # only the adapters get weight grads + state
+        quantized = 0
+        if base_quant:                                  # the base's linear weights, quantized
+            quantized = model.get("quantizable_params")
+            if quantized is None:                       # template fallback: all but the embeddings
+                quantized = model["params"] - model["vocab"] * model["hidden"] * (1 if model.get("tied", True) else 2)
         mem = training_memory(params, param_bytes=param_bytes, optimizer=optimizer,
-                              trainable=trainable, trainable_bytes=_LORA_ADAPTER_BYTES)
+                              trainable=trainable, trainable_bytes=_LORA_ADAPTER_BYTES,
+                              quantized=quantized, quant_bytes=_QUANT_BYTES.get(base_quant))
         flops_per_token = 4.0 * params + 2.0 * trainable
     else:
         mem = training_memory(params, param_bytes=param_bytes, optimizer=optimizer)
         flops_per_token = 6.0 * params
         if lora:                                        # declared, but not countable from the config
+            why = model.get("lora_note") or ("unknown module names, an ungated MLP, or MLP "
+                                             "targets on an MoE")
             extra_notes.append(
-                f"LoRA targets {lora['targets']} can't be counted from this config (unknown module "
-                f"names, an ungated MLP, or MLP targets on an MoE), so the model-state memory and "
-                f"FLOPs above are FULL fine-tune numbers: they overstate memory for this run. Trust "
-                f"the measured ceiling.")
+                f"LoRA targets {lora['targets']} can't be counted from this config ({why}), so the "
+                f"model-state memory and FLOPs above are FULL fine-tune numbers: they overstate "
+                f"memory for this run. Trust the measured ceiling.")
 
     mem_gb = hardware.get("mem_gb")
     headroom = round(mem_gb - mem["model_state_gb"], 1) if mem_gb is not None else None
     fits = headroom > 0 if headroom is not None else None
+    if images and images.get("image_tokens_per_row") and max_len \
+            and images["image_tokens_per_row"] >= max_len:
+        raise ValueError(
+            f"{images['max_images']} image(s) of {images['max_image_size']} make "
+            f"{images['image_tokens_per_row']} image tokens, more than max_len {max_len}: no text "
+            f"fits; the declared image size / count and max_len disagree")
+    if model.get("modality") == "multimodal":           # final_boss_report VLM theme
+        counted = (f"params include the vision tower ({model['vision_params'] / 1e6:.0f}M), but "
+                   f"flops_per_token charges it per text token, while it runs per image: the FLOP "
+                   f"estimate is approximate" if model.get("vision_params") else
+                   "params, flops_per_token and model-state memory count the text tower only; the "
+                   "vision tower isn't counted")
+        rows = (f"Ceiling rows carry {images['max_images']} image(s) of "
+                f"{images['max_image_size'][0]}x{images['max_image_size'][1]} each"
+                + (f" ({images['image_tokens_per_row']} image tokens a row, checked every trial)"
+                   if images.get("image_tokens_per_row") else
+                   " (image tokens unchecked: the processor couldn't count them here)")
+                if images else
+                "Ceiling rows are text-only: if the vision tower trains (e.g. LoRA all-linear), "
+                "declare the largest image (--max-image-size WxH) so they carry it, or the "
+                "ceiling can read 2x too high")
+        extra_notes.append(f"multimodal checkpoint: {counted}. {rows}.")
 
     name = model.get("arch") or "model"
     peak = hardware.get("peak_flops")
@@ -181,16 +242,20 @@ def build(model, dataset, hardware, versions, dtype="bfloat16", optimizer="adamw
     eb_str = f" | eff-batch {effective_batch}" if effective_batch else ""
     summary = (f"{name} ({model['attention']}, {dtype}) | {params/1e9:.1f}B params{eb_str} | "
                f"{hardware.get('gpu')} {mem_str}{peak_str} | "
-               f"{'LoRA' if trainable else 'full-FT'} model-state {mem['model_state_gb']}GB {fit_str} | "
+               f"{('QLoRA ' + base_quant + ' base') if trainable and base_quant else 'LoRA' if trainable else 'full-FT'} "
+               f"model-state {mem['model_state_gb']}GB {fit_str} | "
                f"{_ceiling_str(max_len, ceiling)} | {ds_str}")
 
     return Profile(
         model=model, dataset=dataset, hardware=hardware, versions=versions, memory=mem,
         default_config={"dtype": dtype, "param_bytes": param_bytes, "optimizer": optimizer,
-                        "finetune": "lora" if trainable else "full"},
+                        "finetune": "lora" if trainable else "full",
+                        **({"base_quant": base_quant} if base_quant else {}),
+                        **({"compute_dtype": compute_dtype}
+                           if compute_dtype and compute_dtype != dtype else {})},
         effective_batch=effective_batch, knobs=_bound_knobs(knobs, ceiling),
         flops_per_token=flops_per_token, lora=lora_rec, activation_headroom_gb=headroom,
-        model_state_fits=fits, max_len=max_len, ceiling=ceiling,
+        model_state_fits=fits, max_len=max_len, ceiling=ceiling, images=images,
         notes=_notes(dataset, max_len, ceiling) + extra_notes, summary=summary,
     )
 
@@ -217,11 +282,12 @@ def framework_runner(framework):
     raise ValueError(f"frameworks.{framework} exposes no runner class")
 
 
-def frame(model, dataset, gpu, max_len, dtype="bfloat16", device="cuda", framework="hf",
+def frame(model, dataset, gpu, max_len, dtype=None, device="cuda", framework="hf",
           effective_batch=16, text_field="text", split="train", sample=1000, name=None,
           runner=None, seed=0, on_trial=None, sample_path=None, sample_seed=0, max_scan=None,
           ceiling_rows_path=None, ceiling_row_template=None, ceiling_rows_format="text",
-          lora=None):
+          lora=None, base_quant=None, compute_dtype=None, max_image_size=None, max_images=None,
+          image_field=None):
     """Live: measure the peak, load config + tokenizer, scan the dataset, measure the ceiling,
     assemble.
 
@@ -243,14 +309,23 @@ def frame(model, dataset, gpu, max_len, dtype="bfloat16", device="cuda", framewo
     (`sample_file` in the probe config), so Frame's statistics and the probes' rows are one
     population.
     lora: {"r", "targets"} read from a user's LoRA script (see `build`).
+    base_quant: "4bit" / "8bit" when that script loads its frozen base quantized (see `build`).
+    max_image_size / max_images / image_field: a VLM's image worst case (`frame/images.py`):
+    (W, H) from the training code's image cap; images per sample from the code, else the most in
+    any row of `image_field` (found automatically when None).
+    dtype / compute_dtype: only what the training code sets (see `build`). Never defined here:
+    dtype None is the checkpoint's own (`config.json`), which is what transformers loads when the
+    code names none; compute_dtype None is dtype.
     """
     from frame.hardware import hardware, versions, measure
-    m = measure(device, dtype)                          # measure the peak ONCE, at the run dtype
     from transformers import AutoTokenizer
     from frame.model import load
     from frame.dataset import draw_sample, write_sample
 
-    mi = load(model)
+    mi = load(model, lora=lora)                          # exact counts when it builds (meta device)
+    dtype = dtype or mi.get("dtype") or "float32"       # the checkpoint's, else torch's default
+    compute_dtype = compute_dtype or dtype
+    m = measure(device, compute_dtype)                   # the peak ONCE, at the matmuls' dtype
     tok = AutoTokenizer.from_pretrained(model, trust_remote_code=True)
     drawn = draw_sample(dataset, tok, sample, text_field=text_field, split=split, name=name,
                         seed=sample_seed, effective_batch=effective_batch, max_len=max_len,
@@ -258,15 +333,43 @@ def frame(model, dataset, gpu, max_len, dtype="bfloat16", device="cuda", framewo
     if sample_path:
         write_sample(sample_path, drawn)
     ds = drawn["meta"]["pool"]                          # the corpus's shape, not the head's
-    hw = hardware(gpu, peak_flops=m["peak_flops"], mem_gb=m["mem_gb"], dtype=dtype,
+    hw = hardware(gpu, peak_flops=m["peak_flops"], mem_gb=m["mem_gb"], dtype=compute_dtype,
                   device_name=m["device_name"], num_sms=m["num_sms"],
                   peak_mem_bw_gb_s=m["peak_mem_bw_gb_s"])
 
+    images = None
+    if max_image_size:                                  # a VLM's image worst case
+        from frame.images import image_tokens, scan_images
+        if mi.get("modality") != "multimodal":
+            raise ValueError(f"--max-image-size is for a multimodal checkpoint; {model} is text-only")
+        src = "declared"
+        if max_images is None:                          # not in the code: the data says
+            s = scan_images(dataset, name=name, split=split, image_field=image_field,
+                            max_scan=max_scan)
+            if not s["max"]:
+                raise ValueError(
+                    "couldn't read images per sample from the data (no image column found, or no "
+                    "row holds an image); pass the training code's limit as --max-images, or the "
+                    "column as --image-field")
+            max_images = s["max"]
+            src = f"data scan: most images in any of {s['rows']} rows of `{s['field']}`"
+        per_row, tid = image_tokens(model, tuple(max_image_size), max_images)
+        images = {"max_image_size": list(max_image_size), "max_images": max_images,
+                  "max_images_source": src, "image_tokens_per_row": per_row, "image_token_id": tid}
+
     if ceiling_rows_path:                               # a user's script reads these in a trial
         from frame.ceiling_rows import write_ceiling_rows
+        image = None
+        if images:                                      # beside the rows, so it ships with them
+            import os
+            from frame.images import write_image
+            w, h = images["max_image_size"]
+            images["ceiling_image"] = write_image(
+                os.path.join(os.path.dirname(ceiling_rows_path), f"ceiling_image_{w}x{h}.png"), (w, h))
+            image = (images["ceiling_image"], images["max_images"])
         write_ceiling_rows(ceiling_rows_path, tok, max_len, effective_batch * 3,
                            text_field=text_field, template=ceiling_row_template,
-                           fmt=ceiling_rows_format, seed=seed)
+                           fmt=ceiling_rows_format, seed=seed, image=image)
 
     ceiling = None
     if runner is not None and device == "cuda":
@@ -278,4 +381,5 @@ def frame(model, dataset, gpu, max_len, dtype="bfloat16", device="cuda", framewo
 
     return build(mi, ds, hw, versions(), dtype=dtype,
                  effective_batch=effective_batch, knobs=_framework_knobs(framework),
-                 max_len=max_len, ceiling=ceiling, lora=lora)
+                 max_len=max_len, ceiling=ceiling, lora=lora, base_quant=base_quant,
+                 compute_dtype=compute_dtype, images=images)

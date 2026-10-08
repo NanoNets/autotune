@@ -53,15 +53,23 @@ def long_text(tokenizer, max_len, rng, pool, margin=None):
 
 
 def write_ceiling_rows(path, tokenizer, max_len, n_rows, text_field="text", template=None,
-                       fmt="text", seed=0):
+                       fmt="text", seed=0, image=None):
     """Write `n_rows` over-length rows to `path`. `template`: a dict (or JSON string) holding
-    `"{TEXT}"` where the long text goes. Returns the number of rows written."""
+    `"{TEXT}"` where the long text goes. `image`: (path, n) for a VLM: the template must also hold
+    `"{IMAGE}"` where the script reads an image path, and each row carries `n` of them
+    (`frame/images.py`). Returns the number of rows written."""
     if fmt not in ("text", "ids"):
         raise ValueError(f"fmt must be 'text' or 'ids', got {fmt!r}")
     if isinstance(template, str):
         template = json.loads(template)
     if template is not None and PLACEHOLDER not in json.dumps(template):
         raise ValueError(f"the row template needs a {PLACEHOLDER!r} where the long text goes")
+    if image is not None:
+        from frame.images import PLACEHOLDER as IMG, fill_images
+        if template is None or IMG not in json.dumps(template) or fmt != "text":
+            raise ValueError(f"image ceiling rows need a row template with {IMG!r} where the "
+                             f"script reads an image (put it before the text, so truncation "
+                             f"cuts text, not image tokens)")
     rng, pool = random.Random(seed), _ordinary_ids(tokenizer)
     with open(path, "w") as f:
         for _ in range(n_rows):
@@ -70,5 +78,7 @@ def write_ceiling_rows(path, tokenizer, max_len, n_rows, text_field="text", temp
             else:
                 text = long_text(tokenizer, max_len, rng, pool)
                 row = _fill(template, text) if template is not None else {text_field: text}
+                if image is not None:
+                    row = fill_images(row, *image)
             f.write(json.dumps(row) + "\n")
     return n_rows

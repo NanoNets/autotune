@@ -119,6 +119,9 @@ def stamp(config, defaults=None):
     alloc = (config.get("env") or {}).get(_ALLOC_ENV)
     if alloc:
         out[_ALLOC_ENV] = alloc
+    for k in ("max_image_size", "max_images"):         # a VLM's image worst case: another image
+        if config.get(k):                              # size or count is another ceiling
+            out[k] = config[k]
     return out
 
 
@@ -330,6 +333,16 @@ def main(argv=None):
     if not seq_len or not eb:
         raise SystemExit("needs max_len and effective_batch (in the config or the run's profile.json)")
     config = {**config, "max_len": seq_len, "effective_batch": eb}
+    images = profile.get("images") or {}               # a VLM: the rows carry maxed images
+    if images and config.get("script"):
+        config = {**config, "max_image_size": images["max_image_size"],
+                  "max_images": images["max_images"],
+                  "expect_image_tokens": images.get("image_tokens_per_row"),
+                  "image_token_id": images.get("image_token_id")}
+        if images.get("ceiling_image"):                # ships with the rows (ssh)
+            files = list(config.get("script_files") or [])
+            if images["ceiling_image"] not in files:
+                config["script_files"] = files + [images["ceiling_image"]]
     vocab = (profile.get("model") or {}).get("vocab")
     if vocab and not config.get("script"):             # the embedding width: an id past it is a
         config.setdefault("vocab", vocab)              # device-side assert, not the OOM measured

@@ -178,7 +178,14 @@ def test_bounding_does_not_mutate_the_frameworks_declaration():
 
 
 def test_a_clean_profile_carries_no_notes():
-    assert _profile(max_len=2048, ceiling=_ceiling(11)).notes == []
+    assert _profile(mem_gb=200.0, max_len=2048, ceiling=_ceiling(11)).notes == []
+
+
+def test_a_multimodal_checkpoint_says_what_isnt_counted():
+    vlm = {**internals(LLAMA3_8B), "modality": "multimodal"}
+    hw = hardware("A10G", peak_flops=1.21e14, mem_gb=200.0, dtype="bfloat16")
+    p = build(vlm, distribution([256]), hw, {}, dtype="bfloat16")
+    assert any("vision tower isn't counted" in n for n in p.notes)
 
 
 if __name__ == "__main__":
@@ -198,7 +205,7 @@ def test_lora_flops_and_memory_count_frozen_and_trained_separately():
     assert lora.lora["params_total"] == n and t > 0
     assert abs(lora.flops_per_token - (4 * n + 2 * t)) < 1           # the profiler's formula
     assert lora.flops_per_token < full.flops_per_token
-    assert lora.memory["model_state_gb"] < full.memory["model_state_gb"] / 5
+    assert lora.memory["model_state_gb"] < full.memory["model_state_gb"] / 3
     assert lora.default_config["finetune"] == "lora" and "LoRA model-state" in lora.summary
 
 
@@ -213,3 +220,27 @@ def test_lora_targets_it_cant_count_keep_full_numbers_and_say_so():
     assert p.lora["params_trainable"] is None and p.flops_per_token == full.flops_per_token
     assert p.memory == full.memory and "full-FT model-state" in p.summary
     assert any("can't be counted" in n for n in p.notes)
+
+
+# ---- a quantized base (QLoRA) -----------------------------------------------------------------
+
+def test_a_4bit_base_charges_its_linear_weights_at_half_a_byte():
+    """final_boss_report T5-C2: with no quantization input a 4-bit base was charged 2 B/weight
+    (Qwen2.5-7B: 14.79 GiB vs 5.65 measured on an A10)."""
+    lora = {"r": 16, "targets": "all-linear"}
+    plain, q4 = _profile(lora=lora), _profile(lora=lora, base_quant="4bit")
+    m = internals(LLAMA3_8B)
+    linear = m["params"] - m["vocab"] * m["hidden"] * (1 if m["tied"] else 2)   # embed/head: bf16
+    saved = linear * (2 - (0.5 + 4 / 64)) / 1024 ** 3
+    assert abs((plain.memory["weights_gb"] - q4.memory["weights_gb"]) - saved) < 0.02
+    assert q4.default_config["base_quant"] == "4bit" and "QLoRA 4bit base" in q4.summary
+    q8 = _profile(lora=lora, base_quant="8bit")
+    assert q4.memory["weights_gb"] < q8.memory["weights_gb"] < plain.memory["weights_gb"]
+
+
+def test_a_quantized_base_needs_the_lora_setup():
+    import pytest
+    with pytest.raises(ValueError, match="can't be fully fine-tuned"):
+        _profile(base_quant="4bit")
+    with pytest.raises(ValueError, match="base_quant must be"):
+        _profile(lora={"r": 16, "targets": "all-linear"}, base_quant="nf3")

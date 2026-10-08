@@ -92,7 +92,9 @@ loss by `grad_accum` uniformly (`frameworks/hf.py`), so uneven batches would be 
 **Status: open. One extra call, not wired.**
 
 `find_ceiling(..., seq_len=p99)` alongside the `max_len` one. The **gap between the two ceilings
-estimates what `packing` is worth** on this job, before spending a probe on it.
+estimates what `packing` is worth** on this job, before spending a probe on it. (Since 2026-10-08
+packing is off-limits to the loop, `loop/throughput.md`: this would be a number for the human, not a
+lever for the agent.)
 
 Deferred at implementation time as a nice-to-have. Only meaningful under `padding="longest"`: under
 `padding="max_length"` a p99 ceiling describes a regime the adapter never runs in.
@@ -171,8 +173,8 @@ wrong.
 
 | Fix | Cost | Buys |
 |---|---|---|
-| ~~`internals` descends into `text_config` when present~~ | **done** | Qwen3.5 and Gemma frame correctly |
-| Flag modality in the Profile notes. `internals()` already reports `modality` (`vision_config` present → `multimodal`); nothing reads it yet | ~5 lines | `frame/profile.py:_notes` tells the agent before it tunes |
+| ~~`internals` descends into `text_config` when present~~ | **done** | Qwen3.5 and Gemma frame without crashing. Their analytical counts were still wrong (Qwen3.5 −14.4%, Gemma −21-25%); since 2026-10-08 counts come from a meta-device build, exact (`frame/model.py`) |
+| ~~Flag modality in the Profile notes~~ | **done** 2026-10-08 | `frame/profile.py` adds a multimodal note: what's counted, and the image-row ceiling caveat |
 | Honour an explicit `model_class` in the run config, falling back to the auto-class | ~10 lines | `Gemma3ForCausalLM` on Gemma; any `*ForConditionalGeneration` with a text-only sibling |
 | Refuse at Frame when modality isn't text and no text-only class exists | ~10 lines | SmolVLM fails at Step 2 **with a reason**, not at loop step 1 |
 
@@ -186,6 +188,20 @@ a Profile note.
 ---
 
 ## 6b. Multimodal is a missing axis, not a missing model
+
+**Update 2026-10-08:** parts of this axis are now in for user scripts:
+- Frame counts the vision tower exactly (meta-device build).
+- A sandbox probe that sees `pixel_values` reads MFU as null with a reason.
+- The ceiling has an image worst case, declared like `max_len`: `--max-image-size WxH`, plus images
+  per sample from the code or a data scan. Every trial checks the image tokens per row
+  (`frame/README.md`, "Vision-language models").
+- Sandbox FLOPs and MFU count the vision tower per image patch and the language model per token
+  (`roofline.vlm_training_flops`). On an A10, Qwen2-VL-2B at 448² and 672², vision tower trained or
+  frozen, this lands within 2.2% of FlopCounterMode's weight FLOPs. The old single formula was off
+  by −22% to +29%.
+
+Still open: the OG runner has no VLM path, and the dataset scan's length distribution is
+text-only.
 
 **Status: open. Scoping, not a claim. Proposed as a milestone — deliberately *not* a PoC row.**
 
@@ -642,7 +658,11 @@ completions per step.
 `--lora-targets`, Frame counts the adapters from the config (`frame.model.lora_params`, exact
 against peft on SmolLM2-360M and Qwen2.5-0.5B), uses `4 * N_total + 2 * N_trainable` FLOPs per
 token, and charges grads + optimizer state to the adapters only (`frame/README.md`, "LoRA"). One
-thing is still open (item 2).
+thing is still open (item 2). Since 2026-10-08 the counts come from the model built on the meta
+device, with targets matched the way peft matches them: exact against peft on Phi-3's fused
+projections, Qwen3.5's hybrid layers and Qwen2-VL's vision tower too (`frame/README.md`, "LoRA"),
+where the config-dims template was off by −37% to +235% (`docs/verification/final_boss_report.md`
+T7-C3). The template stays as the fallback, labelled an estimate.
 
 **1. Model-state estimate: checked, closed.** On an A10 (2026-10-07), Frame's LoRA
 `model_state_gb` is within 4% of the memory allocated right after the first optimizer step
@@ -677,7 +697,16 @@ step time within the known ~0.25% script offset, and on MFU.
 
 ## 16. Frame's full fine-tune memory assumes mixed precision
 
-**Status:** future. Found 2026-10-07 while checking §14 on an A10; predates LoRA support.
+**Status: done 2026-10-08, differently from the proposal below.** No recipe input. The axiom (decided
+with the user): **no dtype is ever defined by autotune; it is always the training code's, or that
+code's default.** Memory follows the dtype the trained weights are held in (`--dtype`, only when the
+code sets one; else the checkpoint's, which is what transformers loads), grads and AdamW state follow
+it, and there is no assumed master copy: bf16 → 8 B per trained weight, fp32 (+ autocast) → 16. The
+peak follows the matmuls' dtype (`--compute-dtype` only when the code autocasts). Our runner dropped
+its hardcoded bf16 default the same way (`frameworks/hf.py` `resolve_dtype`). Both A10 rows below
+match the new model (8 B: 2.76 GB measured; 16 B: 5.44 GB measured). The original write-up follows.
+
+Found 2026-10-07 while checking §14 on an A10; predates LoRA support.
 
 **The claim:** `training_memory` charges every trained weight 16 bytes (bf16 weight + bf16 grad +
 fp32 AdamW m and v + an fp32 master copy): the mixed-precision recipe. On an A10 that matched an
@@ -688,10 +717,14 @@ reads ~2× high for it.
 
 **Why it matters:** the same misleading-context problem LoRA had, at half the size: an overstated
 model state can make a run look memory-bound. Nothing decides on it (the measured ceiling does).
+The repo's own runner is a pure-bf16 loop too (`frameworks/hf.py` loads the model at `dtype` and
+runs plain AdamW): Frame says Qwen2.5-1.5B full FT "does NOT fit" on an A10, and that runner trains
+it at micro-batch 2 (peak 20.6 GiB; `docs/verification/final_boss_report.md` T5-C1). Until the
+recipe is an input, a "does NOT fit" verdict on a full fine-tune carries a note saying so.
 
 **Proposed:** make the precision recipe a Frame input next to `--dtype` (mixed vs pure), declared
-from the script or the runner (`frameworks/hf.py`'s loop is what to check first), and charge
-optimizer state at the weights' precision for "pure".
+from the script or the runner (`frameworks/hf.py` is pure), and charge optimizer state at the
+weights' precision for "pure".
 
 **What would settle it:** the pure-bf16 rows in `docs/verification/lora.md` read within ~10% once
 the recipe is declared, with the mixed-precision rows unchanged.

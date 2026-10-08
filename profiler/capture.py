@@ -43,6 +43,12 @@ class Capture:
     cpu: dict = None                                  # {mean, max, nproc} over the clean window
     step_tokens: list = field(default_factory=list)   # tokens per clean step, when the runner counts
     step_samples: list = field(default_factory=list)  # rows per clean step, when the runner counts
+    step_patches: list = field(default_factory=list)  # image patches per clean step (a VLM)
+    params_vision: int = None                         # the vision tower's weights (a VLM)...
+    params_vision_trainable: int = None               # ...and how many of them train
+    attention_parts: list = None                      # profiler.attention.spec: what attends over what
+    attention_skipped: list = None                    # ...and what the attention term leaves out
+    step_attention_pairs: list = field(default_factory=list)   # {part: (query, key) pairs} per clean step
     clean_steps_requested: int = None                 # what the caller asked for, before rounding
     clean_passes: float = None                        # clean steps COMPLETED / steps_per_pass
     reference_step_s: float = None                    # wall of the reference batch, profiler OFF
@@ -255,7 +261,12 @@ def capture(runner, config, warmup=3, clean_steps=10, trace_path=None, peak_flop
         if sampler.is_alive():                         # False if setup failed before start()
             sampler.join(timeout=0.5)                  # let the in-flight reading land
 
-    dtype = config.get("dtype") or torch.get_default_dtype()
+    # The peak must be measured at the dtype the matmuls run in, or MFU is off ~5x. Never defined
+    # here: the config's (`compute_dtype` when it autocasts, else `dtype`), else what the runner
+    # resolves when it's given none (frameworks/hf.py: the checkpoint's), else torch's default.
+    resolve = getattr(sys.modules.get(type(runner).__module__), "resolve_dtype", None)
+    dtype = (config.get("compute_dtype") or config.get("dtype")
+             or (resolve(config) if resolve else None) or torch.get_default_dtype())
     if isinstance(dtype, str):
         dtype = getattr(torch, dtype)
     peak = peak_flops or measure_peak_flops(device, dtype)   # before setup: most memory free
@@ -263,6 +274,7 @@ def capture(runner, config, warmup=3, clean_steps=10, trace_path=None, peak_flop
     peak_dtype = str(dtype).replace("torch.", "")
 
     step_tokens, step_samples, per_pass, requested = [], [], None, clean_steps
+    step_pairs = []
 
     def passes():                                      # completed, not planned: an OOM mid-window
         return len(times) / per_pass if per_pass else None   # must not report a whole pass
@@ -273,6 +285,7 @@ def capture(runner, config, warmup=3, clean_steps=10, trace_path=None, peak_flop
         reference = runner.reference_step if has_ref else runner.step
         count_tokens = getattr(runner, "last_step_tokens", None)
         count_samples = getattr(runner, "last_step_samples", None)
+        count_pairs = getattr(runner, "last_step_attention_pairs", None)
         per_pass = getattr(runner, "steps_per_pass", None)
         if per_pass:                                   # whole passes, so every config times the
             clean_steps = max(1, math.ceil(clean_steps / per_pass)) * per_pass   # same rows
@@ -304,6 +317,8 @@ def capture(runner, config, warmup=3, clean_steps=10, trace_path=None, peak_flop
                 step_tokens.append(count_tokens())
             if count_samples:
                 step_samples.append(count_samples())
+            if count_pairs:
+                step_pairs.append(count_pairs())
         cpu_busy = _tree_cpu_seconds() - cpu0          # exact over the window, any length
         window = time.perf_counter() - wall0
         _stop_sampler()
@@ -336,6 +351,9 @@ def capture(runner, config, warmup=3, clean_steps=10, trace_path=None, peak_flop
 
         return Capture(status="ok", step_times_s=times, trace=trace_path,
                        step_tokens=step_tokens, step_samples=step_samples,
+                       attention_parts=getattr(runner, "attention_parts", None),
+                       attention_skipped=getattr(runner, "attention_skipped", None),
+                       step_attention_pairs=step_pairs,
                        clean_steps_requested=requested, clean_passes=passes(),
                        reference_step_s=reference_s, profiled_step_s=profiled_s,
                        population=population,

@@ -65,7 +65,8 @@ def test_torch_compile_accepts_bool_or_mode():
 
 def test_resolve_fills_defaults():
     c = _resolve(BASE)
-    assert c["device"] == "cuda" and c["dtype"] == "bfloat16" and c["seq_len"] == 1024
+    assert c["device"] == "cuda" and c["seq_len"] == 1024
+    assert c["dtype"] is None                             # never defined: the checkpoint's, at setup
     assert c["micro_batch"] == 1 and c["effective_batch"] == 16
     assert c["grad_accum"] == 16                          # effective_batch // micro_batch
 
@@ -218,3 +219,12 @@ if __name__ == "__main__":
         if _n.startswith("test_") and callable(_f):
             _f(); print(f"ok  {_n}")
     print("all passed")
+
+
+def test_no_dtype_means_the_checkpoints_own(monkeypatch):
+    """The runner never defines a dtype: unset, it trains in what transformers loads when the code
+    names none, the checkpoint's (`config.json`)."""
+    import frameworks.hf as hf
+    monkeypatch.setattr(hf, "checkpoint_dtype", lambda model: "float16")
+    assert hf.resolve_dtype({"model": "m"}) == "float16"
+    assert hf.resolve_dtype({"model": "m", "dtype": "float32"}) == "float32"   # set: it wins

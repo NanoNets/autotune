@@ -70,7 +70,7 @@ obs = run({
     "backend": "modal", "gpu": "A10G",          # where + which GPU
     "framework": "hf", "model": "Qwen/Qwen2.5-0.5B",
     "dataset": "Salesforce/wikitext", "name": "wikitext-2-raw-v1",
-    "dtype": "bfloat16", "effective_batch": 16, "micro_batch": 4, "seq_len": 1024,
+    "effective_batch": 16, "micro_batch": 4, "seq_len": 1024,   # no dtype: the checkpoint's
     "peak_flops": 1.21e14, "peak_mem_bw_gb_s": 428.0,   # frozen ceilings from Frame
 })
 print(obs["summary"])
@@ -111,7 +111,9 @@ obs = run({
     "script": "runs/my_run/train.py",                        # repo-relative: same path on the box
     "script_args": ["--config", "runs/my_run/train.yaml",    # the user's baseline flags...
                     "--max_steps", "16"],                    # ...+ a step budget >= warmup + clean + 1
-    "dtype": "bfloat16", "warmup": 3, "clean_steps": 10,
+    "model": "Qwen/Qwen2.5-0.5B",                             # the script's checkpoint: its dtype
+    "warmup": 3, "clean_steps": 10,                           # is the peak's unless the script sets
+                                                              # `dtype` / `compute_dtype` (then pass them)
     "peak_flops": 8.9e13, "peak_mem_bw_gb_s": 445.0,         # frozen ceilings from Frame
 })
 print(obs["summary"], obs["population"]["driver"])           # ... "script"
@@ -124,7 +126,8 @@ print(obs["summary"], obs["population"]["driver"])           # ... "script"
 | `script_files` | other repo-relative files the script reads, e.g. a per-probe config copy (`runs/<run>/probes/exp3.yaml`). Checked before launch; the ssh backend pushes any under `runs/` |
 | `script_cwd` | working directory for the script (default: the repo root) |
 | `python` | interpreter for the probe process (default: the current one) |
-| `warmup`, `clean_steps`, `peak_flops`, `peak_mem_bw_gb_s`, `dtype`, `timeout`, `env` | as for runner probes |
+| `warmup`, `clean_steps`, `peak_flops`, `peak_mem_bw_gb_s`, `timeout`, `env` | as for runner probes |
+| `dtype`, `compute_dtype` | only what the script sets: its weights' load dtype, and its matmul dtype when it autocasts. Neither set: the peak is measured at the checkpoint's dtype (`model`), what the script loads when it names none |
 
 **What the Observation says about itself:**
 - `population.driver: "script"`;

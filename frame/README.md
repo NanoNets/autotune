@@ -62,8 +62,12 @@ load is a setup failure, not an experiment result.
 ## The six questions it answers
 
 1. **What's the model?** Reads the model's config and works out its real shape: layers, hidden size,
-   parameter count, attention type (MHA / GQA / MoE), context length. The parameter count is computed
-   with math — **no multi-gigabyte weight download** — and lands within 1% of the published sizes.
+   parameter count, attention type (MHA / GQA / MoE), context length. The parameter count is
+   **exact**: transformers builds the model on PyTorch's `meta` device (real shapes, no storage, ~1 s,
+   **no weight download**) and Frame sums it, so gated activations, hybrid layers, fused projections
+   and a VLM's vision tower (`vision_params`) are counted as they are. If the model can't be built
+   (custom code, or a build error), the count falls back to an analytical llama-shaped template and
+   `params_source` plus a note say it's an estimate.
 
 2. **What's the data?** Draws a uniform random pool over the whole split (20× the sample, blank
    rows skipped), tokenizes it, and reports how long the sequences are (median, 90th/99th
@@ -149,8 +153,7 @@ frame: measuring the memory ceiling at max_len=2048 (synthetic, seed 0, framewor
 - **The ceiling is NOT a run constant.** `recompute`, `attn_kernel`, `optimizer`, `dtype`,
   sharding and **`compile`** all move it. `compile` is not an obvious member of that list but was
   measured moving a ceiling from 2 to 4: Inductor fuses the cross-entropy and never materializes
-  the fp32 logits copies, cutting peak memory 5.4GB
-  (`beliefs/compile-cuts-memory-not-just-time.md`). Before trusting a ceiling, compare the
+  the fp32 logits copies, cutting peak memory 5.4GB. Before trusting a ceiling, compare the
   Config against the record's stamp (`frame.ceiling.is_stale`). Moved → **re-measure**, don't
   extrapolate. Turning on `recompute` can easily take a ceiling of 8 to 32; the search space is
   meant to widen on that evidence. Micro-batch, accumulation, padding, workers and other
@@ -192,7 +195,7 @@ frame: measuring the memory ceiling at max_len=2048 (synthetic, seed 0, framewor
 
 ```bash
 python -m frame --model <hub-id|path> --dataset <hub-id|path> --gpu A10G --max-len 2048 \
-                [--dtype bfloat16] [--device cuda] \
+                [--dtype <weights' dtype>] [--compute-dtype <autocast dtype>] [--device cuda] \
                 [--name <dataset-config>] [--split train] [--sample 1000] \
                 [--sample-out runs/<run>/sample.jsonl] [--sample-seed 0] [--max-scan N] \
                 [--ceiling --effective-batch 16 --seed 0]
@@ -235,6 +238,32 @@ A user's script has no `data="synthetic"` switch, so the worst case reaches it a
    ignored the rows, dropped / split / packed them, or runs at another sequence length (then
    re-run Frame at the script's real length).
 
+### Vision-language models: the image worst case
+
+For a VLM, memory also depends on the images, and once the vision tower trains, text-only ceiling
+rows read the ceiling too high. Measured on Qwen2-VL-2B, LoRA all-linear, A10, `max_len` 1024:
+- text-only rows: ceiling 2;
+- rows with one 672×672 image: ceiling 1.
+
+So the largest image is declared like `max_len`, never chosen:
+
+- `--max-image-size WxH`: the largest image the training code lets through, read from its image
+  cap. Frame writes one image that size (`ceiling_image_WxH.png`, beside the rows) and the script's
+  own processor resizes it as it always would, so Frame needs no per-family rules.
+- `--max-images N`: the most images in one sample, when the code or data format limits it.
+  Otherwise Frame scans the dataset for it, without decoding any image. The column comes from
+  `--image-field`, or is found automatically: an `Image` feature, or a column named
+  `image` / `images`.
+- The row template needs `"{IMAGE}"` wherever the script reads an image, before the text. A list
+  item holding it, such as an `images` list or a chat message's image part, is repeated N times.
+  The text still fills each row to exactly `max_len`, image tokens included.
+- Frame counts the image tokens one row makes with the model's own processor (`images.image_tokens`
+  in the Profile). Every ceiling trial checks each row carried exactly that many
+  (`profiler/memtrial.py`). Fewer or more means the script resizes or drops images differently from
+  the declared size, or truncation cut them, and the trial fails rather than measure other images.
+- If the image tokens alone exceed `max_len`, Frame refuses, since no text would fit. The image
+  size and count are part of the ceiling's stamp, so changing either means a fresh measurement.
+
 ### LoRA
 
 Frame's FLOPs and model-state memory are analytical, and by default they assume every weight
@@ -242,17 +271,30 @@ trains. For a script that trains LoRA adapters on a frozen base, pass the script
 target modules (read from the script; never changed): `--lora-r 16 --lora-targets
 q_proj,k_proj,v_proj,o_proj,gate_proj,up_proj,down_proj` (or `all-linear`). Then:
 
-- **The adapters are counted from the config:** `r * (d_in + d_out)` per targeted projection per
-  layer (`frame.model.lora_params`). On SmolLM2-360M and Qwen2.5-0.5B at r=16 on all 7 projections
-  this is exactly the trainable count peft reports (8,683,520 and 8,798,208).
+- **The adapters are counted on the built model, matched the way peft matches them:** for
+  `all-linear`, every `Linear` / `Conv1D` but the output head; for a list, every module whose name
+  is a target or ends in `.<target>`. Each adds `r * (d_in + d_out)`. At r=16 this equals peft's
+  trainable count on SmolLM2-360M, Qwen2.5-0.5B, Phi-3-mini (fused `qkv_proj` / `gate_up_proj`),
+  Qwen3.5-0.8B and Qwen2-VL-2B (whose `all-linear` adapts the vision tower too), for both
+  `all-linear` and the 7 llama names. When the model can't be built, the llama-name template
+  (`frame.model.lora_params`) is the fallback.
 - **FLOPs per token** = `4 * N_total + 2 * N_trainable`, the profiler's formula: forward and
   activation gradients run through every weight, weight gradients only through the adapters.
 - **Model state:** the frozen base is only stored (2 bytes a weight in bf16); the adapters carry
   fp32 weights, grads and AdamW state (16 bytes each, no master copy: peft keeps them in fp32). An
   8B model drops from ~120GB to ~15GB, so `model_state_fits` turns true on a 24GB card.
-- **Targets it can't count** (other naming such as GPT-2's `c_attn`, an ungated MLP, MLP targets on
-  an MoE) leave `params_trainable` null and the full fine-tune numbers in place, with a note saying
+- **Targets it can't count** (targets that match no module, which peft would refuse too; or, on
+  the template fallback, other naming, an ungated MLP, MLP targets on an MoE) leave
+  `params_trainable` null and the full fine-tune numbers in place, with a note saying why and that
   they overstate memory for this run. Never a guess.
+
+- **A quantized base (QLoRA):** when the script loads the frozen base with 4- or 8-bit weights,
+  add `--base-quant 4bit` (or `8bit`). The base's linear weights are then charged 0.5625 B (4-bit:
+  half a byte plus one fp32 scale per 64 weights; nested quantization saves ~0.05 B more, so this
+  errs slightly high) or 1 B; embeddings, norms and the output head stay at `--dtype`. Which weights
+  are linear comes from the built model. Qwen2.5-7B, 4-bit with nested quantization, LoRA r=16 on
+  7 projections: Frame model state 6.05 GiB vs 5.65 measured on an A10 (+7%, mostly the nested
+  saving it leaves out), and 14.79 without the flag.
 
 The measured ceiling needs nothing extra: its trials run the user's own LoRA script.
 
@@ -263,8 +305,13 @@ too large to read end to end. The pool is then random over that prefix only, and
 `meta.max_scan` records it.
 
 **Inputs.** `model` and `dataset` are each an **HF hub id or a local path**. `gpu` is just a **label**
-for the record — any hardware works, because the peak is measured, not looked up. `dtype` is the
-precision the model runs in (the peak is measured at this). `max_len` is the application's sequence
+for the record — any hardware works, because the peak is measured, not looked up. **Frame never
+defines a dtype.** `--dtype` is the dtype the training code holds the trained weights in, passed only
+when the code sets one; left out, it's the checkpoint's own (`config.json`), which is what
+transformers loads when the code names none (our runner included). It drives the memory model:
+grads and AdamW state follow the weights' dtype, with no assumed fp32 master copy (bf16 → 8 B per
+trained weight, fp32 → 16). `--compute-dtype` is passed only when the matmuls run in another dtype
+(fp32 weights under bf16 autocast); the peak is measured at it. `max_len` is the application's sequence
 length — human-owned, off-limits, and the length the ceiling is measured at. The durable place to put these is
 **`run.toml`** (copy from the committed `run.toml.example`; it's gitignored). Secrets go in `.env`.
 
@@ -294,7 +341,7 @@ One compact JSON object — small on purpose, so it can sit in the agent's conte
 }
 ```
 
-- **model** — the model's shape + analytical parameter count.
+- **model** — the model's shape + exact parameter count (`params_source` says how it was counted).
 - **dataset** — how long the sequences are, and how many tokens the sample held.
 - **hardware** — the **measured** peak FLOP/s (the MFU yardstick) + bandwidth + card memory.
 - **memory** — where the memory goes; pairs with the profiler's *measured* peak to reveal activations.
@@ -350,7 +397,7 @@ measures it, and why it does so only once (below).
 swings ~28% run-to-run, while the step-time noise is ~1%. If each experiment measured its own peak, the
 comparisons *between* experiments would be mostly measurement noise. So Frame measures once, at the run
 dtype, and that same number is threaded to every probe. (A peak measured at the wrong precision — fp32
-vs bf16 — is off by ~10x, so Frame ties the peak to the run's dtype and refuses a mismatch.)
+vs bf16 — is off by ~10x, so Frame ties the peak to the dtype the matmuls run in and refuses a mismatch.)
 
 ## What it deliberately does *not* do
 
@@ -366,7 +413,7 @@ needed, a **shell** that hits the hub or the card.
 
 | File | Does |
 |---|---|
-| `model.py` | HF config → model shape + analytical params |
+| `model.py` | HF config → model shape; exact params + LoRA counts from a meta-device build (analytical fallback) |
 | `dataset.py` | the random pool → sequence-length distribution, and the length-stratified probe sample (`draw_sample`, `write_sample`, `read_sample`) |
 | `hardware.py` | assemble hardware facts; `measure()` runs the on-device peak/bandwidth benchmark |
 | `memory.py` | analytical weights/grads/optimizer breakdown |

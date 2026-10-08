@@ -68,12 +68,35 @@ def load(path):
                 "control": "CONTROL" in concl,          # a repeat/isolation probe, not a proposal
                 # A reading the run rejected (e.g. MFU > 100%) is not allowed to set a record. It is
                 # still drawn -- a discarded measurement is part of the history -- but the staircase
-                # must not climb onto a number that did not apply.
-                "unreliable": "UNRELIABLE" in concl,
+                # must not climb onto a number that did not apply. Any status but `ok` is one: an
+                # `invalid` Observation keeps its samples/s, and must not become the headline.
+                "unreliable": "UNRELIABLE" in concl or r["status"] != "ok",
                 "hyp": r.get("hypothesis") or "",
                 "knobs": _knobs(r.get("hypothesis") or ""),
             })
     return rows
+
+
+def mark_records(rows, basis=None):
+    """Mark each row's `superseded` / `record` / `best_so_far`; return (baseline, records).
+
+    Only an `ok`, not-UNRELIABLE, not-superseded row can be the baseline or set a record.
+    `basis` is annotations.json's `records_from`."""
+    for r in rows:
+        r["superseded"] = bool(basis and r["n"] < basis and not r["unreliable"]
+                               and r["n"] != rows[0]["n"])
+
+    eligible = [r for r in rows if r["sps"] and not r["unreliable"] and not r["superseded"]]
+    baseline = eligible[0]["sps"] if eligible else rows[0]["sps"]
+    best, records = 0.0, []                            # records: the staircase steps
+    for r in rows:
+        r["record"] = bool(r["sps"] and r["sps"] > best
+                           and not r["unreliable"] and not r["superseded"])
+        if r["record"]:
+            best = r["sps"]
+            records.append(r)
+        r["best_so_far"] = best
+    return baseline, records
 
 
 def main():
@@ -100,21 +123,8 @@ def main():
     # annotations.json declares `records_from`, earlier probes are still drawn -- they are the real
     # history of the search -- but they cannot set a record, and the ratio is computed on the
     # comparable basis only.
-    basis = notes.get("records_from")
-    for r in rows:
-        r["superseded"] = bool(basis and r["n"] < basis and not r["unreliable"]
-                               and r["n"] != rows[0]["n"])
-
-    eligible = [r for r in rows if r["sps"] and not r["unreliable"] and not r["superseded"]]
-    baseline = eligible[0]["sps"] if eligible else rows[0]["sps"]
-    best, records = 0.0, []                            # records: the staircase steps
-    for r in rows:
-        r["record"] = bool(r["sps"] and r["sps"] > best
-                           and not r["unreliable"] and not r["superseded"])
-        if r["record"]:
-            best = r["sps"]
-            records.append(r)
-        r["best_so_far"] = best
+    baseline, records = mark_records(rows, notes.get("records_from"))
+    best = rows[-1]["best_so_far"]
 
     # Everything the figure says about the hardware and the job comes from the run's own Profile,
     # so a plot can no longer describe a different run's card than the one it was measured on.
@@ -147,7 +157,7 @@ def main():
             fontsize=8.5, color=INK_3, family="monospace")
 
     for r in rows:
-        if not r["ok"]:
+        if not r["sps"]:                                # crash / oom / timeout: no reading
             ax.plot(r["n"], y_lo * 1.5, marker="x", ms=7, mew=2, color=FAILED, zorder=4)
         elif r["unreliable"]:                           # drawn, but never on the staircase
             ax.plot(r["n"], r["sps"], marker="s", ms=6.5, mfc="white",

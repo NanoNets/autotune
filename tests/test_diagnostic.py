@@ -284,3 +284,17 @@ def test_unknown_total_means_no_mfu_not_the_trainable_count():
     assert o.mfu is None and o.flops is None and o.roofline_floor_s is None
     assert o.params_total is None and o.params_trainable == 8_700_000
     assert o.tokens_per_s is not None                   # everything measured still reports
+
+
+def test_fp32_peak_under_bf16_kernels_means_no_mfu_with_the_reason():
+    """final_boss_report T3-C6: the peak measured at fp32 while the matmuls ran bf16."""
+    cap = _cap()
+    cap.peak_dtype = "float32"                            # TRACE's GEMM is sm80_gemm_bf16
+    o = diagnose(cap, params=PARAMS, tokens=TOKENS, gpu=GPU)
+    assert o.mfu is None and o.roofline_floor_s is None and o.flops is not None
+    assert "peak measured at float32" in o.summary and o.status == "ok"
+    sgemm = {**TRACE, "traceEvents": [{**e, "name": "ampere_sgemm_128x64_nn"} if e["cat"] == "kernel"
+                                      else e for e in TRACE["traceEvents"]]}
+    cap = _cap(trace=sgemm)
+    cap.peak_dtype = "float32"
+    assert diagnose(cap, params=PARAMS, tokens=TOKENS, gpu=GPU).mfu is not None   # fp32 run: kept

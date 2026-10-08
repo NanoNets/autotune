@@ -19,6 +19,7 @@ import argparse
 import dataclasses
 import json
 
+from frame.images import parse_size
 from frame.profile import frame
 
 
@@ -29,7 +30,13 @@ def main():
     ap.add_argument("--gpu", required=True, help="a label for the record (any hardware; not validated)")
     ap.add_argument("--max-len", type=int, required=True,
                     help="the application's sequence length; the OOM ceiling is measured at it")
-    ap.add_argument("--dtype", default="bfloat16", help="run compute dtype; the peak is measured at this")
+    ap.add_argument("--dtype", default=None,
+                    help="the dtype the training code holds the trained weights in, only when it "
+                         "sets one (read it from the code; never change it). Default: the "
+                         "checkpoint's own, which is what transformers loads when none is named")
+    ap.add_argument("--compute-dtype", default=None,
+                    help="the dtype its matmuls run in, only when that differs from --dtype "
+                         "(e.g. fp32 weights under bf16 autocast). The peak is measured at it")
     ap.add_argument("--device", default="cuda", help="device to measure the peak on")
     ap.add_argument("--framework", default="hf", help="which runner's knob surface to report")
     ap.add_argument("--effective-batch", type=int, default=16,
@@ -58,7 +65,21 @@ def main():
                     help="the script trains LoRA at this rank (read it from the script; never change it)")
     ap.add_argument("--lora-targets", default=None,
                     help='its target modules, comma-separated (q_proj,v_proj,...) or "all-linear"')
+    ap.add_argument("--base-quant", default=None, choices=("4bit", "8bit"),
+                    help="the script loads its frozen base with 4- or 8-bit weights (QLoRA); read "
+                         "it from the script, never change it. Needs --lora-r / --lora-targets")
+    ap.add_argument("--max-image-size", default=None,
+                    help="VLM: the largest image the training code feeds, WxH pixels, read from its "
+                         "image cap (never chosen). Ceiling rows then carry images that size")
+    ap.add_argument("--max-images", type=int, default=None,
+                    help="VLM: the most images in one sample, when the training code limits it; "
+                         "otherwise Frame scans the data for it")
+    ap.add_argument("--image-field", default=None,
+                    help="VLM: the dataset column holding images (found automatically if omitted)")
     a = ap.parse_args()
+    if a.base_quant and a.lora_r is None:
+        ap.error("--base-quant needs the script's --lora-r / --lora-targets (a quantized base "
+                 "trains only adapters)")
     if (a.lora_r is None) != (a.lora_targets is None):
         ap.error("--lora-r and --lora-targets go together")
     lora = ({"r": a.lora_r, "targets": [t.strip() for t in a.lora_targets.split(",")]}
@@ -81,7 +102,10 @@ def main():
               runner=runner, seed=a.seed, on_trial=on_trial, sample_path=a.sample_out,
               sample_seed=a.sample_seed, max_scan=a.max_scan,
               ceiling_rows_path=a.ceiling_rows_out, ceiling_row_template=a.ceiling_row_template,
-              ceiling_rows_format=a.ceiling_rows_format, lora=lora)
+              ceiling_rows_format=a.ceiling_rows_format, lora=lora, base_quant=a.base_quant,
+              compute_dtype=a.compute_dtype,
+              max_image_size=parse_size(a.max_image_size) if a.max_image_size else None,
+              max_images=a.max_images, image_field=a.image_field)
     if a.ceiling_rows_out:
         print(f"frame: ceiling rows written to {a.ceiling_rows_out} (point the script's data at it)")
     if a.sample_out:

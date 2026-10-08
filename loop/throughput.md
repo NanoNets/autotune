@@ -3,6 +3,7 @@
 **Maximize** training throughput on the given hardware, **without degrading quality**.
 `effective_batch` is human-owned and fixed, so wall-clock for a fixed run = total_samples /
 samples_per_s — a higher samples/s is strictly shorter training, whatever the tokens do.
+`effective_batch` counts **examples** per optimizer step: a packed row holding 4 examples is 4.
 
 - **Primary metric:** **samples/s**, the Observation's `samples_per_s`: total rows over total time
   across the clean window, never over the median step.
@@ -16,31 +17,40 @@ samples_per_s — a higher samples/s is strictly shorter training, whatever the 
 
 `tokens/s` counts pad tokens as work, so it **rewards computing padding** — and removing padding has
 been the single largest real lever in every run so far. Measured on `test_a10G`: `micro_batch` 4 → 8
-was **+15% per token and -14% on samples/s** (`beliefs/micro-batch-interacts-with-dynamic-padding.md`).
+was **+15% per token and -14% on samples/s**.
 One experiment, opposite verdicts. Rank on samples/s.
 
 The converse is equally real, which is why tokens/s is not deleted. Under `padding="longest"` batch
 width *is* the rows drawn, so `samples/s` is **sample-sensitive**: on
 `smollm2_1.7b_a100_wikitext` the same config moved **1.9x** (264.4 → 138.1) on nothing but the
-probe's row sample, while tokens/s moved **1.3%**
-(`beliefs/probe-sample-must-match-length-distribution.md`).
+probe's row sample, while tokens/s moved **1.3%**.
 
-**Packing.** A packed row holds several examples, so samples are counted from document boundaries
+**Packing** is not a lever (see *Safe vs off-limits*), but a user's script may already pack, and
+its samples must still be counted right. A packed row holds several examples, so samples are counted from document boundaries
 (`position_ids` resets or a 1-D `cu_seqlens`) when a user's script passes them, and per row
 otherwise. `sample_source` in the Observation's `population` says how the count was made. Some
 layouts over- or under-count; the list of which, and in which direction, is in `profiler/README.md`,
 "Attached capture".
 
-**Comparing across packing.** samples/s ranks correctly while the packing setup is the same across
-the configs being compared: a constant counting error cancels. Across a change in packing (on/off,
-or pack length), trust it only if both probes' `sample_source` is `position_ids` or `cu_seqlens`;
-otherwise cross-check with tokens/s.
+**Comparing configs of a script that packs.** A counting error cancels only when it is the same per
+*step*: same packing setup **and** same micro-batch split. The over-counting layouts in
+`profiler/README.md` err once per row or per pad run, so the error grows as micro_batch shrinks at a
+fixed effective batch. If `samples_per_step` changes across a micro-batch / accumulation change, the
+job didn't change, the count did: rank those configs on step time, not samples/s.
+
+**Length-grouped batching can't be ranked from a script probe.** A script probe times fixed step
+positions in the script's own data order (`population.clean_window: fixed-position`). Turning length
+grouping on or off changes *which rows* land in those positions (15 of 160 shared in a measured HF
+Trainer case), and length-grouped samplers order rows by length within large groups, so the timed
+rows are systematically longer or shorter than the run's, not just different. The samples/s
+difference is the rows', not the config's. Our runner's whole-pass window doesn't have this problem.
 
 | what moved | tokens/s | samples/s | reading |
 |---|---|---|---|
 | a real speed knob | up | up | genuine win |
 | padding removed at the loader | down (less pad counted as work) | up | genuine win — believe samples/s |
 | the probe's row sample | ~flat | moves a lot | measurement artifact, not a result |
+| micro_batch / accumulation, under packing, with `samples_per_step` moving | down | up | counting artifact — rank on step time |
 
 **Neither metric is safe alone.** Rank on samples/s; read tokens/s to confirm the change you made is
 the change you measured.
@@ -54,8 +64,14 @@ genuinely efficient per token while computing 6.8x too many of them.
 ## Safe vs off-limits
 The agent classifies each knob at Frame (conservative: unsure → off_limits). Guidance:
 
-- **Safe** (change speed, not the model): batch factorization, sharding/parallelism, recompute, offload, kernel swaps (verified numerically-safe), packing, compile, dataloader, tf32.
-- **Off-limits** (change the model): learning rate, weight decay, warmup, dropout, optimizer *algorithm*, precision (bf16/fp16/FP8-train), `max_len`, seed, LoRA rank, and the effective_batch target.
+- **Safe** (change speed, not the model): batch factorization, sharding/parallelism, recompute, offload, kernel swaps (verified numerically-safe), padding-free batching, compile, dataloader, tf32.
+- **Off-limits** (change the model): learning rate, weight decay, warmup, dropout, optimizer *algorithm*, precision (bf16/fp16/FP8-train), `max_len`, seed, LoRA rank, the effective_batch target, and **packing** (on/off, pack length).
+
+**Why packing is off-limits** (decided 2026-10-08): with `effective_batch` fixed in examples, packing
+changes how many examples each optimizer step sees, and by a different amount every step (16 → 52-80
+in one measured script at the same micro-batch × accumulation). Holding it to `effective_batch`
+means re-deriving the row batch from a moving examples-per-row, so control over the gradient
+updates is lost either way. A script that already packs keeps its packing as-is.
 
 `max_len` is off-limits *and* load-bearing: it is the length the OOM ceiling is measured at
 (`frame/README.md`). Lowering it to make a config fit is changing the job, not tuning it.
@@ -89,7 +105,7 @@ Framework-agnostic. Frame projects these onto what the framework supports.
 | Memory/recompute | `recompute` (full/selective), activation offload, optimizer/param offload, 8-bit optimizer states |
 | Kernels | `attn_kernel` (flash/sdpa/FA3), fused kernels (Liger), fused optimizer, chunked cross-entropy |
 | Compile | `compile` (off/default/max-autotune), CUDA graphs |
-| Sequence | `packing`, `padding_free`, length-grouped batching |
+| Sequence | `padding_free`, length-grouped batching (OG runner only: not rankable from a script probe, see above). Not `packing`: off-limits |
 | Dataloader | `workers`, `prefetch`, `num_proc` |
 | Precision (safe subset) | `tf32` |
 

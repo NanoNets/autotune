@@ -59,7 +59,7 @@ The peak is measured, never read from a table: tables can't tell an A10 from an 
 sparse numbers, and fail on hardware they've never heard of. Measuring supports any chip and prices
 in real clocks and power caps.
 
-## The Observation (53 fields)
+## The Observation (57 fields)
 
 A **flat JSON object** — one level deep, except six container fields (`population`, `phase_times_s`,
 `gpu_phase_times_s`, `provenance`, `device`, `top_kernels`). `python -m profiler` prints the one-line `summary`, then
@@ -71,7 +71,7 @@ so "unknown" can't be mistaken for "measured zero".
 | 1 | `status` | `ok` / `oom` / `error` / `invalid`. `invalid` = a physically impossible reading (a fraction above 1 beyond a 2% tolerance, calibrated on an A100): two populations were mixed or the instrument failed, so the probe is never scored. The values stay in place and `error` names the reading | never |
 | 2 | `gpu` | hardware **label** from `--gpu`, for the record only — it is never priced or looked up | never |
 | 3 | `peak_flops` | dense-GEMM peak **measured on this device** — the MFU denominator. No datasheet table, so any hardware works and throttling is priced in | measurement failed (then `mfu` is `null` too) |
-| 4 | `peak_dtype` | dtype the peak was measured at. MFU is only apples-to-apples if it matches what the model ran in | ditto |
+| 4 | `peak_dtype` | dtype the peak was measured at, never defined by the profiler: the config's `compute_dtype` (the code autocasts), else its `dtype`, else what the code loads when it names none: the checkpoint's own (our runner: `frameworks/hf.py` `resolve_dtype`; a script: `backends/local.py`). MFU is only apples-to-apples if it matches what the matmuls ran in | ditto |
 | 5 | `peak_mem_bw_gb_s` | achievable memory bandwidth, **measured** by a large device-to-device copy — the roofline's other axis. Without it, a low MFU can't be diagnosed as compute-bound vs bandwidth-bound, and most transformer training is the latter | measurement failed |
 | 6 | `step_time_s` | clean wall-clock per step, profiler off, **median**. A distribution statistic only: never the denominator of a rate (under length-grouped padding the median sat at 0.45x the mean) | no clean step completed |
 | 7 | `step_time_mean_s` | clean wall-clock per step, **mean**. The denominator of every rate (throughput is total work over total time) | no clean step completed |
@@ -83,11 +83,15 @@ so "unknown" can't be mistaken for "measured zero".
 | 13 | `tokens_per_s` | total clean tokens / total clean time | not `ok` |
 | 14 | `samples_per_step` | mean rows per **clean** step, counted per step | runner doesn't count rows |
 | 15 | `samples_per_s` | total clean rows / total clean time. **The primary metric**: what configs are ranked on (`loop/throughput.md`) | not `ok`, or rows not counted |
-| 16 | `flops` | estimated training FLOPs of the **mean** clean step: `(4·params_total + 2·params_trainable)·D` over `tokens_per_step`, which is 6ND when every weight trains. Model FLOPs, not executed: recompute isn't counted | not `ok`, or `params_total` unknown |
-| 17 | `params_total` | N: every weight of the model, trained or frozen. Runner: the model's parameters. Script: the parameters of the module the optimizer's weights live in (under PEFT, the base model plus the adapters) | unknown: no model found, or a quantized base (`micro_batches.params_source` says why) |
+| 16 | `flops` | estimated training FLOPs of the **mean** clean step, PaLM's model-FLOPs definition (Chowdhery et al. 2022, arXiv:2204.02311, App. B): weights plus attention. Weights: `(4·params_total + 2·params_trainable)·D` over `tokens_per_step` (6ND when every weight trains); a VLM charges the vision tower per image patch instead, `(k·params_vision + 2·its trained part)·patches_per_step`, k = 4 if any of the tower trains, else 2 (`roofline.vlm_training_flops`). Attention: `attention_flops`. Model FLOPs, not executed: recompute isn't counted, and as in PaLM the causal mask isn't discounted | not `ok`, or `params_total` unknown |
+| 17 | `params_total` | N: every weight of the model, trained or frozen. Runner: the model's parameters. Script: the parameters of the module the optimizer's weights live in (under PEFT, the base model plus the adapters) | unknown: no model found, a quantized base (any storage dtype), or an image input whose vision tower or patch count can't be read (no `visual` / `vision_tower` / `vision_model` / `vision_encoder` module, or an image tensor that's neither `[patches, dim]` nor `[..., C, H, W]`) — `micro_batches.params_source` says why |
+| 16a | `attention_flops` | PaLM's attention term of `flops`: `12·L·H·Q·pairs` per attention part, the (query, key) pairs the step attended over (`profiler/attention.py`): `width²` a row, a packed row's documents separately, `width·min(width, window)` for sliding-window layers, `patches²` per image for a vision tower; `4·L·H·Q·pairs` (forward only) for a frozen tower | not `ok`, `flops` unknown, or no attention layout read off the config |
+| 16b | `attention_source` | what `attention_flops` covers (each part's layers × width, window, forward-only) and what it leaves out (linear-attention / state-space layers, windowed vision blocks, an image layout with no per-image count). Left-out parts make it read low, never high | no model config |
+| 17a | `params_vision` | a VLM: the vision tower's share of `params_total`, the weights charged per image patch (parameters under a `visual` / `vision_tower` / `vision_model` / `vision_encoder` module) | not a VLM probe, or its FLOPs are unknown |
+| 17b | `patches_per_step` | a VLM: mean image patches per clean step, from the image tensors' shapes (a `[patches, dim]` tensor's rows; else images × (H/patch)·(W/patch)) | as `params_vision` |
 | 18 | `params_trainable` | the weights the optimizer trains: its parameters with `requires_grad`, so a frozen weight handed to it (`AdamW(model.parameters())` under LoRA) doesn't count. Equals `params_total` in a full fine-tune; under LoRA, the adapters only | no optimizer step seen |
 | 19 | `roofline_floor_s` | compute-bound floor on the mean step's time at peak | not `ok` |
-| 20 | `mfu` | achieved / peak over the clean window's **totals**: `flops / step_time_mean_s / peak_flops` | not `ok` |
+| 20 | `mfu` | achieved / peak over the clean window's **totals**: `flops / step_time_mean_s / peak_flops` | not `ok`; `peak_dtype` float32 while the trace's kernels ran bf16 / fp16 (the summary says so; `roofline_floor_s` is `null` too) |
 | 21 | `gpu_busy_s` | time the GPU was busy on the **reference batch**: the union of kernel intervals in its trace, so concurrent streams don't count twice | not `ok`; **`null` when a CUDA trace recorded no kernels** (a failed trace, not an idle GPU) |
 | 22 | `gpu_active_frac` | `gpu_busy_s / reference_step_s`: both sides are the same batch. Describes the reference batch, not the run average | not `ok`, or no `reference_step_s` |
 | 23 | `reference_step_s` | wall of the **reference batch** with the profiler **off**: the denominator for every trace fraction | not `ok` |
@@ -232,7 +236,8 @@ for on-demand drill-down (open it in <https://ui.perfetto.dev>).
 
 ## Layout
 
-- `roofline.py` — FLOPs (6ND, or `(4·N_total + 2·N_trainable)·D` with frozen weights) + GPU specs → step-time floor, MFU.
+- `roofline.py` — FLOPs, PaLM's definition (arXiv:2204.02311, App. B): weights (6ND, or `(4·N_total + 2·N_trainable)·D` with frozen weights; per image patch for a VLM's vision tower) + attention (`12·L·H·Q·pairs`) → step-time floor, MFU.
+- `attention.py` — which layers attend over what, read off the model config (full / sliding-window / vision parts), for the attention term.
 - `trace.py` — parse a torch.profiler Chrome trace → phases, kernels, gaps, occupancy, device props, provenance.
 - `capture.py` — the clean window (whole passes, per-step tokens) + CPU sampler (psutil) + memory + OOM handling + the reference batch, timed profiler-off then traced. *(needs torch)*
 - `diagnostic.py` — assemble the Observation (torch-free; the `Observation` dataclass lives here).
@@ -248,7 +253,7 @@ the **attached capture** instead, started by `python -m profiler.launch -- train
 | File | Does |
 |---|---|
 | `launch.py` | runs the script unchanged in-process (`runpy`), with `Attach` installed first; writes `cap.json`; `ok` / `oom` / `error` like `capture()` |
-| `attach.py` | step boundary = torch's public optimizer post-hook; clean timing; **tokens counted on every clean step** by a per-module pre-hook on the model (padded `input_ids.numel()`, as the runners count); one profiled step with `record_shapes=True` |
+| `attach.py` | step boundary = torch's public optimizer post-hook; clean timing; **tokens counted on every clean step** by a per-module pre-hook on the model (padded `input_ids.numel()`, as the runners count; forwards under `no_grad` / `inference_mode` — eval, `generate()`, a reference pass — are not counted, though their time stays in the step, so switch eval off for probes. A training-side `no_grad` forward of the same model (a reference pass for a KL term) is right to skip, since its rows are already counted, but its ~2N·D forward FLOPs aren't in the FLOP formula, so MFU reads low (~1/3) for such loops); one profiled step with `record_shapes=True` |
 | `derive.py` | torch-free: forward / backward / dataloader spans and the micro-batch count, read from torch's own trace events (the script has no `record_function` labels) |
 | `nopatch.py` | guard: the run fails if any torch function was replaced or a global module hook is left registered |
 | `memtrial.py` | `launch.py --memory-only`: a ceiling trial. Counts optimizer steps, stops the script after N (default 3), reads the allocator's peaks, and checks every model input is `[micro_batch, max_len]`. No timing, no profiler |
@@ -272,18 +277,20 @@ the **attached capture** instead, started by `python -m profiler.launch -- train
   records which rule applied (`rows`, `position_ids`, `cu_seqlens`, or `unknown: <why>`).
   - **Supported:** unpacked 2-D batches (a row is a sample); packed batches whose `position_ids`
     reset to 0 per document, passed as a keyword (`[B, S]`, `[1, S]` or multi-axis such as mRoPE
-    `[3, B, S]`), with padding masked or not at position 0; flattened 1-D batches with a 1-D
+    `[3, B, S]`), with padding masked, or at position 0 unmasked (a run of 0s that ends a row is
+    read as padding: TRL `padding_free` + `pad_to_multiple_of`); flattened 1-D batches with a 1-D
     `cu_seqlens` / `cu_seq_lens_q` keyword. A 1-D batch with neither is `null`.
   - **Underestimates** (documents counted as rows, or merged): concat-and-chunk packing with no
     markers; packing through a 4-D block-diagonal mask; packing without position resets (EOS only);
     boundaries in other kwargs (`seq_idx`, 2-D `cu_seqlens`, `packed_seq_params`); `position_ids`
-    passed positionally; a one-token document followed by another (their 0s form one run); left
+    passed positionally; a one-token document followed by another (their 0s form one run), or
+    ending a row with no `attention_mask` (read as padding); left
     padding with broadcast `[1, S]` positions `0…S-1` and an `attention_mask` (each padded row's
     position 0 is a masked pad, so that row counts 0; left padding is for generation, outside
     SFT / PEFT — `design_improvements.md` §13).
   - **Overestimates:** documents split across rows (counted once per row); context / sequence
-    parallel shards that start mid-document; padding at position 0 *after* a document with no
-    `attention_mask` passed (one extra per row).
+    parallel shards that start mid-document; unmasked padding at position 0 *between* documents
+    (one extra per pad run).
 
 What's planned: `design_improvements.md` §7–§15.
 

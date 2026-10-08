@@ -17,7 +17,8 @@ experiment_number	token/s	samples/s	memory	status	hypothesis	conclusion
 - `samples/s` — **the ranked column**, the Observation's `samples_per_s`. Configs are compared on it and the progress staircase is
   drawn from it; `token/s` is recorded alongside to tell a real win from a sample artifact, never
   to rank (`loop/throughput.md`).
-- `status` — e.g. `ok` / `oom` / `crash` / `error`.
+- `status` — e.g. `ok` / `oom` / `crash` / `error`, or the Observation's `invalid`. Only an `ok` row
+  can be the baseline or the best in `progress.py`.
 - `hypothesis` — what you changed and why you expected it to help, written *before* running.
 - `conclusion` — kept or discarded, and why, written *after* observing the result.
 
@@ -57,7 +58,10 @@ The staircase is the point: it only steps on an experiment that beat everything 
 **flat stretches are where the search spent probes without buying anything** — which is the thing
 worth looking at when deciding whether a line of attack is exhausted. Crashes and timeouts are
 plotted too, below the baseline, so a run's failures stay visible rather than vanishing from the
-record. A second panel tracks peak memory against the card limit on the same x-axis (its own panel,
+record. A row can't set a record (it's drawn, off the staircase) when its `status` isn't `ok`, when its
+`conclusion` contains `UNRELIABLE` (a reading the run rejected), or when it predates the
+`records_from` experiment number in `runs/<run>/annotations.json` (measured on a basis since
+corrected). A second panel tracks peak memory against the card limit on the same x-axis (its own panel,
 never a second y-scale).
 
 ## `research.md` — the run's websearch landing zone

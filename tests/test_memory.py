@@ -13,17 +13,24 @@ def _close(a, b, tol=0.01):
     return abs(a - b) / b < tol
 
 
-def test_bf16_adamw_is_16_bytes_per_param():
-    m = training_memory(P, param_bytes=2, optimizer="adamw")   # master_weights defaults on
-    # ZeRO accounting: 2 + 2 + (4+4) optimizer + 4 master = 16 bytes/param
-    assert _close(m["model_state_gb"], 16 * P / 1024**3)
+def test_bf16_adamw_is_8_bytes_per_param():
+    """bf16 weights + torch AdamW: the state follows the weights' dtype, and there's no master
+    copy unless the training code keeps one (final_boss_report T5-C1: Frame said 16, and the
+    repo's own bf16 runner trained Qwen2.5-1.5B at micro-batch 2 where Frame said it didn't fit)."""
+    m = training_memory(P, param_bytes=2, optimizer="adamw")
+    assert _close(m["model_state_gb"], 8 * P / 1024**3)        # 2 + 2 + (2+2)
     assert _close(m["weights_gb"], 2 * P / 1024**3)
-    assert _close(m["optimizer_gb"], 8 * P / 1024**3)          # m + v, fp32
+    assert _close(m["optimizer_gb"], 4 * P / 1024**3)          # m + v, bf16
+    assert m["master_gb"] == 0
+
+
+def test_a_master_copy_only_when_the_code_keeps_one():
+    m = training_memory(P, param_bytes=2, optimizer="adamw", master_weights=True)
     assert _close(m["master_gb"], 4 * P / 1024**3)
 
 
 def test_fp32_full_training_no_master():
-    m = training_memory(P, param_bytes=4, optimizer="adamw")   # master off at fp32
+    m = training_memory(P, param_bytes=4, optimizer="adamw")   # fp32 load + autocast: no master
     assert m["master_gb"] == 0
     assert _close(m["model_state_gb"], 16 * P / 1024**3)       # 4 + 4 + 8
 
@@ -57,4 +64,4 @@ def test_lora_frozen_base_is_only_stored():
     assert _close(m["grads_gb"], t * 4 / 1024**3)
     assert _close(m["optimizer_gb"], t * 8 / 1024**3)
     assert m["master_gb"] == 0                         # adapters already fp32
-    assert m["model_state_gb"] < training_memory(P)["model_state_gb"] / 7   # ~14GB vs ~104GB
+    assert m["model_state_gb"] < training_memory(P)["model_state_gb"] / 3   # ~14GB vs ~52GB

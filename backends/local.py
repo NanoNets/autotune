@@ -65,15 +65,31 @@ def _script_path(script):
     return path
 
 
+def _script_compute_dtype(config):
+    """The dtype the script's matmuls run in, for the peak: `compute_dtype` (it autocasts), else
+    `dtype` (it names a load dtype), else the checkpoint's, which is what transformers loads when the
+    script names none. Never defined here; None when there's no model to read it from."""
+    d = config.get("compute_dtype") or config.get("dtype")
+    if d or not config.get("model"):
+        return d
+    try:
+        from frameworks.hf import checkpoint_dtype
+        return checkpoint_dtype(config["model"])
+    except Exception:                                  # unreadable config: torch's default applies
+        return None
+
+
 def _launch_argv(config, out):
     """`python -m profiler.launch ... -- <script> <script_args>` for this probe."""
     argv = [config.get("python") or sys.executable, "-m", "profiler.launch", "--out", out,
             "--device", config["device"],
             "--warmup", str(config.get("warmup", 3)), "--clean", str(config.get("clean_steps", 10))]
-    for flag, key in (("--peak-flops", "peak_flops"), ("--peak-bw", "peak_mem_bw_gb_s"),
-                      ("--dtype", "dtype")):
+    for flag, key in (("--peak-flops", "peak_flops"), ("--peak-bw", "peak_mem_bw_gb_s")):
         if config.get(key) is not None:
             argv += [flag, str(config[key])]
+    dtype = _script_compute_dtype(config)
+    if dtype:
+        argv += ["--dtype", dtype]
     return argv + ["--", _script_path(config["script"]), *map(str, config.get("script_args") or [])]
 
 
@@ -151,6 +167,9 @@ def ceiling_trial(config):
     argv = [config.get("python") or sys.executable, "-m", "profiler.launch", "--out", out,
             "--device", config["device"], "--memory-only", "--steps", str(steps),
             "--expect-shape", f"{config['micro_batch']},{config['max_len']}",
+            *(["--expect-image-tokens", str(config["expect_image_tokens"]),
+               "--image-token-id", str(config["image_token_id"])]
+              if config.get("expect_image_tokens") and config.get("image_token_id") is not None else []),
             "--", _script_path(config["script"]), *map(str, config.get("script_args") or [])]
     stdout, stderr, timed_out, code = _launch(argv, config)
     if timed_out:
