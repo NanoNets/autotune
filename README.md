@@ -141,6 +141,8 @@ loop/          design notes and data contracts
 
 
 ## Platform support
-Training Methods: SFT, PEFT
-Models: LLMs, VLMs (MoE's are out of scope for now)
-HW Support: Single NVIDIA GPU
+**Training Methods**: SFT, PEFT
+
+**Models**: LLMs, VLMs (MoE's are out of scope for now)
+
+**HW Support**: Single NVIDIA GPU
