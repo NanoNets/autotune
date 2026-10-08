@@ -68,11 +68,13 @@ ceiling's staleness list only because a human changing it invalidates the measur
 
 ## The reference fingerprint is a smoke check, not verification
 
-Every real probe records a **reference fingerprint** on the weights as loaded, before any step
-trains them: `reference_loss` and `reference_grad_norm`, from one forward + backward over the fixed
+Every real probe from our own runner records a **reference fingerprint** on the weights as
+loaded, before any step trains them: `reference_loss` and `reference_grad_norm`, from one forward + backward over the fixed
 reference batch (`population.reference`: the same rows in every config, batched and padded the
 config's way). Same function → same pair. A grossly wrong forward moves the loss; a grossly wrong
-backward moves the gradient norm while the loss stays put.
+backward moves the gradient norm while the loss stays put. **Script probes report `null`**: the
+profiler doesn't own the user's loop, so it can't replay a fixed batch through it. In script mode
+the fingerprint gives no protection, and a kernel swap there is the user's to verify.
 
 **What it catches and what it doesn't.** Two scalars, each a mean over ~a thousand median-length
 tokens (the reference batch never holds a long row), catch a kernel that ignores the mask, NaNs, a
@@ -95,7 +97,7 @@ fingerprint then guards the swaps that happen *within* a run — `attn_implement
 
 **Reading the fingerprint.** bf16 kernels reorder sums, so the same math on different kernels does
 not give identical numbers — this repo measured a 0.29 max|Δ| in logits from a change of padded
-*width* alone, same kernels (`knowledge/packing-leaks-across-documents-on-hybrid-models.md`).
+*width* alone, same kernels (`beliefs/packing-leaks-across-documents-on-hybrid-models.md`).
 Compare at matching `population.reference.batch_key` (same rows, same shapes); read the noise band
 off probes that changed only shape knobs (`micro_batch`, `padding`, `pad_multiple`) or
 `attn_implementation` on the baseline — those change `batch_key` by construction, so the band is

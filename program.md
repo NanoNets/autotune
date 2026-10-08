@@ -125,7 +125,8 @@ anything but the shipped defaults, "faster by X%" means nothing.
   `batch_key`, a move outside the noise band read off shape-only probes disqualifies the knob for
   this run; with no such probe yet, a NaN or a move in the first significant digit disqualifies,
   anything smaller is recorded and re-judged once a shape-only probe exists. It is a smoke check:
-  passing it is not verification (`loop/throughput.md`).
+  passing it is not verification (`loop/throughput.md`). Script probes report it `null`: in
+  script mode, don't treat a kernel swap as checked.
 - **NEVER** install a package that replaces layer kernels (`flash-linear-attention`,
   `causal_conv1d`, `flash_attn`) mid-run. Transformers binds them at import with no off switch, so
   an install silently rewrites every later probe and the fingerprint has no "before" to compare
