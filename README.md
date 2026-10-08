@@ -38,7 +38,29 @@ uv run pytest
 
 ## Running the agent
 
-Open the repo in [Claude Code](https://claude.com/claude-code). The bundled skill, [`.claude/skills/run-loop/SKILL.md`](.claude/skills/run-loop/SKILL.md), takes the whole run in one command:
+Open the repo in [Claude Code](https://claude.com/claude-code). The bundled skill, [`.claude/skills/run-loop/SKILL.md`](.claude/skills/run-loop/SKILL.md), takes the whole run in one command.
+
+<h3 align="center">Two User Workflows</h3>
+
+```
+                     Do you have your own training script?
+                  ┌────────────────────┴────────────────────┐
+                  no                                        yes
+                  ▼                                         ▼
+   ┌─────────────────────────────┐           ┌─────────────────────────────┐
+   │  A. Use our default script  │           │  B. Bring your own script   │
+   │                             │           │                             │
+   │  leave out script=          │           │  add script=<path>          │
+   │  hf.py    → HF causal LM    │           │  (+ script_configs=<path>)  │
+   │  torch.py → tiny MLP over   │           │  runs as-is; your files are │
+   │             random data     │           │  never modified             │
+   └──────────────┬──────────────┘           └──────────────┬──────────────┘
+                  └────────────────────┬────────────────────┘
+                                       ▼
+             Frame → Baseline → Loop → Learn  (identical for both)
+                                       ▼
+               runs/<run_name>/: experiment log + faster config
+```
 
 ```
 /run-loop <run_name>
@@ -67,9 +89,16 @@ Open the repo in [Claude Code](https://claude.com/claude-code). The bundled skil
 For example:
 
 ```
+# A. our default script
 /run-loop my_run model=Qwen/Qwen2.5-0.5B dataset=Salesforce/wikitext:wikitext-2-raw-v1 \
           max_len=2048 effective_batch=16 host=ubuntu@<gpu-box> gpu=A10
+
+# B. your own script (and the YAML it loads)
+/run-loop my_byo_run model=HuggingFaceTB/SmolLM2-360M host=ubuntu@<gpu-box> gpu=A10 \
+          script=examples/byo_script/trainer_yaml.py script_configs=examples/byo_script/train.yaml
 ```
+
+Script paths are relative to the repo root. See [`examples/byo_script/`](examples/byo_script/) for scripts that work with path B.
 
 ## Our contributions
 
