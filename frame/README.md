@@ -241,6 +241,9 @@ A user's script has no `data="synthetic"` switch, so the worst case reaches it a
    `[micro_batch, max_len]`**. Any other shape fails the trial with the shape it saw: the script
    ignored the rows, dropped / split / packed them, or runs at another sequence length (then
    re-run Frame at the script's real length).
+   A padding-free script (each micro-batch flattened into one row, `position_ids` restarting per row) feeds
+   `[1, micro_batch * max_len]` instead: set `ceiling_expect_flat: true` in the candidate config and the check expects
+   that shape.
 
 ### Vision-language models: the image worst case
 
