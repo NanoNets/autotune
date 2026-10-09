@@ -52,6 +52,13 @@ _DEFAULTS = {
                                        # model change (loop/throughput.md lists "chunked
                                        # cross-entropy" under Kernels). Pays only when
                                        # vocab x seq is large enough for the logits to dominate.
+    "drop_pad_mask": False,            # don't pass attention_mask for RIGHT-padded rows. A causal LM
+                                       # never lets a real token attend past itself, so it never sees
+                                       # the trailing pad; pad positions have label -100, so nothing
+                                       # flows back from them; positions don't come from the mask.
+                                       # SAME loss and grads. Without a mask HF SDPA keeps flash and
+                                       # native GQA (a padded mask forces repeat_kv + mem-efficient),
+                                       # and compile can't drop an all-ones mask on its own.
     "padding": "max_length",           # "max_length" (every batch seq_len) | "longest" (pad to the
                                        # batch's own longest, rounded up to pad_multiple)
     "pad_multiple": 64,                # bucket dynamic lengths so torch.compile sees few shapes
@@ -91,6 +98,7 @@ def knobs():
         "padding":                {"type": "choice", "options": ["max_length", "longest"]},
         "length_grouped":         {"type": "bool"},   # pairs with padding="longest"
         "chunked_ce":             {"type": "int",    "min": 0},   # 0 = off; N = chunks
+        "drop_pad_mask":          {"type": "bool"},   # right padding only; same math
     }
 
 
@@ -464,8 +472,13 @@ class HFRunner:
                     self._pairs[p["part"]] = (self._pairs.get(p["part"], 0)
                                               + b * s * min(s, p["window"] or s))
                 self._tokens_total = getattr(self, "_tokens_total", 0) + input_ids.numel()
+            if c["drop_pad_mask"]:
+                # Only right padding makes the mask redundant: every row must be ones, then zeros.
+                if bool((attention[:, 1:] > attention[:, :-1]).any()):
+                    raise ValueError("drop_pad_mask needs right-padded rows; this batch is not")
+                attention = None
             input_ids = input_ids.to(self.device)
-            attention = attention.to(self.device)
+            attention = attention.to(self.device) if attention is not None else None
             labels = labels.to(self.device)
             with self._rf("forward"):
                 if c["chunked_ce"]:
