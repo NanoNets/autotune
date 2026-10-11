@@ -1,9 +1,12 @@
-# Verification: the memory ceiling redesign (`design_improvements.md` §7)
+# Verification: the memory ceiling redesign (formerly `design_improvements.md` §7, now implemented)
 
 > Private paper trail for the PR that makes ceiling trials memory-only, searches only divisors of
 > `effective_batch`, re-measures from the previous ceiling on memory-knob changes, and gives user
 > scripts a ceiling. In the style of `docs/verification/byo_script.md`; remove before
 > open-sourcing. Run 2026-10-02.
+>
+> `experience/my_byo_yaml.md`, cited below, isn't at HEAD: it is on branch
+> `origin/experiments/a10-2026-10` (commit `2373e4d`).
 
 ## Method
 

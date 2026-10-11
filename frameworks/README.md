@@ -47,14 +47,17 @@ frame's `versions()`.
 | `tf32` | TF32 matmuls on Ampere+ — faster matmul, model unchanged. **Inert on a pure-bf16 config**: no fp32 matmul exists to accelerate |
 | `padding` | `"max_length"` (every batch `seq_len` wide) or `"longest"` (pad to the batch's own longest, rounded to `pad_multiple`). Identical arithmetic — pad is masked in attention and `-100` in labels — so it only changes how much compute is spent. `seq_len` still truncates, so `max_len` is respected |
 | `length_grouped` | batch similar-length rows together so pad-to-longest wastes less. Only meaningful with `padding="longest"`, and it is what makes a **larger** `micro_batch` pay there |
+| `fused_optimizer` | `AdamW(fused=True)`: one fused kernel instead of the foreach chain. Same AdamW algorithm, so a kernel swap. CUDA + float params only |
+| `chunked_ce` | `0` = off (the model computes its own loss); `N > 0` = cross-entropy in `N` checkpointed chunks over the tokens, so the `[chunk, vocab]` logits are freed after the forward. Same loss; pays when vocab × seq makes the logits dominate memory |
 
 **Not knobs** (run *parameters*, set by the human, off-limits to search): `dtype` (precision) and
 `seq_len` (max_length) change the model, so they're config inputs, not searchable. `effective_batch`
 is the human's target — the loop only **factorizes** it into `micro_batch`×`grad_accum`, never changes it.
 
-**Deferred levers** (in `throughput.md`, not yet implemented here): packing / `padding_free`,
-dataloader `workers`/`prefetch`, fused kernels (incl. chunked cross-entropy), offload, and
-parallelism (multi-GPU). `knobs()` reports only what this
+**Deferred levers** (in `throughput.md`, not yet implemented here): `padding_free`,
+dataloader `workers`/`prefetch`, other fused kernels (e.g. Liger), offload, and parallelism
+(multi-GPU). **Packing is not a lever**: it changes examples per optimizer step under a fixed
+`effective_batch`, so it is off-limits (`loop/throughput.md`). `knobs()` reports only what this
 adapter actually applies — a declared knob must really take effect.
 
 ## Design notes
@@ -64,7 +67,8 @@ adapter actually applies — a declared knob must really take effect.
 - **Real weights, real data.** Unlike frame (config-only), the adapter downloads the model and streams
   the dataset — a genuine fwd/bwd/opt is what gets timed.
 - **`grad_accum` is inside one `step()`** — grad_accum micro fwd/bwd passes (loss scaled by
-  `1/grad_accum`), then one optimizer step. `tokens_per_step = effective_batch · seq_len`.
+  `1/grad_accum`), then one optimizer step. `tokens_per_step()` is the measured mean (see below);
+  it equals `effective_batch · seq_len` only under `padding="max_length"`.
 - **Padding is masked** in the labels (`-100`) and attention, so a padded step is still a valid
   training step. Fully blank/whitespace rows are **dropped** (an all-pad batch has all-`-100`
   labels → `0/0` NaN loss, which would poison every later step); a run with too few usable rows
@@ -75,7 +79,8 @@ adapter actually applies — a declared knob must really take effect.
 ## Limitations (deferred)
 
 - **Pre-tokenized in-memory loader** → the `dataloader` phase is ~0 (no real data-wait), so
-  `workers`/`prefetch` have nothing to recover. On-the-fly tokenization + packing come later.
+  `workers`/`prefetch` have nothing to recover. On-the-fly tokenization comes later (packing
+  never: it is off-limits).
 - **The rows are part of the measurement.** Under `padding="longest"` batch width *is* the rows
   drawn, so which rows a probe loads decides what it measures. Give every probe the sample Frame
   drew, via `sample_file` (`frame.dataset.draw_sample`: length-stratified from a random pool over

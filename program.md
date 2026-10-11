@@ -24,8 +24,9 @@ Apply these for the whole session, not just one step below.
 - **NEVER stop:** Once Step 3 is confirmed, never pause to ask the human "should I keep going?" —
   run unattended until manually interrupted. The human may be away entirely and expects a full
   night of logged experiments (~5 min/experiment → ~12/hour → ~100/night).
-- **Timeout:** Each experiment ≈5 min. If a run exceeds 10 min, kill it, log it as a failure,
-  discard the change, move on.
+- **Timeout:** Each experiment ≈5 min. Set `timeout: 600` in every probe config (the backend's
+  default is 1800 s); a probe that hits it is killed and returns an `error` Observation. Log it as a
+  failure, discard the change, move on.
 - **Crashes:** IF easy fix (typo, missing import, off-by-one) → fix and re-run. IF the idea itself
   is fundamentally broken → don't try to rescue it — log `crash` as the status and move on.
 - **One number, one population:** compare or divide two numbers only when they were measured on
@@ -77,6 +78,10 @@ user's script unchanged instead of a `frameworks/` runner (`backends/README.md`,
   Observation says `population.sample_method: head`, and a result on it is not evidence.
 - **Measure the OOM ceiling at `max_len`** before any tuning — `micro_batch` is bounded by
   measurement, never by guesswork. Procedure: `frame/README.md`.
+- **Save the Profile:** `python -m frame` prints a summary, its `NOTE:` lines, then the Profile as
+  JSON. Save that JSON object to `runs/<run_name>/profile.json` — nothing else writes it, and
+  `python -m frame.ceiling`, `runs/progress.py` and `/run-loop resume` read it. Frame's initial
+  ceiling lives in its `ceiling` field.
 
 ### Step 3 — Initialize run tracking, then confirm → `runs/README.md`
 
@@ -90,11 +95,11 @@ user's script unchanged instead of a `frameworks/` runner (`backends/README.md`,
 ### Step 4 — Run the experimental loop → `loop/loop.md`
 
 Cycle: `[ HYPOTHESIZE → TEST → OBSERVE → LEARN ] → repeat`. The first Config is the baseline —
-the training script as-is, unmodified (see `loop/loop.md` Frame §5) — log it as experiment 1
+the training script as-is, unmodified (see `loop/loop.md` Frame, item 5) — log it as experiment 1
 before proposing any change. **NEVER** start from a prior's winning config: measured against
 anything but the shipped defaults, "faster by X%" means nothing.
 
-- IF Frame matched a previous run in `experience/` (`loop/loop.md` Frame §3) → run that run's
+- IF Frame matched a previous run in `experience/` (`loop/loop.md` Frame, item 3) → run that run's
   winning config as **experiment 2**, right after the baseline. It re-validates the prior on this
   hardware and banks the biggest known jump before searching. IF it fails to reproduce → that
   contradiction outranks any hypothesis you had queued; chase it.
@@ -112,7 +117,7 @@ anything but the shipped defaults, "faster by X%" means nothing.
   candidate config to `runs/<run_name>/candidate.json` and run
   `python -m frame.ceiling --config runs/<run_name>/candidate.json --run runs/<run_name>`. IF the
   config moves a memory knob the ceiling was stamped with (recompute, attention, optimizer, dtype,
-  sharding, chunked CE, the allocator setting, **compile**) it re-measures from the previous
+  sharding, offload, packing, chunked CE, the allocator setting, **compile**) it re-measures from the previous
   ceiling, usually in 1-2 short trials; otherwise it runs nothing. Then choose the probe's
   `micro_batch` against the bound it reports (`frame/README.md`). `compile` is in that list on measured evidence: fusing the
   cross-entropy cut peak memory 5.4GB and moved a measured ceiling from 2 to 4.
@@ -123,11 +128,11 @@ anything but the shipped defaults, "faster by X%" means nothing.
 - **NEVER** propose a `dtype` change to make something fit — precision changes the model. IF the
   memory regime blocks the run, put it to the human with the measured numbers (`loop/throughput.md`).
 - **NEVER** log a ceiling trial as an experiment. Synthetic probes measure memory, not throughput
-  — they go to `ceiling.tsv`, never `results.tsv` (`runs/README.md`).
-- IF the change works → keep it, commit it (the branch now reflects the new best config).
-  IF it doesn't → discard, move on.
-- Rewind to an earlier point only very sparingly, if ever — prefer branching your thinking over
-  branching git history.
+  — they go to `ceiling.tsv` (or `profile.json`'s `ceiling`), never `results.tsv` (`runs/README.md`).
+- IF the change works → keep it: it is the new best, recorded in `results.tsv` (`conclusion`) and
+  `research.md`, and later hypotheses build on it. IF it doesn't → discard, move on.
+- Rewind to an earlier best config only very sparingly, if ever — prefer branching your thinking
+  over restarting from an old point.
 - Out of ideas → dig deeper (re-read in-scope files, profiler output, websearch papers/model
   cards) rather than treat it as a stopping condition. Websearch findings go to
   `runs/<run_name>/research.md` (`runs/README.md`).
@@ -299,7 +304,8 @@ On top of the usual summary, report:
     disk.
 
   Grad accumulation is derived, so `effective_batch` stays fixed (`loop/throughput.md`). In
-  `results.tsv`'s hypothesis column, name the exact flags / keys changed.
+  `results.tsv`'s hypothesis column, the `[k=v ...]` prefix (`runs/README.md`) names the exact
+  flags / keys, under the script's own names.
 - **Read `population.driver: "script"` on every Observation.** Its `clean_window:
   "fixed-position"` means the rows timed are the loader's next steps, not whole passes over a
   shared sample. So:

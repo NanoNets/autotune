@@ -2,7 +2,7 @@
 
 One line per belief file. Always loaded, so keep each line to the claim itself — the evidence lives
 in the file. Retrieval is by `context` match (`{arch_family, hardware_class, dataset_shape}`); see
-the `Belief` contract in `loop/contracts.md`.
+the `Belief` contract in `loop/contracts.md`. One heading per `type`.
 
 ## Regime — what kind of problem this is
 
@@ -12,6 +12,33 @@ the `Belief` contract in `loop/contracts.md`.
   scales with micro-step count (bf16 grad-accum adds + launches), not tokens; buy micro_batch before kernel levers.
 
 ## Ceiling — what bounds the memory
+
+## Calibration — how far a prediction or a reading is off, and when to distrust the number
+
+- [synthetic-ceiling-misses-padded-mask](synthetic-ceiling-misses-padded-mask.md) — all-ones synthetic rows miss the
+  padded-mask SDPA path (+~0.5 GB at [1, 2048]); a padded config near the card edge is unproven.
+- [recompiles-show-as-mean-over-median](recompiles-show-as-mean-over-median.md) — mean step >> median with an
+  unchanged GPU step = recompiles in the window; a multi-pass probe separates them from length variation.
+- [full-gc-after-compile-stalls-one-step](full-gc-after-compile-stalls-one-step.md) — a one-step ~1.3s stall with 0
+  recompiles is a gen-2 GC over compile-time objects; gc.freeze() after the compiling step removes it.
+
+## Dead lever — what doesn't move throughput here
+
+- [liger-flce-dead-when-vocab-dwarfs-hidden](liger-flce-dead-when-vocab-dwarfs-hidden.md) — Liger FLCE cuts a
+  micro-batch into ~BT·H/V-token chunks; at V/H ~170 that's -72%.
+- [fused-adamw-slower-on-bf16-params](fused-adamw-slower-on-bf16-params.md) — fused AdamW was slower than foreach on
+  bf16 params (A10, torch 2.7).
+- [max-autotune-dead-on-a10-gemms](max-autotune-dead-on-a10-gemms.md) — max-autotune-no-cudagraphs tied or lost to
+  cuBLAS on A10 training GEMMs (2 models), at minutes of autotune wall.
+- [hf-fa2-padded-batches-break-compile](hf-fa2-padded-batches-break-compile.md) — HF FA2 + padded mask under compile
+  graph-breaks per layer (-27%); padding-free FA2 is clean but buys only the residual pad.
+- [cudagraphs-crash-on-peft-graph-breaks](cudagraphs-crash-on-peft-graph-breaks.md) — reduce-overhead on a peft HF
+  model crashes (cudagraph outputs overwritten across graph-break segments); mark_step_begin doesn't fix it.
+
+## Safety — whether a knob changes the model
+
+- [eval-mode-base-disables-gradient-checkpointing](eval-mode-base-disables-gradient-checkpointing.md) — a script that
+  never calls .train() leaves HF layers in eval; gradient checkpointing is then a silent no-op.
 
 ## Invariant — how knobs interact
 
@@ -29,27 +56,3 @@ the `Belief` contract in `loop/contracts.md`.
   mask for SDPA; use FA2 with no mask instead (+7.8%).
 - [peft-fp32-adapters-skip-tensor-cores](peft-fp32-adapters-skip-tensor-cores.md) — peft's fp32 LoRA adapters run
   as SIMT sgemm on a bf16 base; allow_tf32 puts them on tensor cores, loss inside run-to-run noise.
-
-## Measurement — when to distrust the number
-
-- [synthetic-ceiling-misses-padded-mask](synthetic-ceiling-misses-padded-mask.md) — all-ones synthetic rows miss the
-  padded-mask SDPA path (+~0.5 GB at [1, 2048]); a padded config near the card edge is unproven.
-- [recompiles-show-as-mean-over-median](recompiles-show-as-mean-over-median.md) — mean step >> median with an
-  unchanged GPU step = recompiles in the window; a multi-pass probe separates them from length variation.
-- [full-gc-after-compile-stalls-one-step](full-gc-after-compile-stalls-one-step.md) — a one-step ~1.3s stall with 0
-  recompiles is a gen-2 GC over compile-time objects; gc.freeze() after the compiling step removes it.
-
-## Dead levers & safety
-
-- [liger-flce-dead-when-vocab-dwarfs-hidden](liger-flce-dead-when-vocab-dwarfs-hidden.md) — Liger FLCE cuts a
-  micro-batch into ~BT·H/V-token chunks; at V/H ~170 that's -72%.
-- [fused-adamw-slower-on-bf16-params](fused-adamw-slower-on-bf16-params.md) — fused AdamW was slower than foreach on
-  bf16 params (A10, torch 2.7).
-- [max-autotune-dead-on-a10-gemms](max-autotune-dead-on-a10-gemms.md) — max-autotune-no-cudagraphs tied or lost to
-  cuBLAS on A10 training GEMMs (2 models), at minutes of autotune wall.
-- [hf-fa2-padded-batches-break-compile](hf-fa2-padded-batches-break-compile.md) — HF FA2 + padded mask under compile
-  graph-breaks per layer (-27%); padding-free FA2 is clean but buys only the residual pad.
-- [cudagraphs-crash-on-peft-graph-breaks](cudagraphs-crash-on-peft-graph-breaks.md) — reduce-overhead on a peft HF
-  model crashes (cudagraph outputs overwritten across graph-break segments); mark_step_begin doesn't fix it.
-- [eval-mode-base-disables-gradient-checkpointing](eval-mode-base-disables-gradient-checkpointing.md) — a script that
-  never calls .train() leaves HF layers in eval; gradient checkpointing is then a silent no-op.

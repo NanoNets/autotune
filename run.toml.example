@@ -1,7 +1,8 @@
 # run.toml.example — copy to run.toml and fill in. run.toml is gitignored; this template is committed.
 #
-# The declarative spec for one autotune run. Frame reads this to build the Profile (runs/<id>/profile.json);
-# the loop reads it for the run inputs. Secrets (HF_TOKEN, Modal/SSH auth) live in .env, not here.
+# The declarative spec for one autotune run: it records the run's inputs for the agent, who passes
+# them to Frame (as flags) and to backends (in each probe config). No code reads this file.
+# Secrets (HF_TOKEN, Modal/SSH auth) live in .env, not here.
 
 model           = "Qwen/Qwen2.5-0.5B"     # HF hub id or local path
 dataset         = "Salesforce/wikitext"   # HF hub id or local path
@@ -18,13 +19,13 @@ max_len         = 2048                    # REQUIRED. the sequence length your a
 # max_image_size = "672x672"   # the largest image the training code lets through, W x H pixels
 # max_images     = 1           # most images per sample; omit to have Frame scan the data for it
 
-backend = "local"   # "local" or "ssh" — see backends/README.md
+backend = "local"   # "local", "ssh" or "modal" — see backends/README.md
 device  = "cuda"    # what the probe runs ON. "cuda" for any GPU box; single-GPU only, so no
                     # "cuda:0". "cpu" is a smoke test — a well-formed Observation whose MFU is
                     # meaningless — so ask for it deliberately. Delete this line to auto-detect
                     # (cuda when present, else cpu with a warning); set it to fail loudly instead.
 
-# Bring your own training script (optional; README.md "Bring your own training script"). When set,
+# Bring your own training script (optional; program.md "Script mode"). When set,
 # probes run YOUR script unchanged instead of a frameworks/ runner. The path is relative to the repo
 # root (the ssh backend runs the same path on the box). script_args are the BASELINE arguments: the
 # agent appends a step budget and changes only your script's own flags between probes.
@@ -46,7 +47,8 @@ sample     = 1000      # probe sample size: rows drawn length-stratified from a 
 seed = 0               # seed for the synthetic max_len batches, so a ceiling is reproducible
 
 # only used when backend = "ssh" — the SSH credential itself (AUTOTUNE_SSH_PASSWORD /
-# AUTOTUNE_SSH_KEY) stays in .env, never here
+# AUTOTUNE_SSH_KEY) stays in .env, never here. Optional keys: python, remote_dir, sync
+# (defaults and meaning in backends/README.md)
 [ssh]
 host = ""
 user = ""

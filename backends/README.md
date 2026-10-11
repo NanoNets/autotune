@@ -38,7 +38,8 @@ Ask the user where the experiments will actually run:
     to the system ssh's own credential resolution.
   - The box needs a Python with `torch` + `transformers` + `datasets`; point `[ssh] python` at it
     (default `~/autotune/.venv_at/bin/python`). The repo is rsynced to `[ssh] remote_dir`
-    (default `~/autotune`) on every probe — it's ~700KB, so the sync is not the cost.
+    (default `~/autotune`) on every probe — it's ~700KB, so the sync is not the cost. `[ssh] sync`
+    (default `true`) turns that code sync off; script files under `runs/` are still pushed.
   - Everything non-secret (backend, model, dataset, gpu, `effective_batch`, SSH host/user)
     belongs in `run.toml` (copy from the committed `run.toml.example`), not `.env`.
   - Confirm you can actually reach the box (e.g. a trivial `ssh` command succeeds) before moving on.
@@ -78,11 +79,22 @@ print(obs["summary"])
 
 ## The config
 
-Everything a probe needs, in one dict: **run params** (`model`, `dataset`, `name`, `dtype`,
-`seq_len`, `gpu`, `device`), the **knob assignment** for this probe (`micro_batch`,
-`gradient_checkpointing`, `attn_implementation`, `torch_compile`, `tf32`, `effective_batch`), and the
+Everything a probe needs, in one dict: **run params** (`framework`, `model`, `dataset`, `name`,
+`dtype`, `seq_len`, `effective_batch`, `sample_file`, `gpu`, `device`), the **knob assignment** for
+this probe (`micro_batch`, `gradient_checkpointing`, `attn_implementation`, `torch_compile`, `tf32`,
+`fused_optimizer`, `padding`, `length_grouped`, `chunked_ce`; see `frameworks/README.md`), and the
 **frozen ceilings** the loop measured once at Frame (`peak_flops`, `peak_mem_bw_gb_s`) so every probe
 is scored against the same denominator (not a per-probe re-measure).
+
+- `framework` picks the runner (`hf` real, `torch` the MLP fixture). It defaults to **`torch`**, so
+  a real probe must set `framework: "hf"`.
+- `warmup` / `clean_steps` (default 3 / 10) set the timing window.
+- `timeout` (seconds) kills a hung probe and returns an `error` Observation. Default 1800 for a
+  subprocess (script probes and their ceiling trials; the ssh connection waits `timeout` + 300 so the
+  box's answer wins); modal's function timeout defaults to 600. An in-process runner probe on
+  `local` has none. `program.md` sets `timeout: 600` in every probe config.
+- `env` sets environment variables before the probe process starts (e.g.
+  `PYTORCH_CUDA_ALLOC_CONF`): on the box for ssh, and for a local script probe's process.
 
 ## Script probes (bring your own training script)
 

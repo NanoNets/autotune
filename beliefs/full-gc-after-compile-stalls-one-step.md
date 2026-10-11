@@ -3,7 +3,7 @@ claim: torch.compile leaves ~2-3M long-lived Python objects, and each generation
   When the last of those passes lands inside a probe's clean window it shows as one ~1.3 s step: mean far above median
   with 0 recompiles. gc.collect() + gc.freeze() after the first (compiling) step moves them to the permanent generation;
   after that no slow GC ran in 199 steps.
-type: measurement
+type: calibration
 context:
   arch_family: any model under torch.compile (seen with peft LoRA + Inductor dynamic shapes, both wrapper modes)
   hardware_class: any (host-side); seen on an A10 box, torch 2.7.0, Python 3.10

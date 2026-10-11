@@ -1,8 +1,20 @@
 # runs/ &mdash; per-run outputs *(gitignored)*
 
-Each run gets a folder holding its journal (`journal.jsonl` — every config &rarr; observation), its
-research notes (`research.md`), and the final best config. The contents are ignored by git; this
-README is the only tracked file here.
+Each run gets a folder, `runs/<run_name>/`. Its contents are ignored by git; this README and
+`progress.py` are the only tracked files here. What a run's folder holds:
+
+| File | Written by | What |
+|---|---|---|
+| `results.tsv` | the agent (Step 3 on) | one row per experiment — the throughput ledger, below |
+| `research.md` | the agent | notes, websearch findings, the best-so-far, convergence calls |
+| `profile.json` | the agent saves `python -m frame`'s printed Profile JSON (Step 2); `python -m frame.ceiling` updates its `ceiling` | read by `frame.ceiling`, `progress.py`, `/run-loop resume` |
+| `sample.jsonl` | `python -m frame --sample-out` | the probe sample every probe passes as `sample_file` |
+| `candidate.json` | the agent | the candidate probe config `frame.ceiling` checks |
+| `ceiling.tsv` | `python -m frame.ceiling` | the memory ledger, below |
+| `ceiling_rows.jsonl`, `ceiling_candidate.json` | Frame / the agent (script mode) | a user script's ceiling rows and trial config |
+| `probes/` | the agent (script mode) | per-probe config copies |
+| `progress.png` | `progress.py` (Step 5) | the progress plot |
+| `annotations.json` | the agent, optional | plot captions and `records_from` for `progress.py` |
 
 ---
 
@@ -15,12 +27,18 @@ experiment_number	token/s	samples/s	memory	status	hypothesis	conclusion
 ```
 
 - `samples/s` — **the ranked column**, the Observation's `samples_per_s`. Configs are compared on it and the progress staircase is
-  drawn from it; `token/s` is recorded alongside to tell a real win from a sample artifact, never
-  to rank (`loop/throughput.md`).
+  drawn from it; `token/s` (the Observation's `tokens_per_s`) is recorded alongside to tell a real
+  win from a sample artifact, never to rank (`loop/throughput.md`). Empty for a probe with no
+  reading.
+- `memory` — the Observation's `peak_mem_gb`, a number (a trailing `GB` is allowed).
 - `status` — e.g. `ok` / `oom` / `crash` / `error`, or the Observation's `invalid`. Only an `ok` row
   can be the baseline or the best in `progress.py`.
-- `hypothesis` — what you changed and why you expected it to help, written *before* running.
-- `conclusion` — kept or discarded, and why, written *after* observing the result.
+- `hypothesis` — what you changed and why you expected it to help, written *before* running. Start
+  it with a `[k=v k=v ...]` snapshot of the probe's knobs (e.g. `[micro_batch=8 compile=default]`):
+  `progress.py` labels each staircase step with the knobs that changed from the previous best.
+- `conclusion` — kept or discarded, and why, written *after* observing the result. `progress.py`
+  reads two words in it: `CONTROL` (a repeat / isolation probe, drawn hollow) and `UNRELIABLE` (a
+  reading the run rejected; it can't set a record).
 
 This file is the running record every hypothesis after the baseline gets built on — treat it as the
 single source of truth for "what have we already tried." Every experiment (starting with the
@@ -34,16 +52,17 @@ loop from re-running something already tried.
 
 Ceiling trials (`frame/README.md`) run on worst-case `max_len` batches (synthetic for our runner,
 Frame's `ceiling_rows.jsonl` for a user's script) and answer *does it fit*, never *how fast*.
-Scoring them as experiments would rank throughput on fake data. They get their own file, which
-`python -m frame.ceiling` appends to:
+Scoring them as experiments would rank throughput on fake data. Frame's initial ceiling (Step 2,
+`python -m frame --ceiling`) is recorded in `profile.json`'s `ceiling`, not here. Every
+`python -m frame.ceiling` run that measures appends its trials to their own file:
 
 ```
 seq_len	micro_batch	status	peak_gb	reserved_gb	config	note
 ```
 
-- One row per trial. `config`: every memory knob it was measured under, defaults included.
+- One row per `frame.ceiling` trial. `config`: every memory knob it was measured under, defaults included.
   `note`: `CEILING` / `oom_at`, and `fresh` or `re-measure from <n>`.
-- **NEVER** put a ceiling trial in `results.tsv`, and never on the frontier.
+- **NEVER** put a ceiling trial in `results.tsv`, and never rank one.
 - Re-run the search when a memory knob moves; append the new trials, don't overwrite the old ones —
   the two ceilings side by side are the evidence for what that knob bought.
 

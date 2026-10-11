@@ -1,11 +1,11 @@
 # Metrics audit
 
 Every metric the profiler reports: what it is, how the code calculates it, why it is needed, and
-whether the code matches the docs. Audited against `main` at `592d074` (2026-10-05), by reading the
-code. The seven items it flagged are fixed in PR #24 (`metrics-audit`), which this doc ships with.
-`samples_per_step` and `samples_per_s` are added by PR #25 (`metric`).
+whether the code matches the docs. Reflects current `main` at `a3e77f5`: refreshed 2026-10-11 by
+re-reading the code. First audited at `592d074` (2026-10-05); the seven items that audit flagged were
+fixed in PR #24 (`metrics-audit`), listed below.
 
-**Matches docs:** ✅ yes · ✅ *n* fixed by this PR, see item *n* below · ❌ a real gap.
+**Matches docs:** ✅ yes · ✅ *n* fixed by PR #24, see item *n* below · ❌ a real gap.
 
 "Clean window" means the timed training steps with the profiler off. "Reference batch" means the
 one fixed batch that is traced with the profiler on.
@@ -15,7 +15,7 @@ one fixed batch that is traced with the profiler on.
 | `status` | Whether the probe produced a usable reading | `ok`, `oom`, `error`, or `invalid` when `gpu_active_frac` or `mfu` reads above 1.02 | Stops a failed or impossible reading from being scored | ✅ |
 | `gpu` | Hardware label | Copied from the `--gpu` input; never looked up | Identifies the run in records | ✅ |
 | `error` | Why the probe failed | First line of the exception, or which reading was impossible | Lets the agent tell an OOM from a crash from a bad measurement | ✅ |
-| `summary` | One-line digest | Formatted from MFU, GPU-active, data-wait, idle, CPU, noise, occupancy, memory | Quick read for a human or the agent | ✅ |
+| `summary` | One-line digest | Formatted from samples/s, tokens/s, MFU, reference-batch GPU-active, data-wait, idle, CPU, step cv, occupancy, memory; prefixed for a non-CUDA probe or an `invalid` reading | Quick read for a human or the agent | ✅ |
 | `trace_path` | Where the raw trace is | Path of the exported Chrome trace | Lets the agent drill into the trace when the summary isn't enough | ✅ |
 | `step_time_s` | Typical step time | Median of the clean step times | Describes a typical step; never used in a rate | ✅ |
 | `step_time_mean_s` | Average step time | Sum of clean step times / number of steps | The denominator of every rate | ✅ |
@@ -23,17 +23,23 @@ one fixed batch that is traced with the profiler on.
 | `clean_steps_measured` | Steps actually timed | Count of clean step times | Shows how much evidence is behind the timing | ✅ |
 | `clean_steps_requested` | Steps the caller asked for | The `clean_steps` input, before rounding up to whole passes | Explains why measured differs from requested | ✅ |
 | `clean_passes` | Passes over the sample completed | Steps completed / steps per pass | A whole number proves every row was timed equally, so configs are comparable | ✅ |
-| `samples_per_step` | Rows per step (PR #25) | Mean of per-step row counts over the clean steps | Numerator of samples/s | ✅ |
-| `samples_per_s` | Training examples per second (PR #25) | `samples_per_step / step_time_mean_s` | **The primary metric**: what configs are ranked on | ✅ in PR #25; ❌ absent on `main` |
+| `samples_per_step` | Training examples per step | Mean of per-step sample counts over the clean steps. Runners count rows; a script probe counts rows when unpacked and documents when packed (`position_ids` resets or `cu_seqlens`), else `null` | Numerator of samples/s | ✅ |
+| `samples_per_s` | Training examples per second | `samples_per_step / step_time_mean_s` | **The primary metric**: what configs are ranked on | ✅ |
 | `tokens_per_step` | Tokens per step, padding included | Mean of per-step `input_ids.numel()` over the clean steps | Numerator of tokens/s and of the FLOP estimate | ✅ |
 | `tokens_per_s` | Tokens per second | `tokens_per_step / step_time_mean_s` | Cross-check on samples/s: shows whether a win is real or a sampling artifact | ✅ |
 | `peak_flops` | Fastest compute the device delivers | Best of three large matrix multiplies: `2 × n³ × iters / elapsed` | The denominator of MFU, measured so any hardware works | ✅ |
-| `peak_dtype` | Dtype the peak was measured at | The run's dtype | MFU is only fair if this matches what the model ran in | ✅ |
+| `peak_dtype` | Dtype the peak was measured at | The dtype the matmuls run in: the config's `compute_dtype`, else its `dtype`, else the checkpoint's (what the code loads when it names none), else torch's default | MFU is only fair if this matches what the model ran in | ✅ |
 | `peak_mem_bw_gb_s` | Memory bandwidth the device delivers | A 256 MB device copy: `2 × bytes × iters / elapsed` | Tells whether a low MFU is limited by compute or by memory traffic | ✅ |
-| `flops` | Estimated work in one step | `6 × params × tokens_per_step` | Numerator of MFU | ✅ |
+| `flops` | Estimated work in one step | PaLM model FLOPs of the mean clean step: `(4 × params_total + 2 × params_trainable) × tokens_per_step` (6ND when every weight trains) + `attention_flops`. A VLM charges its vision tower per image patch instead: `(k × params_vision + 2 × its trained part) × patches_per_step`, k = 4 if any of the tower trains, else 2 | Numerator of MFU | ✅ |
+| `params_total` | Every weight of the model, trained or frozen | Runner: the model's parameters. Script: the parameters of the module that owns the optimizer's weights; `null` for a quantized base or an unreadable VLM layout | N in the forward and activation-gradient terms of `flops` | ✅ |
+| `params_trainable` | Weights the optimizer trains | Script: the first optimizer's parameters with `requires_grad`. Runner: equals `params_total` | Weight-gradient term of `flops`, so LoRA isn't charged for frozen weights | ✅ |
+| `params_vision` | A VLM's vision-tower weights | Parameters under a `visual` / `vision_tower` / `vision_model` / `vision_encoder` module (script probes) | The share of `params_total` charged per image patch, not per token | ✅ |
+| `patches_per_step` | Image patches per step (a VLM) | Mean over the clean steps, from the image tensors' shapes | The vision tower's D in `flops` | ✅ |
+| `attention_flops` | Attention work in one step | `12 × layers × heads × head_dim × pairs` per attention part (4× for a frozen vision tower), over the (query, key) pairs each clean step attended, averaged | PaLM's attention term of `flops`; without it MFU reads low at long sequences | ✅ |
+| `attention_source` | What the attention term covers | Each part's layers × width (and window), plus what was left out (non-attention layers, windowed vision blocks); `unknown: <why>` when no layout could be read | Shows when `attention_flops` reads low | ✅ |
 | `roofline_floor_s` | Fastest a step could possibly be | `flops / peak_flops` | Shows how far a step is from the hardware limit | ✅ |
-| `mfu` | Share of the device's peak compute actually used | `(flops / step_time_mean_s) / peak_flops` | A diagnostic for how well the GPU is used | ✅ |
-| `reference_step_s` | Time of the reference batch, profiler off | Wall time of one run of that batch. `null` for user scripts | Denominator for every GPU fraction from the trace | ✅ |
+| `mfu` | Share of the device's peak compute actually used | `(flops / step_time_mean_s) / peak_flops`; `null` when the peak was measured at float32 but the trace's kernels ran bf16 / fp16 | A diagnostic for how well the GPU is used | ✅ |
+| `reference_step_s` | Time of the reference batch, profiler off | Wall time of one run of that batch (the clean window's mean step when the runner has no reference batch). `null` for user scripts | Denominator for every GPU fraction from the trace | ✅ |
 | `profiled_step_s` | Time of the same batch, profiler on | Wall time of the traced run | Exposes how much the profiler slows the step | ✅ |
 | `gpu_busy_s` | Time the GPU was working in the reference batch | Union of kernel intervals on the trace timeline | Numerator of GPU-active | ✅ |
 | `gpu_active_frac` | Share of the step the GPU was working | `gpu_busy_s / reference_step_s` | Shows whether the GPU is being kept fed | ✅ |
@@ -63,11 +69,11 @@ one fixed batch that is traced with the profiler on.
 | `device` | The real hardware | Name, memory, compute capability, SM count from the trace header | Checks the label against the actual card | ✅ |
 | `device_type` | What the probe ran on | The device string (`cuda` / `cpu` / `mps`) | Stops a CPU smoke test being read as a GPU result | ✅ |
 | `population` | Which rows were timed and which batch was traced | Reported by the runner: sample hash, steps per pass, reference batch key | Decides which probes can be compared with each other | ✅ |
-| Ceiling trial: `peak_gb`, `reserved_gb`, `total_gb` | Memory of a memory-only trial | Allocator peaks from start until optimizer step 3 | Answers "does this batch size fit?" | ✅ |
+| Ceiling trial: `peak_gb`, `reserved_gb`, `total_gb` | Memory of a memory-only trial | Allocator peaks from start until optimizer step N (default 3) | Answers "does this batch size fit?" | ✅ |
 | Ceiling trial: `shapes_seen`, `shape_checked` | Batch shapes the model was fed | Every `(batch, seq)` seen by a hook on the model | Proves the trial measured the intended worst case | ✅ |
 | `cost` | What the probe spent | **Not calculated.** Was listed in `loop/contracts.md` only | Out of scope for now | ✅ 3 |
 
-## What the PR fixed
+## What PR #24 fixed
 
 1. **`step_time_cv`** divided by the median; a coefficient of variation is std / mean, and the mean
    is what samples/s divides by. It was also labelled the "noise floor", which under dynamic padding

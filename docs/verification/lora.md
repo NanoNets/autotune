@@ -2,7 +2,8 @@
 
 > Private paper trail for the `peft-lora` branch (`design_improvements.md` §10: MFU under frozen
 > weights). In the style of `docs/verification/byo_script.md`; remove before open-sourcing.
-> Run 2026-10-07.
+> Run 2026-10-07. Since merged (PR #26); `design_improvements.md` §10 now keeps only its open
+> steps 3-4, so the §10 estimates cited below are in git history.
 
 ## Method
 
@@ -46,7 +47,9 @@ What each check shows:
 3. **The formula is applied as written.** `flops == (4·params_total + 2·params_trainable)·D` on
    every probe.
 4. **Full fine-tune is unchanged.** `params_total == params_trainable`, and the new MFU equals the
-   old 6ND MFU to 5 decimal places, so past MFUs in `experience/` stay comparable.
+   old 6ND MFU to 5 decimal places, so past MFUs in `experience/` stay comparable. *(Superseded:
+   `experience/` was since emptied, and PR #27 added PaLM's attention term to MFU, so MFUs from
+   before then aren't directly comparable.)*
 5. **LoRA MFU is fixed.** From ~0.45% (≈30× low) to 13–17%.
 
 ## Deviations, recorded rather than smoothed over
@@ -85,7 +88,8 @@ Frame's LoRA estimates (`--lora-r` / `--lora-targets`) were checked against the 
 | Qwen2.5-0.5B | 8,798,208 | 8,798,208 |
 
 Frame's analytical base count is within 0.02% of the measured one (it leaves out norm and bias
-weights).
+weights). *(Superseded 2026-10-08: counts now come from a meta-device build and are exact,
+`frame/model.py`; the analytical template is only the fallback.)*
 
 **Model-state memory, checked on a second A10 the same day** (fresh box, same pins). Each model
 was loaded, run for one training step, and `torch.cuda.memory_allocated()` read right after
@@ -104,7 +108,9 @@ Frame's `model_state_gb` estimates.
 The LoRA estimate is within 4% (it leaves out norms and biases). The full fine-tune estimate
 assumes mixed precision (16 bytes a weight) and matches that setup within 1%; a pure-bf16 loop
 (`torch_flags.py`'s style) keeps AdamW state in bf16 (~8 bytes a weight), so Frame reads ~2× high
-there. That full fine-tune mismatch predates this branch and is `design_improvements.md` §16.
+there. That full fine-tune mismatch predates this branch and was `design_improvements.md` §16.
+*(Done 2026-10-08: Frame no longer assumes a master copy; memory follows the trained weights' dtype,
+8 bytes a weight for bf16 and 16 for fp32, `frame/memory.py`.)*
 
 ## CPU tests
 

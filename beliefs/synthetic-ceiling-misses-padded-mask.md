@@ -2,7 +2,7 @@
 claim: The synthetic ceiling (every row max_len, all-ones mask) is not the worst case for a config that passes a padded
   mask to HF SDPA. The real padded batch takes the repeat_kv + masked mem-efficient path, which synthetic rows never
   exercise: ~+0.5 GB at [1, 2048] on Qwen2.5-1.5B. Treat a padded-mask config within ~1 GB of the card as unproven.
-type: measurement
+type: calibration
 context:
   arch_family: HF GQA decoders, attn_implementation sdpa, padded batches (padding=max_length, or longest with pad)
   hardware_class: any
