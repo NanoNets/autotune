@@ -1,6 +1,6 @@
 """A VLM's image worst case for the memory ceiling (frame/images.py, profiler/memtrial.py): the
 rows carry the declared max images, and every trial checks they reached the model at that size.
-final_boss_report VLM theme: text-only rows read the ceiling 2x too high once the vision tower
+Text-only rows read the ceiling 2x too high once the vision tower
 trains (Qwen2-VL-2B, A10)."""
 import json
 import os

@@ -120,7 +120,7 @@ def test_b1_float_activation_input_counts_rows_times_seq():
 
 def test_eval_forwards_inside_the_window_are_not_training_rows():
     """An eval / generate() forward under no_grad (HF Trainer `eval_steps`) must not add rows or
-    tokens to the step it falls in (final_boss_report T2-C1)."""
+    tokens to the step it falls in."""
     att = _packed_run(_steps({"input_ids": torch.randint(0, 50, (4, 8))}), eval_every_step=True)
     assert att.step_samples == [4] * CLEAN and att.step_tokens == [32] * CLEAN
 
@@ -136,7 +136,7 @@ class _ImageFirstModel(torch.nn.Module):
 
 
 def test_positional_ids_are_counted_not_the_image_before_them():
-    """final_boss_report T2-C3: the first positional tensor was the image (12 "tokens", not 80)."""
+    """The first positional tensor was the image (12 "tokens", not 80)."""
     torch.manual_seed(0)
     att = Attach(device="cpu", warmup=WARMUP, clean_steps=CLEAN, peak_flops=1.0, peak_mem_bw_gb_s=1.0)
     att.install()
@@ -274,7 +274,7 @@ def test_packed_row_padded_at_position_zero():
 def test_trailing_position_zero_padding_does_not_grow_as_micro_batch_shrinks():
     """TRL `padding_free` + `pad_to_multiple_of`: each flattened row is right-padded with position
     0 and no mask. The same 8 documents per step must read 8 at every micro-batch split, or a
-    smaller micro-batch reads as more samples/s (final_boss_report T11-C1)."""
+    smaller micro-batch reads as more samples/s."""
     def row(doc_lens, pad):
         return torch.cat([_pos(*doc_lens), torch.zeros(pad, dtype=torch.long)])[None]
     for n_micro in (1, 2, 4, 8):
@@ -376,7 +376,7 @@ class Params4bit(torch.nn.Parameter):
 
 def test_quantized_base_in_float_storage_is_unknown_too():
     """`bnb_4bit_quant_storage=torch.bfloat16`: the packed weight is a float tensor, so a dtype
-    check alone counts its packed numel (final_boss_report T3-C2)."""
+    check alone counts its packed numel."""
     model = _LoraModel()
     model.packed = Params4bit(torch.zeros(8, dtype=torch.bfloat16), requires_grad=False)
     att = _lora_run(model)
@@ -386,7 +386,7 @@ def test_quantized_base_in_float_storage_is_unknown_too():
 
 def test_image_input_without_a_vision_tower_to_split_means_no_param_count():
     """No module named like a vision tower: the per-patch work can't be split off, so no FLOP
-    count, never 6ND over text tokens (final_boss_report VLM theme: 0.78-1.29x on Qwen2-VL-2B)."""
+    count, never 6ND over text tokens (that read 0.78-1.29x on Qwen2-VL-2B)."""
     att = _packed_run(_steps({"input_ids": torch.randint(0, 50, (4, 8)),
                               "pixel_values": torch.randn(4, 3, 8, 8)}))
     assert att.params_total is None and att.step_tokens == [32] * CLEAN

@@ -119,7 +119,7 @@ SMOLLM2_360M = dict(model_type="llama", architectures=["LlamaForCausalLM"],
 
 def test_lora_params_match_the_counts_peft_reported():
     """r=16 on all 7 projections: exactly what peft's optimizer held in BYO experiment 7 and on
-    the A10 (docs/verification/lora.md)."""
+    the A10."""
     assert lora_params(internals(SMOLLM2_360M), 16, "all-linear") == 8_683_520
     assert lora_params(internals(QWEN25_05B), 16, "all-linear") == 8_798_208
     names = ["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"]

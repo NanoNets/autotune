@@ -38,7 +38,14 @@ uv run pytest
 
 ## Running the agent
 
-Open the repo in [Claude Code](https://claude.com/claude-code). The bundled skill, [`.claude/skills/run-loop/SKILL.md`](.claude/skills/run-loop/SKILL.md), takes the whole run in one command.
+Activate the environment first, then open the repo in [Claude Code](https://claude.com/claude-code). The agent calls `python` directly, so it must resolve to the project's `.venv`:
+
+```bash
+source .venv/bin/activate
+claude
+```
+
+The bundled skill, [`.claude/skills/run-loop/SKILL.md`](.claude/skills/run-loop/SKILL.md), takes the whole run in one command.
 
 <h3 align="center">Two User Workflows</h3>
 

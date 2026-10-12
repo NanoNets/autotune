@@ -47,5 +47,11 @@ runs/*
 # throwaway/dev scripts (live GPU validation harnesses, one-off probes)
 tmp_scripts/
 
+# developer notes (open design questions); not part of the shipped docs
+design_improvements.md
+
+# verification paper trails (private; not part of the shipped docs)
+docs/verification/
+
 # Example dataset files written by examples/byo_script/make_data.py / prep.py on the box
 examples/byo_script/data/

@@ -6,7 +6,7 @@ Language Modeling with Pathways", arXiv:2204.02311, Appendix B): per token 6N fo
 term is `training_flops` / `vlm_training_flops`; the attention term is `attention_flops`, over the
 (query, key) pairs a step attends over (`profiler/attention.py`). Leaving attention out understates
 the work by a share that grows with sequence length: 6ND alone was 0.66-0.92x of the true FLOPs at
-2,048 tokens (final_boss_report T3-C1), and ~22% of a Qwen2-VL step at 672x672.
+2,048 tokens, and ~22% of a Qwen2-VL step at 672x672.
 
 With frozen weights (LoRA / PEFT) the backward's 4ND splits: gradients back through the
 activations (2ND) still flow through every weight, but weight gradients (2ND) exist only for the

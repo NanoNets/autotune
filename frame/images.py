@@ -2,8 +2,7 @@
 
 `max_len` bounds the text; for a VLM the vision tower's memory is set by the images too, and once the
 vision tower trains a text-only ceiling reads 2x too high (Qwen2-VL-2B on an A10: text rows fit
-micro-batch 2, rows with one 672x672 image fit only 1; `docs/verification/final_boss_report.md`,
-VLM theme). So the human declares the largest image the job sees, `--max-image-size WxH`, the way
+micro-batch 2, rows with one 672x672 image fit only 1). So the human declares the largest image the job sees, `--max-image-size WxH`, the way
 they declare `max_len`, and the ceiling rows carry that many images at that size.
 
 - **Size** is W x H in pixels, read from the training code's image cap (never chosen here). Frame

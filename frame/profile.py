@@ -213,7 +213,7 @@ def build(model, dataset, hardware, versions, dtype=None, optimizer="adamw",
             f"{images['max_images']} image(s) of {images['max_image_size']} make "
             f"{images['image_tokens_per_row']} image tokens, more than max_len {max_len}: no text "
             f"fits; the declared image size / count and max_len disagree")
-    if model.get("modality") == "multimodal":           # final_boss_report VLM theme
+    if model.get("modality") == "multimodal":
         counted = (f"params include the vision tower ({model['vision_params'] / 1e6:.0f}M), but "
                    f"flops_per_token charges it per text token, while it runs per image: the FLOP "
                    f"estimate is approximate" if model.get("vision_params") else

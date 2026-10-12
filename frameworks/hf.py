@@ -83,7 +83,7 @@ def knobs():
     change speed, not the learned model). Deliberately NOT here: `dtype` (precision) and `seq_len`
     (max_length) are run PARAMETERS the human sets, off-limits to search; `grad_accum` isn't free
     either — it's derived to hold `effective_batch`. Availability (e.g. flash-attn) is gated by
-    frame's `versions()`. Parallelism / offload / packing / fused kernels: deferred (see README)."""
+    frame's `versions()`. Parallelism / offload: deferred; packing is off-limits (see README)."""
     return {
         "micro_batch":            {"type": "int",    "min": 1},   # grad_accum = effective_batch // micro_batch
         "gradient_checkpointing": {"type": "bool"},

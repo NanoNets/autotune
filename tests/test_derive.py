@@ -135,7 +135,7 @@ def test_derived_spans_are_marked():
 
 def test_an_annotation_open_past_step_end_is_clipped_there():
     """The window closes inside torch's Optimizer.step label: the sync and profiler teardown after
-    `step` must not count as optimizer time (final_boss_report T4-C1)."""
+    `step` must not count as optimizer time."""
     t = trace(n_micro=1)                                             # step 0-600, optimizer 450-550
     opt = next(e for e in t["traceEvents"] if e["name"].startswith("Optimizer."))
     opt["dur"] = 5000                                                # left open past step's end

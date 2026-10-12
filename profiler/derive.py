@@ -83,7 +83,7 @@ def _clip_to_step(ev, step):
     """End every annotation that starts inside `step` but runs past it at `step`'s end; return how
     many. The profiled window closes inside torch's `Optimizer.step#…` label (the step boundary is
     its post-hook), and the sync and profiler teardown that follow `step` would otherwise count as
-    that phase's host time (final_boss_report T4-C1: 78-143 ms vs ~6-9 ms on an A10)."""
+    that phase's host time (78-143 ms vs ~6-9 ms on an A10)."""
     s0, s1, n = step["ts"], _end(step), 0
     for e in ev:
         if (e is not step and e.get("cat") == "user_annotation" and "dur" in e

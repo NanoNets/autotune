@@ -2,8 +2,7 @@
 
 Example **user training scripts** for bring-your-own-script mode (`program.md`, "Script
 mode"). Each one is standalone, with no autotune imports, and shows one way a script
-can expose (or fail to expose) its settings. They're also the fixtures for the workflow
-verification in `docs/verification/byo_script.md`.
+can expose (or fail to expose) its settings.
 
 They train `HuggingFaceTB/SmolLM2-360M`. The scripts in the first table train by default on seeded
 random token ids (`_data.py`), so they need no dataset download; the ones with a data setting can

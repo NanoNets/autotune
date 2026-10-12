@@ -291,12 +291,11 @@ the **attached capture** instead, started by `python -m profiler.launch -- train
     ending a row with no `attention_mask` (read as padding); left
     padding with broadcast `[1, S]` positions `0…S-1` and an `attention_mask` (each padded row's
     position 0 is a masked pad, so that row counts 0; left padding is for generation, outside
-    SFT / PEFT; developer notes: `design_improvements.md` §13).
+    SFT / PEFT).
   - **Overestimates:** documents split across rows (counted once per row); context / sequence
     parallel shards that start mid-document; unmasked padding at position 0 *between* documents
     (one extra per pad run).
 
-Open work is tracked in the developer notes, `design_improvements.md` (§8–§15).
 
 ## Adapters
 
