@@ -6,7 +6,7 @@ Each run gets a folder, `runs/<run_name>/`. Its contents are ignored by git; thi
 | File | Written by | What |
 |---|---|---|
 | `results.tsv` | the agent (Step 3 on) | one row per experiment — the throughput ledger, below |
-| `research.md` | the agent | notes, websearch findings, the best-so-far, convergence calls |
+| `research.md` | the agent | the run's notebook: Working beliefs, notes, websearch findings, the best-so-far, convergence calls |
 | `profile.json` | the agent saves `python -m frame`'s printed Profile JSON (Step 2); `python -m frame.ceiling` updates its `ceiling` | read by `frame.ceiling`, `progress.py`, `/run-loop resume` |
 | `sample.jsonl` | `python -m frame --sample-out` | the probe sample every probe passes as `sample_file` |
 | `candidate.json` | the agent | the candidate probe config `frame.ceiling` checks |
@@ -40,7 +40,9 @@ experiment_number	token/s	samples/s	memory	status	hypothesis	conclusion
   reads two words in it: `CONTROL` (a repeat / isolation probe, drawn hollow) and `UNRELIABLE` (a
   reading the run rejected; it can't set a record).
 
-This file is the running record every hypothesis after the baseline gets built on — treat it as the
+Also create `runs/<run_name>/research.md` with an empty `## Working beliefs` section (below).
+
+`results.tsv` is the running record every hypothesis after the baseline gets built on — treat it as the
 single source of truth for "what have we already tried." Every experiment (starting with the
 as-is baseline, logged first, before any change is proposed) gets a row.
 
@@ -83,16 +85,35 @@ record. A row can't set a record (it's drawn, off the staircase) when its `statu
 corrected). A second panel tracks peak memory against the card limit on the same x-axis (its own panel,
 never a second y-scale).
 
-## `research.md` — the run's websearch landing zone
+## `research.md` — the run's notebook
 
-Anything found via websearch during this run (model card details, papers, tuning guides — see
-`frame/README.md` and `program.md` Step 4) gets written here first, as it's found. No header, no
-fixed shape — free-form notes, created on first write.
+The agent's notes for this run: Frame findings, anything found via websearch (model card details,
+papers, tuning guides — see `frame/README.md` and `program.md` Step 4), the best-so-far, and
+convergence calls. Free-form, except for one section.
+
+### `## Working beliefs`
+
+What this run has learned about Beliefs, before any of it reaches `beliefs/`. Created empty at
+Step 3. After each probe, Learn (`loop/loop.md`) adds or updates a line only when the result says
+something about a belief — so it holds what this run *changed*, not a copy of `beliefs/`. An illustrative example:
+
+```
+## Working beliefs
+- padded-mask-costs-flash-attention: RE-CONFIRMED · exp 4 vs 3 · same-rows
+- fused-adamw-slower-on-bf16-params: CONTRADICTED · exp 9 vs 8 · same-rows (H100, torch 2.8)
+- [new] drop_pad_mask +7% at mb4 · exp 12 vs 11 · same-rows
+```
+
+Each line: the belief's name (its file name in `beliefs/`) or `[new]` · re-confirmed / contradicted
+/ new · the experiment numbers compared · the evidence basis (`beliefs/README.md`). Read before
+every hypothesis (`program.md` Step 4), alongside `beliefs/` and `results.tsv`. At Step 5 it is the
+checklist for curating `beliefs/`: each line is promoted only if its basis passes the gate.
 
 This file is *not* durable memory on its own. At Step 5's end-of-run review, it gets read
 alongside `results.tsv` and anything net-new (not already covered by an existing `experience/`
 entry or belief) gets promoted into the run's `experience/` entry — see `experience/README.md`. A finding that just
 re-confirms something already known stays here; it doesn't get re-added upstream. This keeps
 `experience/` a signal-dense run log instead of a transcript of every search made along the way.
-(It is append-only — never edited once written. Curation happens in `beliefs/`, where beliefs are
-amended and superseded; see `beliefs/README.md`.)
+(Lines are updated as the run goes — Working beliefs and the best-so-far change with each probe.
+Durable curation happens in `beliefs/` at Step 5, where beliefs are re-confirmed, narrowed and split,
+superseded or deleted, never overwritten; see `beliefs/README.md`.)

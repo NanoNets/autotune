@@ -528,3 +528,55 @@ the runner reporting both counts (`params` as N_total, plus a trainable count pa
 
 **What would settle it:** a runner LoRA probe and a script LoRA probe of the same config agree on
 step time within the known ~0.25% script offset, and on MFU.
+
+## 17. Best / Lean / Diverse: update rules
+
+**Status:** open. Raised 2026-10-12 (PR #30 review).
+
+**The claim:** `loop/loop.md` asks the agent to keep three configs in view, not just the fastest:
+**best** (throughput), **lean** (memory), **diverse** (a different strategy), so the search doesn't
+tunnel on one line of attack and complementary winners can be crossed over. Only Best has an
+update rule, and only in code: `runs/progress.py` `mark_records` makes any `ok`, non-`UNRELIABLE`,
+non-superseded row with strictly higher samples/s the new best. Lean and Diverse are names with no
+rule, so "update the best, lean and diverse configs" in Learn can't be checked.
+
+**Proposed rules:**
+- **Best:** highest samples/s among `ok`, reliable rows, compared same-rows (step time for a script
+  that packs, `loop/throughput.md`), as `progress.py` does.
+- **Lean:** least peak memory among configs within X% of Best's samples/s (95% as a starting
+  point). Re-checked whenever Best moves: the old Lean can fall outside X%.
+- **Diverse:** highest samples/s among configs whose gain over the baseline comes from a different
+  lever family (`loop/throughput.md` "Canonical levers") than Best's.
+- Each slot may be empty; one config may hold two roles; every line cites its experiment number.
+
+**Why it might be wrong:** X is a guess (too tight and Lean is always Best; too loose and Lean is a
+config nobody would run). "The lever family a gain comes from" is a judgment when a config moves
+several knobs. And Best has no noise margin: a win inside launch-to-launch noise replaces it,
+which depends on §8.
+
+**What would settle it:** replay the A10 runs' `results.tsv` under these rules and check that
+Lean and Diverse name configs a human would pick, and that a later hypothesis crossing Diverse
+into Best would have been proposed from them.
+
+## 18. Persist each probe's Observation
+
+**Status:** open. Raised 2026-10-12 (PR #30 review).
+
+**The claim:** the full Observation (57 fields: phase times, kernels, GPU-active / idle, MFU,
+provenance) is read at Observe and then dropped. `results.tsv` keeps four fields (`token/s`,
+`samples/s`, `memory`, `status`); anything else survives only if the agent wrote it into
+`research.md`. In practice the notes carried the findings that drove the next hypotheses
+(`a10_qwen2.5-1.5b_cosmopedia`: phase times for exps 2/4/9-10, kernel provenance for 4-7,
+`gap_count` and idle for 9-10), but a probe the agent didn't write up (exps 3, 8, 11, 14 there)
+can't be re-examined, and after compaction or `/run-loop resume` even the latest one's detail is
+gone.
+
+**Proposed:** write each probe's Observation to `runs/<run>/obs/<experiment_number>.json` next to
+its `results.tsv` row, and let a hypothesis that compares against an earlier probe open it.
+
+**Why it might be wrong:** if the agent's notes always capture what matters, this is storage
+nobody reads. Re-reading 57 fields per earlier probe could also cost more context than the
+summary it replaces.
+
+**What would settle it:** count, over a few runs, the hypotheses that needed detail from a probe
+other than the latest, and whether `research.md` had it.

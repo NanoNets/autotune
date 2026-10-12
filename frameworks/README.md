@@ -42,13 +42,16 @@ frame's `versions()`.
 |---|---|
 | `micro_batch` | per-step batch; more = better GPU fill, more memory. `grad_accum` is **derived** (`effective_batch // micro_batch`) so the effective batch is held fixed |
 | `gradient_checkpointing` | recompute activations in bwd — less memory, more compute |
+| `recompute_layers` | with `gradient_checkpointing`: checkpoint only the first `N` decoder layers (`None` = all). Fewer = less re-run forward for more activation memory. Same math either way |
 | `attn_implementation` | `eager` / `sdpa` / `flash_attention_2` |
 | `torch_compile` | `False` / `"default"` / `"reduce-overhead"` / `"max-autotune"` / `"max-autotune-no-cudagraphs"`. **Both cudagraph-enabling modes are broken with `grad_accum`** — the backward's saved activations live in the graph pool and the next micro-batch overwrites them (`cudagraph_mark_step_begin()` does not fix it) |
 | `tf32` | TF32 matmuls on Ampere+ — faster matmul, model unchanged. **Inert on a pure-bf16 config**: no fp32 matmul exists to accelerate |
 | `padding` | `"max_length"` (every batch `seq_len` wide) or `"longest"` (pad to the batch's own longest, rounded to `pad_multiple`). Identical arithmetic — pad is masked in attention and `-100` in labels — so it only changes how much compute is spent. `seq_len` still truncates, so `max_len` is respected |
 | `length_grouped` | batch similar-length rows together so pad-to-longest wastes less. Only meaningful with `padding="longest"`, and it is what makes a **larger** `micro_batch` pay there |
 | `fused_optimizer` | `AdamW(fused=True)`: one fused kernel instead of the foreach chain. Same AdamW algorithm, so a kernel swap. CUDA + float params only |
+| `compile_optimizer` | `torch.compile` the optimizer step: inductor fuses the foreach AdamW chain into a few kernels. Same AdamW algorithm and state, so a kernel swap. Pays when the optimizer is a large share of the step (it scales per parameter, not with batch) |
 | `chunked_ce` | `0` = off (the model computes its own loss); `N > 0` = cross-entropy in `N` checkpointed chunks over the tokens, so the `[chunk, vocab]` logits are freed after the forward. Same loss; pays when vocab × seq makes the logits dominate memory |
+| `drop_pad_mask` | don't pass `attention_mask` for **right**-padded rows. A causal LM never lets a real token attend to the trailing pad, and pad has label `-100`, so loss and grads are the same. Without a mask HF SDPA keeps flash + native GQA (a padded mask forces repeat_kv + the mem-efficient kernel), and compile can't drop the mask on its own |
 
 **Not knobs** (run *parameters*, set by the human, off-limits to search): `dtype` (precision) and
 `seq_len` (max_length) change the model, so they're config inputs, not searchable. `effective_batch`

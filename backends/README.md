@@ -81,8 +81,9 @@ print(obs["summary"])
 
 Everything a probe needs, in one dict: **run params** (`framework`, `model`, `dataset`, `name`,
 `dtype`, `seq_len`, `effective_batch`, `sample_file`, `gpu`, `device`), the **knob assignment** for
-this probe (`micro_batch`, `gradient_checkpointing`, `attn_implementation`, `torch_compile`, `tf32`,
-`fused_optimizer`, `padding`, `length_grouped`, `chunked_ce`; see `frameworks/README.md`), and the
+this probe (`micro_batch`, `gradient_checkpointing`, `recompute_layers`, `attn_implementation`,
+`torch_compile`, `tf32`, `fused_optimizer`, `compile_optimizer`, `padding`, `length_grouped`,
+`chunked_ce`, `drop_pad_mask`; see `frameworks/README.md`), and the
 **frozen ceilings** the loop measured once at Frame (`peak_flops`, `peak_mem_bw_gb_s`) so every probe
 is scored against the same denominator (not a per-probe re-measure).
 

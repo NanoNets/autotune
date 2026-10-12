@@ -85,7 +85,8 @@ user's script unchanged instead of a `frameworks/` runner (`backends/README.md`,
 
 ### Step 3 — Initialize run tracking, then confirm → `runs/README.md`
 
-- Create `runs/<run_name>/results.tsv` (the directory already exists from Step 1).
+- Create `runs/<run_name>/results.tsv` (the directory already exists from Step 1), and
+  `runs/<run_name>/research.md` with an empty `## Working beliefs` section (`runs/README.md`).
 - Summarize environment, model, dataset, `effective_batch`, `max_len` + the measured ceiling,
   every Profile `note`, and the run name back to the user.
 - IF the ceiling says `micro_batch=1` OOMs → say so here: it's a memory regime, and Step 4 starts
@@ -104,7 +105,9 @@ anything but the shipped defaults, "faster by X%" means nothing.
   hardware and banks the biggest known jump before searching. IF it fails to reproduce → that
   contradiction outranks any hypothesis you had queued; chase it.
 - **ALWAYS**, before proposing a hypothesis: read `beliefs/index.md` + the belief files whose
-  context matches (`beliefs/README.md`), and this run's full `results.tsv` (`runs/README.md`).
+  context matches (`beliefs/README.md`), this run's full `results.tsv`, and the `## Working beliefs`
+  section of this run's `research.md` (`runs/README.md`): what this run has already re-confirmed,
+  contradicted or found new.
   A probe costs ~5 min of real GPU time — think, don't guess.
 - `experience/` is read ONCE, at Frame, through `experience/index.md`: open only the entries whose
   `Context:` line matches. "Has this configuration been run before" is a framing question, not a
@@ -146,8 +149,9 @@ anything but the shipped defaults, "faster by X%" means nothing.
 - Write a dated entry to `experience/<run_name>.md` (findings, surprises, open hypotheses for next
   time) and append its line, `Context:` verbatim, to `experience/index.md` (`experience/README.md`).
 - Promote only what's **net-new** — re-confirmed facts stay in `research.md`.
-- **ALWAYS curate the existing beliefs, don't just write new ones** (`beliefs/README.md`). Re-read
-  every belief whose context matches this run: re-confirmed → bump its evidence; contradicted →
+- **ALWAYS curate the existing beliefs, don't just write new ones** (`beliefs/README.md`). Work
+  through `research.md`'s `## Working beliefs` line by line, gating each on its evidence basis, then
+  re-read every other belief whose context matches this run: re-confirmed → bump its evidence; contradicted →
   narrow its context and split, never overwrite; proven wrong → delete it and say so. Skipping this
   is how `probes: 1` stays `probes: 1` forever and beliefs stop being opinions worth holding.
 

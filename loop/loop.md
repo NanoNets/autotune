@@ -112,7 +112,7 @@ Read the `Observation` — raw and rich. Interpret it yourself; nothing is pre-l
 Fold the result into the run's records. Beliefs are curated at the end of the run, not here.
 
 - **Calibrate** — compare the result with the outcome you predicted; the miss is what to learn from.
-- **Record** — the `conclusion` in `results.tsv` (kept or dropped, and why), and in `research.md` anything the result says about a Belief, for the end-of-run curation (`program.md` Step 5, `beliefs/README.md`: re-confirm, narrow and split on contradiction, mark superseded — never overwrite).
+- **Record** — the `conclusion` in `results.tsv` (kept or dropped, and why). IF the result says anything about a Belief, add or update its line in `research.md`'s `## Working beliefs`: the belief's name or `[new]` · re-confirmed / contradicted / new · the experiment numbers compared · the evidence basis (`runs/README.md`). The next hypothesis reads it; the end-of-run curation promotes from it (`program.md` Step 5, `beliefs/README.md`: re-confirm, narrow and split on contradiction, mark superseded — never overwrite).
 - **Update the best-so-far** — the best, lean and diverse configs in `research.md`.
 - **Judge convergence** — when the best-so-far stops moving on samples/s, say so in `research.md` and the final report, then dig deeper rather than stop: the loop runs until the human interrupts it. MFU says how much room was left; it is not a convergence rule. No fixed plateau rule.
 
