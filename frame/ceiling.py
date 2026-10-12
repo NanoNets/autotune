@@ -8,8 +8,11 @@ run. A ceiling run is a set of short **trials**, never `results.tsv` rows.
   profiler, then `ok` (fits) / `oom` (doesn't) / `error` (a crash: never a memory answer). Step 1
   alone isn't enough: AdamW allocates its state during step 1's `opt.step()`, so the steady-state
   peak first appears at step 2. The third step covers CUDA-graph pools and early allocator growth.
-  Each trial runs at accumulation 1 (`effective_batch = micro_batch`): accumulation doesn't change
-  the peak, only the time.
+  Each trial runs at accumulation 2 (`effective_batch = 2 * micro_batch`), or 1 when micro_batch is
+  the whole effective batch. Accumulation moves the peak: at accumulation 1, `zero_grad(set_to_none)`
+  frees the grads before every forward, but from the second micro-step on the full grad buffer is
+  live through the forward and backward. Qwen2.5-1.5B at 2048, mb1: peak 17.80 GB at accumulation 1,
+  20.60 at 2 (the grads are 2.88 GB). Every accumulation above 2 has the same steady state as 2.
 - **Only divisors of `effective_batch` are tried** (`search_divisors`): micro_batch must divide it,
   so a ceiling of 11 against 16 is a number no config can use. At most 5 trials for 16.
 - **The ceiling is NOT a run constant.** Every memory knob moves it, so the record stamps the
@@ -33,6 +36,12 @@ import os
 
 TRIAL_STEPS = 3
 
+
+def trial_effective_batch(n, effective_batch=None):
+    """The effective batch a trial at micro-batch `n` runs at: accumulation 2 when the run
+    accumulates (`n` < its effective batch), else 1. Unknown run batch -> accumulation 1."""
+    return 2 * n if effective_batch and n < effective_batch else n
+
 # The knobs that move the ceiling. Every one present in the config or the framework's defaults is
 # stamped on the record, defaults included, so a later config can be compared against it and the
 # ceiling retired when one of them has changed.
@@ -46,10 +55,13 @@ TRIAL_STEPS = 3
 _MEMORY_KNOBS = (
     "dtype", "optimizer", "shard_degree", "offload", "packing",
     "recompute", "gradient_checkpointing",              # canonical, hf
+    "recompute_layers",                                 # hf: partial recompute
     "attn_kernel", "attn_implementation",               # canonical, hf
     "compile", "torch_compile",                         # canonical, hf: compile fuses the CE and
                                                         #   moved a measured ceiling 2 -> 4
     "chunked_ce",                                       # hf: frees the [tokens, vocab] logits
+    "compile_optimizer",                                # hf: changes the optimizer's temporaries
+    "drop_pad_mask",                                    # hf: no mask -> flash, no repeat_kv copies
 )
 _ALLOC_ENV = "PYTORCH_CUDA_ALLOC_CONF"                  # moves fragmentation, so the ceiling
 
@@ -213,11 +225,14 @@ def _first_line(e):
     return msg.splitlines()[0] if msg else type(e).__name__
 
 
-def runner_trial(runner, config, seq_len, vocab=None, steps=TRIAL_STEPS, seed=0):
-    """`trial(n)` on our runner, in this process: worst-case synthetic batches at `seq_len`."""
+def runner_trial(runner, config, seq_len, vocab=None, steps=TRIAL_STEPS, seed=0,
+                 effective_batch=None):
+    """`trial(n)` on our runner, in this process: worst-case synthetic batches at `seq_len`, at the
+    accumulation `trial_effective_batch` gives for the run's `effective_batch`."""
     def trial(n):
         import torch
-        cfg = {**config, "data": "synthetic", "micro_batch": n, "effective_batch": n,
+        cfg = {**config, "data": "synthetic", "micro_batch": n,
+               "effective_batch": trial_effective_batch(n, effective_batch),
                "max_len": seq_len, "vocab": vocab, "seed": seed}
         device = cfg.get("device", "cpu")
         if device == "cuda":
@@ -245,7 +260,8 @@ def find_ceiling(runner, config, seq_len, vocab, effective_batch, seed=0, steps=
     """The ceiling on our runner, in-process (Frame Step 2). `config`: the runner's base config
     (e.g. `model` for `frameworks.hf`); `data`, `micro_batch`, `effective_batch`, `max_len`,
     `vocab` and `seed` are set per trial. `defaults`: the framework's, for the stamp."""
-    return measure(runner_trial(runner, config, seq_len, vocab, steps, seed), effective_batch,
+    return measure(runner_trial(runner, config, seq_len, vocab, steps, seed, effective_batch),
+                   effective_batch,
                    seq_len, stamp(config, defaults if defaults is not None else {}),
                    previous=previous, on_trial=on_trial, seed=seed, steps=steps)
 
@@ -258,6 +274,8 @@ def _render(config, n, steps):
     `script_files`, so the backend ships it."""
     cfg = {**config, "probe_kind": "ceiling_trial", "micro_batch": n, "effective_batch": n,
            "trial_steps": steps}
+    if not config.get("script"):                       # a script's accumulation is its own setting
+        cfg["effective_batch"] = trial_effective_batch(n, config.get("effective_batch"))
     if config.get("script"):
         cfg["script_args"] = [str(a).replace("{micro_batch}", str(n))
                               for a in config.get("script_args") or []]

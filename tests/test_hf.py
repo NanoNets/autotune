@@ -17,8 +17,8 @@ BASE = {"model": "Qwen/Qwen2.5-0.5B", "dataset": "Salesforce/wikitext"}
 def test_knobs_are_safe_levers_only():
     k = knobs()
     assert set(k) == {"micro_batch", "gradient_checkpointing",
-                      "attn_implementation", "torch_compile", "tf32", "fused_optimizer",
-                      "padding", "length_grouped", "chunked_ce"}
+                      "attn_implementation", "torch_compile", "tf32", "fused_optimizer", "compile_optimizer", "recompute_layers",
+                      "padding", "length_grouped", "chunked_ce", "drop_pad_mask"}
     # dtype (precision) and seq_len (max_length) are off-limits run params, NOT searchable knobs;
     # grad_accum is derived, not free.
     assert "dtype" not in k and "seq_len" not in k and "grad_accum" not in k

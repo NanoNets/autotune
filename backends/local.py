@@ -160,13 +160,16 @@ def ceiling_trial(config):
         from frame.ceiling import runner_trial
         runner = _make_runner(config.get("framework", "torch"))
         return runner_trial(runner, config, config["max_len"], config.get("vocab"), steps,
-                            config.get("seed", 0))(config["micro_batch"])
+                            config.get("seed", 0),
+                            effective_batch=config.get("effective_batch"))(config["micro_batch"])
     for f in config.get("script_files") or []:
         _script_path(f)
     out = os.path.join(tempfile.mkdtemp(prefix="autotune_trial_"), "trial.json")
     argv = [config.get("python") or sys.executable, "-m", "profiler.launch", "--out", out,
             "--device", config["device"], "--memory-only", "--steps", str(steps),
-            "--expect-shape", f"{config['micro_batch']},{config['max_len']}",
+            # a padding-free script flattens its micro-batch into one row: [1, micro_batch * max_len]
+            "--expect-shape", (f"1,{config['micro_batch'] * config['max_len']}" if config.get("ceiling_expect_flat")
+                               else f"{config['micro_batch']},{config['max_len']}"),
             *(["--expect-image-tokens", str(config["expect_image_tokens"]),
                "--image-token-id", str(config["image_token_id"])]
               if config.get("expect_image_tokens") and config.get("image_token_id") is not None else []),

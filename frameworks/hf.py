@@ -35,6 +35,14 @@ _DEFAULTS = {
                                        # "fused optimizer" under Kernels). Matters most when the
                                        # optimizer is a large share of the step: its cost is per
                                        # PARAMETER, so it does not shrink with the batch.
+    "recompute_layers": None,          # with gradient_checkpointing: how many decoder layers (the
+                                       # first N) to checkpoint. None = all. Fewer = less re-run
+                                       # forward for more activation memory. Same math either way.
+    "compile_optimizer": False,        # torch.compile the optimizer step: inductor fuses the foreach
+                                       # AdamW chain (~10 elementwise passes over every param) into a
+                                       # few kernels. SAME AdamW algorithm and state -- a kernel swap,
+                                       # like fused_optimizer. Matters when the optimizer is a large
+                                       # share of the step (per PARAMETER, doesn't shrink with batch).
     "chunked_ce": 0,                   # 0 = off (the model computes its own loss). N > 0 = compute
                                        # cross-entropy in N chunks over the token axis, each chunk
                                        # checkpointed so its [chunk, vocab] logits are freed after
@@ -44,6 +52,13 @@ _DEFAULTS = {
                                        # model change (loop/throughput.md lists "chunked
                                        # cross-entropy" under Kernels). Pays only when
                                        # vocab x seq is large enough for the logits to dominate.
+    "drop_pad_mask": False,            # don't pass attention_mask for RIGHT-padded rows. A causal LM
+                                       # never lets a real token attend past itself, so it never sees
+                                       # the trailing pad; pad positions have label -100, so nothing
+                                       # flows back from them; positions don't come from the mask.
+                                       # SAME loss and grads. Without a mask HF SDPA keeps flash and
+                                       # native GQA (a padded mask forces repeat_kv + mem-efficient),
+                                       # and compile can't drop an all-ones mask on its own.
     "padding": "max_length",           # "max_length" (every batch seq_len) | "longest" (pad to the
                                        # batch's own longest, rounded up to pad_multiple)
     "pad_multiple": 64,                # bucket dynamic lengths so torch.compile sees few shapes
@@ -78,9 +93,12 @@ def knobs():
                                                "max-autotune", "max-autotune-no-cudagraphs"]},
         "tf32":                   {"type": "bool"},
         "fused_optimizer":        {"type": "bool"},   # AdamW(fused=True); CUDA + float params only
+        "compile_optimizer":      {"type": "bool"},   # torch.compile(opt.step)
+        "recompute_layers":       {"type": "int",    "min": 0},   # with gradient_checkpointing; None = all
         "padding":                {"type": "choice", "options": ["max_length", "longest"]},
         "length_grouped":         {"type": "bool"},   # pairs with padding="longest"
         "chunked_ce":             {"type": "int",    "min": 0},   # 0 = off; N = chunks
+        "drop_pad_mask":          {"type": "bool"},   # right padding only; same math
     }
 
 
@@ -240,15 +258,29 @@ class HFRunner:
         self.attention_parts, self.attention_skipped = spec(self.model.config)   # over what
         if self.cfg["gradient_checkpointing"]:
             self.model.gradient_checkpointing_enable()
+            n = self.cfg["recompute_layers"]
+            if n is not None:                           # partial: un-checkpoint all but the first n
+                from transformers.modeling_layers import GradientCheckpointingLayer
+                layers = [m for m in self.model.modules() if isinstance(m, GradientCheckpointingLayer)]
+                for m in layers[n:]:
+                    m.gradient_checkpointing = False
         self.model.train()
         compile_mode = self.cfg["torch_compile"]
         if compile_mode:                                # True -> inductor default; str -> that mode
-            self.model = torch.compile(
-                self.model, **({} if compile_mode is True else {"mode": compile_mode}))
+            kw = {} if compile_mode is True else {"mode": compile_mode}
+            if self.cfg["chunked_ce"]:
+                # The chunked loss calls the backbone (self.model.model) directly, which would bypass a
+                # compiled wrapper and leave compile a silent no-op. Compile the backbone instead.
+                self.model.model = torch.compile(self.model.model, **kw)
+            else:
+                self.model = torch.compile(self.model, **kw)
 
         self.opt = torch.optim.AdamW(
             self.model.parameters(), lr=self.cfg["lr"],
             **({"fused": True} if self.cfg["fused_optimizer"] else {}))
+        self._opt_step = self.opt.step
+        if self.cfg["compile_optimizer"]:
+            self._opt_step = torch.compile(self.opt.step, fullgraph=False)
         self._reference = self._population = self.steps_per_pass = None
         if self.cfg.get("data") == "synthetic":
             self._loader = self._it = None
@@ -440,8 +472,13 @@ class HFRunner:
                     self._pairs[p["part"]] = (self._pairs.get(p["part"], 0)
                                               + b * s * min(s, p["window"] or s))
                 self._tokens_total = getattr(self, "_tokens_total", 0) + input_ids.numel()
+            if c["drop_pad_mask"]:
+                # Only right padding makes the mask redundant: every row must be ones, then zeros.
+                if bool((attention[:, 1:] > attention[:, :-1]).any()):
+                    raise ValueError("drop_pad_mask needs right-padded rows; this batch is not")
+                attention = None
             input_ids = input_ids.to(self.device)
-            attention = attention.to(self.device)
+            attention = attention.to(self.device) if attention is not None else None
             labels = labels.to(self.device)
             with self._rf("forward"):
                 if c["chunked_ce"]:
@@ -453,7 +490,7 @@ class HFRunner:
             with self._rf("backward"):
                 loss.backward()
         with self._rf("optimizer"):
-            self.opt.step()
+            self._opt_step()
 
     def _chunked_loss(self, input_ids, attention, labels, chunks):
         """Causal-LM cross-entropy computed in `chunks` slices of the token axis.

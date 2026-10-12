@@ -108,8 +108,12 @@ mask all ones, ids drawn uniformly from the vocab and seeded (`frame/synthetic.p
 memory is a function of shape, not content — which is why this is sound, and why it needs no
 dataset, no tokenizer and no dataloader.
 
-**A trial is memory-only:** 3 optimizer steps at one micro-batch, accumulation 1, no timing, no
-profiler, then `ok` / `oom` / `error`. Step 1 alone isn't the answer (AdamW allocates its state
+**A trial is memory-only:** 3 optimizer steps at one micro-batch, accumulation 2 (1 when the
+micro-batch is the whole effective batch), no timing, no profiler, then `ok` / `oom` / `error`.
+Accumulation moves the peak: at accumulation 1 the grads are freed before every forward, but from
+the second micro-step on the full grad buffer is live through it. Qwen2.5-1.5B at 2048, mb1: 17.80
+GB at accumulation 1, 20.60 at 2, and the accumulation-16 probe OOMed. A user's script runs its
+trial at its own accumulation setting. Step 1 alone isn't the answer (AdamW allocates its state
 during step 1's `opt.step()`, so the steady-state peak first appears at step 2); step 3 covers
 CUDA-graph pools and early allocator growth. **Only divisors of `effective_batch` are tried**,
 ascending, stopping at the first OOM: micro_batch must divide it, so at most 5 trials for 16, and
@@ -237,6 +241,9 @@ A user's script has no `data="synthetic"` switch, so the worst case reaches it a
    `[micro_batch, max_len]`**. Any other shape fails the trial with the shape it saw: the script
    ignored the rows, dropped / split / packed them, or runs at another sequence length (then
    re-run Frame at the script's real length).
+   A padding-free script (each micro-batch flattened into one row, `position_ids` restarting per row) feeds
+   `[1, micro_batch * max_len]` instead: set `ceiling_expect_flat: true` in the candidate config and the check expects
+   that shape.
 
 ### Vision-language models: the image worst case
 
