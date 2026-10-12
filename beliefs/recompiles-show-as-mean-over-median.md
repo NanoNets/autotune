@@ -2,7 +2,7 @@
 claim: Recompiles inside a compiled probe's clean window show as a mean step time far above the median, with the
   reference-batch GPU step unchanged and a long wall. A mean/median of ~1.1-1.2 under length grouping at accum 1 is just
   length variation. Tell them apart with a multi-pass extended probe: recompiles inflate pass 1 only.
-type: measurement
+type: calibration
 context:
   arch_family: any, under torch.compile with padding="longest"
   hardware_class: any

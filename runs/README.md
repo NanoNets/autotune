@@ -1,8 +1,20 @@
 # runs/ &mdash; per-run outputs *(gitignored)*
 
-Each run gets a folder holding its journal (`journal.jsonl` — every config &rarr; observation), its
-research notes (`research.md`), and the final best config. The contents are ignored by git; this
-README is the only tracked file here.
+Each run gets a folder, `runs/<run_name>/`. Its contents are ignored by git; this README and
+`progress.py` are the only tracked files here. What a run's folder holds:
+
+| File | Written by | What |
+|---|---|---|
+| `results.tsv` | the agent (Step 3 on) | one row per experiment — the throughput ledger, below |
+| `research.md` | the agent | the run's notebook: Working beliefs, notes, websearch findings, the best-so-far, convergence calls |
+| `profile.json` | the agent saves `python -m frame`'s printed Profile JSON (Step 2); `python -m frame.ceiling` updates its `ceiling` | read by `frame.ceiling`, `progress.py`, `/run-loop resume` |
+| `sample.jsonl` | `python -m frame --sample-out` | the probe sample every probe passes as `sample_file` |
+| `candidate.json` | the agent | the candidate probe config `frame.ceiling` checks |
+| `ceiling.tsv` | `python -m frame.ceiling` | the memory ledger, below |
+| `ceiling_rows.jsonl`, `ceiling_candidate.json` | Frame / the agent (script mode) | a user script's ceiling rows and trial config |
+| `probes/` | the agent (script mode) | per-probe config copies |
+| `progress.png` | `progress.py` (Step 5) | the progress plot |
+| `annotations.json` | the agent, optional | plot captions and `records_from` for `progress.py` |
 
 ---
 
@@ -15,14 +27,22 @@ experiment_number	token/s	samples/s	memory	status	hypothesis	conclusion
 ```
 
 - `samples/s` — **the ranked column**, the Observation's `samples_per_s`. Configs are compared on it and the progress staircase is
-  drawn from it; `token/s` is recorded alongside to tell a real win from a sample artifact, never
-  to rank (`loop/throughput.md`).
+  drawn from it; `token/s` (the Observation's `tokens_per_s`) is recorded alongside to tell a real
+  win from a sample artifact, never to rank (`loop/throughput.md`). Empty for a probe with no
+  reading.
+- `memory` — the Observation's `peak_mem_gb`, a number (a trailing `GB` is allowed).
 - `status` — e.g. `ok` / `oom` / `crash` / `error`, or the Observation's `invalid`. Only an `ok` row
   can be the baseline or the best in `progress.py`.
-- `hypothesis` — what you changed and why you expected it to help, written *before* running.
-- `conclusion` — kept or discarded, and why, written *after* observing the result.
+- `hypothesis` — what you changed and why you expected it to help, written *before* running. Start
+  it with a `[k=v k=v ...]` snapshot of the probe's knobs (e.g. `[micro_batch=8 compile=default]`):
+  `progress.py` labels each staircase step with the knobs that changed from the previous best.
+- `conclusion` — kept or discarded, and why, written *after* observing the result. `progress.py`
+  reads two words in it: `CONTROL` (a repeat / isolation probe, drawn hollow) and `UNRELIABLE` (a
+  reading the run rejected; it can't set a record).
 
-This file is the running record every hypothesis after the baseline gets built on — treat it as the
+Also create `runs/<run_name>/research.md` with an empty `## Working beliefs` section (below).
+
+`results.tsv` is the running record every hypothesis after the baseline gets built on — treat it as the
 single source of truth for "what have we already tried." Every experiment (starting with the
 as-is baseline, logged first, before any change is proposed) gets a row.
 
@@ -34,16 +54,17 @@ loop from re-running something already tried.
 
 Ceiling trials (`frame/README.md`) run on worst-case `max_len` batches (synthetic for our runner,
 Frame's `ceiling_rows.jsonl` for a user's script) and answer *does it fit*, never *how fast*.
-Scoring them as experiments would rank throughput on fake data. They get their own file, which
-`python -m frame.ceiling` appends to:
+Scoring them as experiments would rank throughput on fake data. Frame's initial ceiling (Step 2,
+`python -m frame --ceiling`) is recorded in `profile.json`'s `ceiling`, not here. Every
+`python -m frame.ceiling` run that measures appends its trials to their own file:
 
 ```
 seq_len	micro_batch	status	peak_gb	reserved_gb	config	note
 ```
 
-- One row per trial. `config`: every memory knob it was measured under, defaults included.
+- One row per `frame.ceiling` trial. `config`: every memory knob it was measured under, defaults included.
   `note`: `CEILING` / `oom_at`, and `fresh` or `re-measure from <n>`.
-- **NEVER** put a ceiling trial in `results.tsv`, and never on the frontier.
+- **NEVER** put a ceiling trial in `results.tsv`, and never rank one.
 - Re-run the search when a memory knob moves; append the new trials, don't overwrite the old ones —
   the two ceilings side by side are the evidence for what that knob bought.
 
@@ -64,16 +85,35 @@ record. A row can't set a record (it's drawn, off the staircase) when its `statu
 corrected). A second panel tracks peak memory against the card limit on the same x-axis (its own panel,
 never a second y-scale).
 
-## `research.md` — the run's websearch landing zone
+## `research.md` — the run's notebook
 
-Anything found via websearch during this run (model card details, papers, tuning guides — see
-`frame/README.md` and `program.md` Step 4) gets written here first, as it's found. No header, no
-fixed shape — free-form notes, created on first write.
+The agent's notes for this run: Frame findings, anything found via websearch (model card details,
+papers, tuning guides — see `frame/README.md` and `program.md` Step 4), the best-so-far, and
+convergence calls. Free-form, except for one section.
+
+### `## Working beliefs`
+
+What this run has learned about Beliefs, before any of it reaches `beliefs/`. Created empty at
+Step 3. After each probe, Learn (`loop/loop.md`) adds or updates a line only when the result says
+something about a belief — so it holds what this run *changed*, not a copy of `beliefs/`. An illustrative example:
+
+```
+## Working beliefs
+- padded-mask-costs-flash-attention: RE-CONFIRMED · exp 4 vs 3 · same-rows
+- fused-adamw-slower-on-bf16-params: CONTRADICTED · exp 9 vs 8 · same-rows (H100, torch 2.8)
+- [new] drop_pad_mask +7% at mb4 · exp 12 vs 11 · same-rows
+```
+
+Each line: the belief's name (its file name in `beliefs/`) or `[new]` · re-confirmed / contradicted
+/ new · the experiment numbers compared · the evidence basis (`beliefs/README.md`). Read before
+every hypothesis (`program.md` Step 4), alongside `beliefs/` and `results.tsv`. At Step 5 it is the
+checklist for curating `beliefs/`: each line is promoted only if its basis passes the gate.
 
 This file is *not* durable memory on its own. At Step 5's end-of-run review, it gets read
 alongside `results.tsv` and anything net-new (not already covered by an existing `experience/`
 entry or belief) gets promoted into the run's `experience/` entry — see `experience/README.md`. A finding that just
 re-confirms something already known stays here; it doesn't get re-added upstream. This keeps
 `experience/` a signal-dense run log instead of a transcript of every search made along the way.
-(It is append-only — never edited once written. Curation happens in `beliefs/`, where beliefs are
-amended and superseded; see `beliefs/README.md`.)
+(Lines are updated as the run goes — Working beliefs and the best-so-far change with each probe.
+Durable curation happens in `beliefs/` at Step 5, where beliefs are re-confirmed, narrowed and split,
+superseded or deleted, never overwritten; see `beliefs/README.md`.)

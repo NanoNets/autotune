@@ -1,14 +1,14 @@
 # examples/byo_script/
 
-Example **user training scripts** for bring-your-own-script mode (`README.md`, "Bring your own
-training script"). Each one is standalone, with no autotune imports, and shows one way a script
+Example **user training scripts** for bring-your-own-script mode (`program.md`, "Script
+mode"). Each one is standalone, with no autotune imports, and shows one way a script
 can expose (or fail to expose) its settings. They're also the fixtures for the workflow
 verification in `docs/verification/byo_script.md`.
 
-They train `HuggingFaceTB/SmolLM2-360M`. By default on seeded random token ids (`_data.py`), so
-they need no dataset download; the ones with a data setting can read a JSON-lines file instead,
-which is also how a **ceiling trial** points them at Frame's `ceiling_rows.jsonl`
-(`frame/README.md`, "User scripts").
+They train `HuggingFaceTB/SmolLM2-360M`. The scripts in the first table train by default on seeded
+random token ids (`_data.py`), so they need no dataset download; the ones with a data setting can
+read a JSON-lines file instead, which is also how a **ceiling trial** points them at Frame's
+`ceiling_rows.jsonl` (`frame/README.md`, "User scripts").
 
 | Script | Settings live in | What the agent does (`program.md`, "Script mode") |
 |---|---|---|
@@ -31,8 +31,10 @@ Where the **data source** lives decides how a ceiling trial reaches it:
 | `trainer_pretok.py` (+ `prep.py`) | **pre-tokenized** `.pt`, by flag | the agent runs `prep.py` on the ceiling rows, then `script_args` |
 | `trainer_ignores_data.py` | a flag it ignores (a bug, on purpose) | the trial **fails** on the batch shape: the guard for exactly this |
 
-`make_data.py` writes `data/train.jsonl` (wikitext-2, untracked) for the scripts that read a fixed
-file.
+The data-source scripts in the second table never use random tokens: `trainer_hardcoded_data.py`
+and `trainer_ignores_data.py` read `data/train.jsonl`, `trainer_hub_data.py` loads wikitext from the
+hub, and `trainer_pretok.py` reads `prep.py`'s `.pt`. `make_data.py` writes `data/train.jsonl`
+(wikitext-2, untracked) for the scripts that read a fixed file.
 
 Run one under autotune:
 

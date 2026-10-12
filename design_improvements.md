@@ -9,6 +9,7 @@
 > removed from the tree on 2026-10-02 (its capture now lives in `profiler/attach.py` / `launch.py`).
 > "BYO experiment N", "axiom audit B*N*" and "metric-coverage audit §N" cite the bring-your-own-script
 > experiments, their Measurement-axiom audit and their metric-coverage audit, also kept in that tag.
+> Cited `beliefs/` and `experience/` files were removed from the tree; they're in commit `945d6f8^`.
 
 Open questions and proposed changes that are **not yet settled by evidence**. Each entry states the
 claim, why it might be wrong, and **what experiment would settle it** — so a future eval can close
@@ -19,39 +20,20 @@ the owning md, then delete the entry from here.
 
 ---
 
-## 1. Replace the bisection with divisors + a memory curve
+## 1. Fit a memory curve from the ceiling trials
 
-**Status: the divisor search is decided as part of §7 (2026-10-02). The memory-curve fit is still
-open.**
+**Status: open.** The divisor search is in (`frame/ceiling.py:search_divisors`); the fit is not.
 
-`find_ceiling` brackets by doubling and bisects to the exact ceiling (`1,2,4,8,16,12,10,11` = 8
-trials). Two problems:
+**The trials are already a memory curve and we throw it away.** Each trial records
+`(micro_batch, peak_gb)`, and peak is linear in batch at fixed `seq_len`:
+`peak_gb(mb) = model_state + activation_per_sample * mb`. Two points give the slope.
 
-- **The exact ceiling isn't actionable.** `micro_batch` must divide `effective_batch`, so a ceiling
-  of 11 against `effective_batch=16` means you run **8**. Three trials were spent resolving 8→11 to
-  learn a number no config can use.
-- **The trials are already a memory curve and we throw it away.** Each trial records
-  `(micro_batch, peak_gb)`, and peak is linear in batch at fixed `seq_len`:
-  `peak_gb(mb) = model_state + activation_per_sample * mb`. Two points give the slope.
+**Proposal:** keep the fitted slope/intercept next to the largest fitting divisor in the ceiling
+record.
 
-**Proposal:** test the divisors of `effective_batch` ascending, stop at the first OOM, keep the fit.
-
-| | Now | Proposed |
-|---|---|---|
-| Trials (eb=16) | 8 | 5 |
-| Answer | `11` — not runnable | `8` — runnable |
-| Output | one integer | largest fitting divisor **+** fitted slope/intercept |
-| Code | `search()` ladder, ~40 lines | a loop over divisors, ~10 |
-
-Fewer probes, an actionable answer, more information. Per `program.md`'s Simplicity rule
-(*"removing something and getting equal or better results is a great outcome"*), that's a keep.
-
-**Experiment to settle it:** fit `peak_gb` vs `micro_batch` from a real ceiling run and check
-linearity (R²). Three real ceiling runs are already on disk (`runs/test_a10G`,
-`runs/smollm2_1.7b_a100_wikitext`, `runs/qwen3.5_2b_a100_wikitext`, each `ceiling.tsv`), so this
-needs no GPU time. The fit predicts `allocated`; OOM fires on `reserved` + fragmentation, so also
-record how far the predicted ceiling sits from the measured one. If the residual is small and
-stable, drop `search()`.
+**Experiment to settle it:** fit `peak_gb` vs `micro_batch` from real ceiling runs' `ceiling.tsv`
+(no GPU time needed) and check linearity (R²). The fit predicts `allocated`; OOM fires on
+`reserved` + fragmentation, so also record how far the predicted ceiling sits from the measured one.
 
 ---
 
@@ -117,15 +99,17 @@ it survives. This is what `loop/loop.md`'s extended probe is for.
 ## 6. `AutoModelForCausalLM` + a flat config are an unstated single-modality assumption
 
 **Status: open, partly fixed.** Defect 1 (nested configs) is fixed on `main` (`9227a26`,
-`frame/model.py:_flatten`), and Qwen3.5-2B has since been run end to end
-(`experience/qwen3.5_2b_a100_wikitext.md`). Defects 2 and 3 are open. Raised by the A100/H100 PoC
-model selection. The table below is the state **before** that fix.
+`frame/model.py:_flatten`), and Qwen3.5-2B has since been run end to end. Since 2026-10-08 Frame
+builds any checkpoint on the meta device, falling back to the `architectures` class and then
+`AutoModelForImageTextToText` (`frame/model.py:build_meta`), so defects 2 and 3 now apply only to the
+OG runner. Raised by the A100/H100 PoC model selection. The table below is the state **before**
+those fixes.
 
 Two places assume, without saying so, that a checkpoint is a text-only model with a flat config:
 
 - `frame/model.py:internals` reads `num_hidden_layers` / `hidden_size` off the **top level** of the
   config mapping.
-- `frameworks/hf.py:135` loads through `AutoModelForCausalLM`.
+- `frameworks/hf.py:234` loads through `AutoModelForCausalLM`.
 
 Modern checkpoints are increasingly natively multimodal and nest their dims under `text_config` /
 `vision_config`. Run against the six models the PoC wants (`transformers` 5.15.1):
@@ -176,14 +160,12 @@ wrong.
 | ~~`internals` descends into `text_config` when present~~ | **done** | Qwen3.5 and Gemma frame without crashing. Their analytical counts were still wrong (Qwen3.5 −14.4%, Gemma −21-25%); since 2026-10-08 counts come from a meta-device build, exact (`frame/model.py`) |
 | ~~Flag modality in the Profile notes~~ | **done** 2026-10-08 | `frame/profile.py` adds a multimodal note: what's counted, and the image-row ceiling caveat |
 | Honour an explicit `model_class` in the run config, falling back to the auto-class | ~10 lines | `Gemma3ForCausalLM` on Gemma; any `*ForConditionalGeneration` with a text-only sibling |
-| Refuse at Frame when modality isn't text and no text-only class exists | ~10 lines | SmolVLM fails at Step 2 **with a reason**, not at loop step 1 |
+| Refuse in the OG runner when no causal-LM class exists | ~10 lines | SmolVLM fails at setup **with a reason** pointing at script mode. (Refusing at Frame is superseded: Frame now frames VLMs) |
 
-**Experiment to settle it:** run Frame only (Step 2, no loop) against all six PoC checkpoints and
-record three things — (a) does `internals()` return; (b) does the analytical param count agree with
-`sum(p.numel())` from a real load; (c) on Gemma, how far apart are the measured ceiling and the MFU
-between the auto-class load and an explicit `Gemma3ForCausalLM` load. (c) is the one that matters:
-it puts a number on what the vision tower costs, and decides whether defect 3 is worth code or just
-a Profile note.
+**Experiment to settle it:** on Gemma, how far apart are the measured ceiling and the MFU between
+the auto-class load and an explicit `Gemma3ForCausalLM` load. That puts a number on what the vision
+tower costs, and decides whether defect 3 is worth code or just a note. (Whether `internals()`
+returns and whether the count is exact are settled by the meta-device build.)
 
 ---
 
@@ -218,106 +200,23 @@ measurement chain assumes a batch is `(input_ids, attention, labels)`:
 
 So a VLM is a new **modality axis** cutting through Frame, the loader, the ceiling and the roofline —
 comparable in size to the multi-GPU axis the README already defers, and it should be scheduled like
-one. Worth noting that `frame/model.py` already reports a `modality` field: it is the only part of
-the chain that anticipated this, and right now nothing reads it.
+one. The table above describes the OG runner (`frameworks/hf.py`) and `frame/dataset.py:scan`; for
+user scripts the update above covers the ceiling and the roofline.
 
 **Nothing to settle by experiment** — this is scoping. The cheap precursor is §6's fourth row: once
-Frame declines non-text checkpoints with a reason, the axis gets built deliberately instead of
+the OG runner declines non-text checkpoints with a reason, the axis gets built deliberately instead of
 discovered by a `ValueError` halfway through a booked GPU hour.
 
 ---
 
-## 7. The memory ceiling: lean trials, divisors only, re-measured on memory-knob changes, and for user scripts
-
-**Status: decided, implemented and verified on an A10, 2026-10-02 (`frame/ceiling.py`,
-`frame/ceiling_rows.py`, `profiler/memtrial.py`; `docs/verification/ceiling.md`, 22/22 rows).** This
-replaces the 2026-09-25 decision that stood here, and it adopts §1's divisor search (§1's
-memory-curve fit stays open). Today's process and its
-gaps are below so the change can be checked against them.
-
-**Today.** Frame runs `find_ceiling` once (`frame/profile.py`) when `--ceiling` is set. Each trial is
-a full `capture()` (2 warmup + 2 timed + 1 profiled step) on our runner with `data="synthetic"`, and
-the search doubles then bisects (4-8 trials). Gaps:
-- **The stamp is nearly empty.** Frame passes only `{device, dtype, model, dataset}`, so the
-  record's `config` holds only `dtype`, and `is_stale` reads a change of compile, checkpointing or
-  attention as **not stale**.
-- **Nothing calls `is_stale`.** Re-measuring is a rule the agent has to remember (`program.md`
-  Step 4).
-- **There is no re-measure command.** Past runs used an ad-hoc, gitignored
-  `tmp_scripts/ceiling_recheck.py` (24, 21 and 33 trials across the three real runs).
-- **User scripts have no ceiling.** `find_ceiling` needs our runner's `data="synthetic"` switch,
-  so `program.md` holds a script's micro-batch at its baseline value, and the limit is found by a
-  probe that runs out of memory (`experience/my_byo_yaml.md`: micro-batch 32).
-
-**The design.**
-
-| | Today | Decided |
-|---|---|---|
-| A trial | a full `capture()`: 5 steps, timed and profiled | **memory-only: 2-3 optimizer steps**, no timing, no profiler. Reports `ok` / `oom` and the peak (`max_memory_allocated` / `max_memory_reserved`). Step 1 can't be the answer: AdamW allocates its state during step 1's `opt.step()`, so the steady-state peak first appears at step 2. Step 3 covers CUDA-graph pools (compile `reduce-overhead` / `max-autotune`) and early allocator growth |
-| Which micro-batches | doubling, then bisect (e.g. lands on 11) | **divisors of `effective_batch` only**, ascending, stop at the first OOM (at most 5 trials for 16, 6 for 32). Each trial runs at accumulation 1: accumulation doesn't change the peak |
-| The stamp | `dtype` only | **every memory knob, defaults included** (resolved from the runner's or script's effective config), so any change is detected |
-| When | once at Frame; re-measures by hand | **once at Frame, then before any probe whose config moves a memory knob** away from the stamp (`is_stale`). Micro-batch, accumulation and other non-memory knobs never trigger one |
-| A re-measure | from scratch | **from the previous ceiling**: after a change that frees memory, try the next divisor up until one fails; after one that adds memory, step down until one fits. Usually 1-2 trials |
-| Who runs it | Frame code, or the agent's own script | **one entry point** for both, with results appended to `runs/<run>/ceiling.tsv` and the Profile's ceiling replaced |
-| `effective_batch` | fixed | fixed |
-
-A trial and a probe are different things: a ceiling run is a set of trials (at most ~5 at Frame,
-1-2 for a re-measure) and none of them is ever a `results.tsv` row. A trial's extra cost over a
-probe's startup (process start, model load, compile if on) is only its 2-3 steps.
-
-**User scripts.** Micro-batch is a lever for a script like for our runner, bounded by the
-ceiling; only `effective_batch` is fixed. That replaces `program.md`'s "don't raise the micro-batch
-above the baseline" rule. A trial is one launch of the script in a **memory-only launcher mode**
-(the same 2-3 steps), on a synthetic data file the script reads through its own data setting:
-- **The data file.** Frame writes `runs/<run>/ceiling_rows.jsonl` once per run:
-  `effective_batch × 3` rows, each encoding to at least `max_len` tokens with the model's tokenizer
-  (random ids decoded to text, special tokens excluded, re-encoded to check), so the script's own
-  truncation cuts every row to exactly `max_len`. The rows use the user dataset's schema: the long
-  text goes in the tokenized column (`--text-field`); for chat or prompt/completion data the agent
-  gives Frame a one-row template from the real data. Plain JSON lines with no header, which
-  `load_dataset("json", data_files=...)` and framework dataset-path options read directly.
-- **Pointing the script at it.** The knob audit (`program.md` Step 2a) also records where the
-  script's data source is set:
-
-  | Data source | A trial points at the file through |
-  |---|---|
-  | a flag | `script_args` |
-  | a config key | a per-trial config copy, `runs/<run>/probes/ceiling_mbN.yaml` (data path, micro-batch N, accumulation 1, 3 steps) |
-  | hardcoded, or a hub id only (`load_dataset("org/name")`) | the Step 2b question, as for any hardcoded setting: move it to a config or a flag, on a copy |
-  | declined | no ceiling; said at Step 3, and an OOM probe stays the only way to find the limit |
-
-  The file goes in `script_files`, so the ssh backend pushes it (it is under `runs/`).
-- **Pre-tokenized or cached data** (Arrow / `.bin` from a separate preprocessing step): Frame
-  writes the ceiling rows in that format, or the agent runs the user's preprocessing on
-  `ceiling_rows.jsonl`, whichever the script's pipeline allows.
-- **Each trial checks the file was used.** The launcher's per-module token hook sees every model
-  input; every step must be `[N, max_len]`, or the trial fails naming the shape it saw. That
-  catches a data setting the script ignored, a framework that drops or splits over-length rows,
-  packing, and a script whose real sequence length differs from `run.toml`'s (then the ceiling is
-  measured at the script's length).
-
-**Why it might be wrong:**
-- 2-3 steps may understate fragmentation more than 5 did; that's §5's limitation, not new, and
-  `card_frac` still drives the margin note.
-- Some frameworks build their dataset in a separate preprocessing pass the probe config can't
-  redirect; those take the pre-tokenized route above.
-- Under compile, every trial pays compilation, so a re-measure that starts from the previous
-  ceiling matters more there.
-
-**What would settle it:** the A10 matrix (to be recorded in `docs/verification/`): the new search
-reproduces `test_a10G`'s measured ceilings (2, compile 4, checkpointing 8, at `max_len` 2048) as
-divisor answers, 2-3 steps give the same answer as 5, re-measures land in 1-2 trials, and a script
-ceiling matches the probe OOM already observed for SmolLM2-360M at seq 512 (micro-batch 16 fits,
-32 does not).
----
-
 ## 8. Define the noise floor between launches, not within one
 
-**The claim:** the loop decides "within the noise floor" (`loop/loop.md:83`, `:106`), but the only
-noise floor it measures is the **within-run** coefficient of variation (`step_time_cv`, from one
-probe's clean window). Configs are compared **across launches**: a fresh process each, with its
-own allocator state, clocks and model load. So the between-launch spread is the noise that
-actually separates two probes, and it is not defined anywhere the loop reads.
+**The claim:** the loop has to tell a real win from noise, but nothing it reads defines when a
+difference is noise, and the only noise measure it gets is the **within-run** coefficient of
+variation (`step_time_cv`, from one probe's clean window; `reliability`, `loop/contracts.md`).
+Configs are compared **across launches**: a fresh process each, with its own allocator state,
+clocks and model load. So the between-launch spread is the noise that actually separates two
+probes, and it is not defined anywhere the loop reads.
 
 **What already exists (practice and observation, not a threshold):**
 - Champions are re-probed and "confirmed twice": 0.6% apart (`experience/test_a10G.md:11`), 0.04% (`experience/smollm2_1.7b_a100_wikitext.md:11`),
@@ -325,7 +224,7 @@ actually separates two probes, and it is not defined anywhere the loop reads.
 - Between-run agreement was measured once, after the fact: "repeats of identical configs agreed
   to 0.4-0.9%" while within-run cv was 0.29-0.37 (`experience/test_a10G.md:49-50`).
 - A "noise band" is used informally to call levers dead (`experience/smollm2_1.7b_a100_wikitext.md:40`, `experience/qwen3.5_2b_a100_wikitext.md:38, 54, 120`).
-- The contract's `reliability` field (`loop/contracts.md:70`) is within-probe only.
+- The contract's `reliability` field (`loop/contracts.md`) is within-probe only.
 
 **Why it matters: the two floors disagree, in both directions.**
 
@@ -377,8 +276,8 @@ more than 2× the within-run cv, adopt (1)-(2).
 ## 9. Give the agent a metric reference: what each probe field measures, and what it doesn't
 
 **The claim:** the agent's decisions are only as good as its reading of the Observation, and today
-nothing it reads says what each field **does not** measure. `program.md:56` tells it to "skim"
-`profiler/README.md`, whose 41-row table gives one-line meanings and a few traps. The
+nothing it reads says what each field **does not** measure. `program.md` Step 1 tells it to "skim"
+`profiler/README.md`, whose 57-row table gives one-line meanings and a few traps. The
 **limitations** we've established are all in developer notes the agent never sees
 (the BYO experiment notes, the metric-coverage audit, this file). So the agent can make
 the mistakes those notes record.
@@ -391,7 +290,7 @@ the mistakes those notes record.
 | Believing a win smaller than the between-launch spread (the within-run cv is ~4× too tight on long fixed-shape steps) | §8 |
 | Median step time overstating throughput under skew | `beliefs/median-step-time-overstates-skewed-throughput.md` |
 | Reading data-wait 0.0 as "not data-bound" when there's no torch `DataLoader` | metric-coverage audit §0 |
-| MFU counting pad tokens as work; MFU wrong under LoRA (trainable-only N) | `experience/test_a10G.md`, metric-coverage audit §5 |
+| MFU counting pad tokens as work | `experience/test_a10G.md`, metric-coverage audit §5 |
 | A step time that reads ~0.25% high from a per-step sync placed before Trainer's bookkeeping (attached capture) | BYO experiment 6 |
 
 **Proposed: `profiler/metrics/`, the single source of truth for field semantics.**
@@ -414,18 +313,18 @@ profiler/metrics/
 
 - **Grouped by family, not one file per field.** Related fields share caveats: every timing field
   inherits the sync bias, every phase field inherits host-vs-GPU. Nine docs are maintainable;
-  41 would drift.
+  57 would drift.
 - **One template per field:** *Measures* (what, unit, how computed, from which source) ·
   *Doesn't measure* (what it's easy to assume it means) · *Known biases / traps* · *Null when* ·
   *Evidence* (the experiment or `beliefs/` belief behind each claim, linked, so a claim can be
   re-checked or retired).
-- **Single source of truth:** `profiler/README.md`'s 41-row field table shrinks to a pointer, so
+- **Single source of truth:** `profiler/README.md`'s 57-row field table shrinks to a pointer, so
   the two can't drift.
 - **Routed where it's used:** a pointer at the Observe step of `loop/loop.md` (where the agent
   interprets an Observation), not only at `program.md` step 1's "skim".
 - **Capture modes:** both are live: the runner capture (`capture()`) and the attached capture
   for user scripts (`profiler/attach.py`). Document the attached capture's differences per field
-  (padded tokens, trainable-only params, trace-derived phases, DataLoader-only data-wait, the
+  (padded tokens, trace-derived phases, DataLoader-only data-wait, the
   timing method, unknown tokens when the model input has no token tensor). Today they're only
   summarized in `profiler/README.md`, "Attached capture".
 
@@ -443,49 +342,22 @@ inside-noise calls, and the MFU-with-padding reading.
 
 ---
 
-## 10. MFU is wrong whenever weights are frozen (LoRA / PEFT); keep "model FLOPs", fix the count
+## 10. MFU follow-ups: an HFU diagnostic, and padded tokens in D
 
-**Status (2026-10-07):** steps 1 and 2 below are implemented on branch `peft-lora`:
-`training_flops(params, tokens, trainable)` and the `params_total` / `params_trainable` fields. One
-change from the proposal: **N_total is not derived from the trace.** The attached capture already
-identifies the model (the module the optimizer's parameters live in, `Attach._find_root`), so
-N_total is that module's `parameters()`. That is exact, keeps embeddings in the count like the OG
-runners do (continuity with every past 6ND in `experience/`), and needs no shape parsing. A
-quantized base (QLoRA, GPTQ, AWQ) can't be counted that way and reports null. **Verified on an A10
-the same day** (`docs/verification/lora.md`): exact trainable / total counts, full fine-tune MFU
-unchanged, LoRA MFU 13.1% / 16.6% (from ~0.45%). Those read ~12-14% below the estimates below
-because the new example script steps slower than experiment 7's Trainer, not because of the count.
-What remains open is step 3 (HFU), which stays optional.
-
-**The problem, measured.** BYO experiment 7, 1× A10, peft 0.20.0, LoRA
-r=16 on every attention / MLP projection:
-
-| Model | Trainable / total params | MFU reported | MFU with the corrected count |
-|---|---|---|---|
-| SmolLM2-360M | 8.68M / 370.5M (2.34%) | 0.53% | ≈15.3% (28.8× low) |
-| Qwen2.5-0.5B | 8.80M / 502.8M (1.75%) | 0.51% | ≈19.7% (38.4× low) |
-
-A 0.5% MFU tells the agent the GPU is idle, and sends it after problems that don't exist.
-
-**Where the error is.** The pipeline is: probe measures N, D, step time and peak → 6·N·D
-(`profiler/roofline.py:17`) → MFU = FLOPs / time / peak (`:25-29`). The reporting arithmetic is
-correct. Two inputs are wrong, pulling in opposite directions:
-1. **N, on the probe side (the big error).** The attached capture takes N from the
-   optimizer's `param_groups` (`profiler/attach.py`, `self.params`), i.e. trainable params only.
-   OG runners count every parameter (`frameworks/hf.py`, `self.params`), so this is new with the
-   BYO-script path.
-2. **The 6 in 6ND (the smaller error).** 6 = 2 (forward) + 2 (gradients back through
-   activations) + 2 (weight gradients). Frozen weights skip the last 2. With N_total plugged into
-   6ND, SmolLM2 + LoRA reads ≈22.5%: ~1.5× high.
+**Status:** the frozen-weights fix (steps 1-2 of the original proposal) is merged (PR #26): weight
+FLOPs are `(4·N_total + 2·N_trainable)·D` (`profiler/roofline.py:training_flops`), reported with
+`params_total` / `params_trainable`, verified on an A10 (`docs/verification/lora.md`). Since PR #27
+MFU also adds PaLM's attention term (`roofline.attention_flops`), so it is no longer plain 6ND and
+MFUs from before then aren't directly comparable. Steps 3 and 4 below stay open; step 3 is optional.
 
 **What MFU is for** (why the definition matters, not just the number):
 - **Scoring against the possible:** samples/s is the primary metric and MFU "a diagnostic only"
   (`loop/throughput.md`); `objective` = samples/s + tokens/s + MFU (`loop/contracts.md`). MFU
   grounds a samples/s number against the hardware; it never ranks.
 - **Reporting:** the final report gives MFU reached as context (`loop/loop.md`, "Output").
-- **Diagnosis:** "the 'is the GPU utilized well' signal" (`profiler/README.md:44`), with measured
+- **Diagnosis:** "the 'is the GPU utilized well' signal" (`profiler/README.md`), with measured
   bandwidth for compute- vs memory-bound.
-- **Cross-run comparison:** every retrospective in `experience/` reports it.
+- **Cross-run comparison:** every past retrospective in `experience/` reports it.
 - **Not** within-run ranking. That's tokens/s or samples/s, and MFU already misled there under
   static padding (`beliefs/static-padding-is-usually-the-bottleneck.md:39`).
 
@@ -498,48 +370,16 @@ for:
 - Other redundant work would also inflate it.
 
 **Proposed:**
-1. **Generalize the formula; don't replace it.**
-   `model FLOPs / step = (2·N_total + 2·N_total + 2·N_trainable) · D = (4·N_total + 2·N_trainable) · D`.
-   With every weight trainable, this is **exactly 6ND**, so every past MFU in `experience/` stays
-   comparable. Under LoRA it gives the corrected column above. `training_flops(params, tokens)`
-   becomes `training_flops(total, trainable, tokens)`.
-2. **Report N_total and N_trainable separately** (Observation `provenance`, or new fields; check
-   `tests/test_diagnostic.py:179-189`, which pins the README's field count).
-   - **N_trainable:** exact today, from the optimizer (public API).
-   - **N_total, OG runners:** they already know it (`frameworks/hf.py`, `self.params`); pass it through as a
-     declared input.
-   - **N_total, user scripts, patch-free:** sum the weight shapes of the matmul ops
-     (`aten::linear` / `aten::addmm` / `aten::mm`, `Input Dims`) in **one forward pass** of the
-     profiled step (`record_shapes=True` is already on). That's the parameters doing math per
-     token, which is the right N for FLOPs. Embedding lookups do no FLOPs, and a tied `lm_head`
-     shows up as its matmul. Use the forward span only (`derive.py`), so checkpointing's
-     recomputes, which run inside backward, don't count. **Untested.**
+
 3. **Optional, separate diagnostic: HFU**, from trace-counted matmul FLOPs over the whole step.
    HFU − MFU is the recompute / redundant work, useful for judging gradient checkpointing. It is
    never the objective.
-4. **Known, separate, not fixed here:** D counts **padded** tokens (`frameworks/hf.py:264`,
-   `derive.py`), so MFU still counts pad as work under static padding (`experience/test_a10G.md:47-48`).
-   Worth its own entry if the objective moves to real tokens.
+4. **Known, separate, not fixed here:** D counts **padded** tokens (`frameworks/hf.py:403`,
+   `tokens_per_step` at `:501`; `derive.py`), so MFU still counts pad as work under static padding
+   (`experience/test_a10G.md:47-48`). Worth its own entry if the objective moves to real tokens.
 
-**Why it might be wrong:**
-- The trace-derived N_total may not equal a model's true parameter count. Embeddings and norms
-  are excluded, and untied embeddings drop out entirely. That changes absolute MFU vs historical
-  6ND runs on large-vocabulary untied models. Decide whether continuity (count all params) or
-  correctness (count matmul params) wins, and record which.
-- `4·N_total` for backward-through-activations is itself approximate. No gradient flows into
-  a frozen first layer's input or into the embedding.
-- Attention's own FLOPs (~12·layers·d_model·seq per token) are ignored, as today
-  (`profiler/roofline.py:5`). That's a separate refinement.
-
-**What would settle it:** on a GPU, with the experiment 4b / 7 Trainer scripts
-(`sandbox/attach_parity/hf/` in tag `sandbox-archive`):
-1. **Full fine-tune** (experiment 4b configs): the new formula must equal 6ND within a few
-   percent, using the trace-derived N_total. That validates the N_total extraction.
-2. **LoRA** (experiment 7 configs): MFU lands at ≈15% / ≈20%, not 0.5%.
-3. **Gradient checkpointing on vs off:** MFU must not rise when checkpointing slows training, while
-   HFU does. That demonstrates the model-vs-hardware distinction.
-
-Suggested branch: `mfu-frozen-weights`, cut from `main`.
+**What would settle it:** on a GPU, **gradient checkpointing on vs off**: MFU must not rise when
+checkpointing slows training, while HFU does. That demonstrates the model-vs-hardware distinction.
 
 ---
 
@@ -654,19 +494,14 @@ completions per step.
 
 ## 14. Frame's LoRA estimates: check them against measurements
 
-**Status:** the estimates are implemented on branch `peft-lora` (2026-10-07): with `--lora-r` /
+**Status:** the estimates are implemented (2026-10-07): with `--lora-r` /
 `--lora-targets`, Frame counts the adapters from the config (`frame.model.lora_params`, exact
 against peft on SmolLM2-360M and Qwen2.5-0.5B), uses `4 * N_total + 2 * N_trainable` FLOPs per
 token, and charges grads + optimizer state to the adapters only (`frame/README.md`, "LoRA"). One
-thing is still open (item 2). Since 2026-10-08 the counts come from the model built on the meta
+thing is still open (item 2; item 1, the model-state estimate, checked within 4% and closed). Since 2026-10-08 the counts come from the model built on the meta
 device, with targets matched the way peft matches them: exact against peft on Phi-3's fused
 projections, Qwen3.5's hybrid layers and Qwen2-VL's vision tower too (`frame/README.md`, "LoRA"),
-where the config-dims template was off by −37% to +235% (`docs/verification/final_boss_report.md`
-T7-C3). The template stays as the fallback, labelled an estimate.
-
-**1. Model-state estimate: checked, closed.** On an A10 (2026-10-07), Frame's LoRA
-`model_state_gb` is within 4% of the memory allocated right after the first optimizer step
-(SmolLM2-360M 0.80 vs 0.833 GB, Qwen2.5-0.5B 1.05 vs 1.075 GB; `docs/verification/lora.md`).
+where the config-dims template was off by −37% to +235% (pre-release verification, 2026-10-08). The template stays as the fallback, labelled an estimate.
 
 **2. The declared LoRA setup isn't cross-checked.** Frame trusts the rank and targets the agent
 read from the script. A script that also trains something else (`modules_to_save`, an unfrozen
@@ -694,37 +529,54 @@ the runner reporting both counts (`params` as N_total, plus a trainable count pa
 **What would settle it:** a runner LoRA probe and a script LoRA probe of the same config agree on
 step time within the known ~0.25% script offset, and on MFU.
 
+## 17. Best / Lean / Diverse: update rules
 
-## 16. Frame's full fine-tune memory assumes mixed precision
+**Status:** open. Raised 2026-10-12 (PR #30 review).
 
-**Status: done 2026-10-08, differently from the proposal below.** No recipe input. The axiom (decided
-with the user): **no dtype is ever defined by autotune; it is always the training code's, or that
-code's default.** Memory follows the dtype the trained weights are held in (`--dtype`, only when the
-code sets one; else the checkpoint's, which is what transformers loads), grads and AdamW state follow
-it, and there is no assumed master copy: bf16 → 8 B per trained weight, fp32 (+ autocast) → 16. The
-peak follows the matmuls' dtype (`--compute-dtype` only when the code autocasts). Our runner dropped
-its hardcoded bf16 default the same way (`frameworks/hf.py` `resolve_dtype`). Both A10 rows below
-match the new model (8 B: 2.76 GB measured; 16 B: 5.44 GB measured). The original write-up follows.
+**The claim:** `loop/loop.md` asks the agent to keep three configs in view, not just the fastest:
+**best** (throughput), **lean** (memory), **diverse** (a different strategy), so the search doesn't
+tunnel on one line of attack and complementary winners can be crossed over. Only Best has an
+update rule, and only in code: `runs/progress.py` `mark_records` makes any `ok`, non-`UNRELIABLE`,
+non-superseded row with strictly higher samples/s the new best. Lean and Diverse are names with no
+rule, so "update the best, lean and diverse configs" in Learn can't be checked.
 
-Found 2026-10-07 while checking §14 on an A10; predates LoRA support.
+**Proposed rules:**
+- **Best:** highest samples/s among `ok`, reliable rows, compared same-rows (step time for a script
+  that packs, `loop/throughput.md`), as `progress.py` does.
+- **Lean:** least peak memory among configs within X% of Best's samples/s (95% as a starting
+  point). Re-checked whenever Best moves: the old Lean can fall outside X%.
+- **Diverse:** highest samples/s among configs whose gain over the baseline comes from a different
+  lever family (`loop/throughput.md` "Canonical levers") than Best's.
+- Each slot may be empty; one config may hold two roles; every line cites its experiment number.
 
-**The claim:** `training_memory` charges every trained weight 16 bytes (bf16 weight + bf16 grad +
-fp32 AdamW m and v + an fp32 master copy): the mixed-precision recipe. On an A10 that matched an
-fp32-weights + bf16-autocast loop within 1% (SmolLM2-360M 5.39 vs 5.44 GB). But a loop that loads
-the model in bf16 and runs plain `torch.optim.AdamW` (`examples/byo_script/torch_flags.py`) keeps
-the optimizer state in bf16 and has no master copy: ~8 bytes a weight, measured 2.76 GB. Frame
-reads ~2× high for it.
+**Why it might be wrong:** X is a guess (too tight and Lean is always Best; too loose and Lean is a
+config nobody would run). "The lever family a gain comes from" is a judgment when a config moves
+several knobs. And Best has no noise margin: a win inside launch-to-launch noise replaces it,
+which depends on §8.
 
-**Why it matters:** the same misleading-context problem LoRA had, at half the size: an overstated
-model state can make a run look memory-bound. Nothing decides on it (the measured ceiling does).
-The repo's own runner is a pure-bf16 loop too (`frameworks/hf.py` loads the model at `dtype` and
-runs plain AdamW): Frame says Qwen2.5-1.5B full FT "does NOT fit" on an A10, and that runner trains
-it at micro-batch 2 (peak 20.6 GiB; `docs/verification/final_boss_report.md` T5-C1). Until the
-recipe is an input, a "does NOT fit" verdict on a full fine-tune carries a note saying so.
+**What would settle it:** replay the A10 runs' `results.tsv` under these rules and check that
+Lean and Diverse name configs a human would pick, and that a later hypothesis crossing Diverse
+into Best would have been proposed from them.
 
-**Proposed:** make the precision recipe a Frame input next to `--dtype` (mixed vs pure), declared
-from the script or the runner (`frameworks/hf.py` is pure), and charge optimizer state at the
-weights' precision for "pure".
+## 18. Persist each probe's Observation
 
-**What would settle it:** the pure-bf16 rows in `docs/verification/lora.md` read within ~10% once
-the recipe is declared, with the mixed-precision rows unchanged.
+**Status:** open. Raised 2026-10-12 (PR #30 review).
+
+**The claim:** the full Observation (57 fields: phase times, kernels, GPU-active / idle, MFU,
+provenance) is read at Observe and then dropped. `results.tsv` keeps four fields (`token/s`,
+`samples/s`, `memory`, `status`); anything else survives only if the agent wrote it into
+`research.md`. In practice the notes carried the findings that drove the next hypotheses
+(`a10_qwen2.5-1.5b_cosmopedia`: phase times for exps 2/4/9-10, kernel provenance for 4-7,
+`gap_count` and idle for 9-10), but a probe the agent didn't write up (exps 3, 8, 11, 14 there)
+can't be re-examined, and after compaction or `/run-loop resume` even the latest one's detail is
+gone.
+
+**Proposed:** write each probe's Observation to `runs/<run>/obs/<experiment_number>.json` next to
+its `results.tsv` row, and let a hypothesis that compares against an earlier probe open it.
+
+**Why it might be wrong:** if the agent's notes always capture what matters, this is storage
+nobody reads. Re-reading 57 fields per earlier probe could also cost more context than the
+summary it replaces.
+
+**What would settle it:** count, over a few runs, the hypotheses that needed detail from a probe
+other than the latest, and whether `research.md` had it.

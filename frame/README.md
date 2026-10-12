@@ -71,7 +71,7 @@ load is a setup failure, not an experiment result.
 
 2. **What's the data?** Draws a uniform random pool over the whole split (20× the sample, blank
    rows skipped), tokenizes it, and reports how long the sequences are (median, 90th/99th
-   percentile, max). That shape drives batch-size and packing decisions later. From the same pool it
+   percentile, max). That shape drives batch-size and padding decisions later. From the same pool it
    draws the **probe sample**: `sample` rows at evenly spaced length quantiles, so the rows every
    probe times carry the corpus's length distribution, tail included. With `--sample-out` it writes
    them to `runs/<run>/sample.jsonl`, and every probe loads that file (`sample_file`). Frame's
@@ -148,20 +148,23 @@ frame: measuring the memory ceiling at max_len=2048 (synthetic, seed 0, framewor
   That is the whole guarantee — and it is what makes `padding="longest"` usable at all.
 - **NEVER raise `micro_batch` on a probe's `headroom_gb`.** Under dynamic padding a probe's peak
   reflects the rows it happened to draw, not the dataset's longest, so its headroom is an artifact
-  of the sample. On `test_a10G` the scan saw max 520 tok against `max_len=2048`: no probe in 23
-  experiments ran the `[8, 2048]` batch the shipped config meets in training — only the ceiling did.
-  The ceiling bounds `micro_batch`; an observed peak never does.
+  of the sample: when the data's longest row is far below `max_len`, no probe ever runs the
+  `[micro_batch, max_len]` batch training can meet — only the ceiling does. The ceiling bounds
+  `micro_batch`; an observed peak never does.
 - **`dtype` is not a memory lever.** It is in the staleness list because a human changing precision
   invalidates the measurement. IF nothing fits, escalate to the human with the numbers — recompute,
   offload, sharding and 8-bit optimizer states are yours; precision is theirs.
 - **The ceiling is NOT a run constant.** `recompute`, `attn_kernel`, `optimizer`, `dtype`,
-  sharding and **`compile`** all move it. `compile` is not an obvious member of that list but was
+  sharding, offload, packing, `chunked_ce` and **`compile`** all move it (`_MEMORY_KNOBS` in
+  `ceiling.py`, with the adapter spellings), as do the CUDA allocator setting
+  (`PYTORCH_CUDA_ALLOC_CONF` in the config's `env`) and a VLM's image size and count. A user's
+  script is stamped with `dtype` plus its own `memory_knobs`. `compile` is not an obvious member of that list but was
   measured moving a ceiling from 2 to 4: Inductor fuses the cross-entropy and never materializes
   the fp32 logits copies, cutting peak memory 5.4GB. Before trusting a ceiling, compare the
   Config against the record's stamp (`frame.ceiling.is_stale`). Moved → **re-measure**, don't
   extrapolate. Turning on `recompute` can easily take a ceiling of 8 to 32; the search space is
-  meant to widen on that evidence. Micro-batch, accumulation, padding, workers and other
-  non-memory knobs never make it stale.
+  meant to widen on that evidence. Another `max_len` or `effective_batch` also makes it stale;
+  micro-batch, accumulation, padding, workers and other non-memory knobs never do.
 - **Re-measure before the probe that moves a memory knob,** through the same backend a probe uses:
 
   ```bash
@@ -169,11 +172,17 @@ frame: measuring the memory ceiling at max_len=2048 (synthetic, seed 0, framewor
   ```
 
   `candidate.json` is the probe config you are about to run (what you'd pass to `backends.run`).
+  It reads the current ceiling from `runs/<run>/profile.json` (the agent saves Frame's printed
+  Profile there, `program.md` Step 2). For our runner the candidate's stamp is computed from the
+  candidate itself plus its `framework`'s defaults, so it must carry the same `framework` and
+  `dtype` the ceiling was measured under: a candidate missing either reads as stale and re-measures.
   Not stale → it says so and runs nothing. Stale → it searches **from the previous ceiling**: the
   next divisor up first, climbing while it fits; if that fails, the previous ceiling itself, then
   down. Usually 1-2 trials. The trials are appended to `runs/<run>/ceiling.tsv`, the Profile's
   `ceiling` is replaced (the old one kept under `ceiling_history`), and `knobs.micro_batch.max`
-  follows. Ceiling trials are never `results.tsv` rows.
+  follows. Ceiling trials are never `results.tsv` rows. `--force` measures even when not stale,
+  `--fresh` measures from scratch ignoring the previous ceiling (implies `--force`), and
+  `--steps N` sets the trial length (default 3).
 - **Measure it with the REAL training step.** A ceiling measured on a different workload describes
   that workload, not this job. `--ceiling` uses `--framework`'s real runner (`frameworks/hf.py`
   loads real weights and runs a real fwd/bwd/opt); `frame.profile.frame(..., runner=...)` takes one
@@ -189,9 +198,11 @@ frame: measuring the memory ceiling at max_len=2048 (synthetic, seed 0, framewor
 - **Synthetic probes NEVER enter `results.tsv`.** Memory feasibility is measured on the worst case;
   throughput is measured on the real distribution. Two questions, two ledgers
   (`runs/README.md`).
-- **`max_len` ≫ dataset `p99` is a flag, not an error.** Frame notes it: most of every unpacked
-  batch is padding, so `packing` is likely a large win — or `max_len` is set higher than this data
-  needs. Raise it with the human at `program.md` Step 3; never change `max_len` yourself.
+- **`max_len` ≫ dataset `p99` is a flag, not an error.** Frame notes it (at 4× `p99` or more):
+  most of every unpacked batch is padding, which dynamic padding / padding-free batching recover.
+  Packing would too, but it changes examples per optimizer step, so it is off-limits to the loop.
+  Or `max_len` is set higher than this data needs. Raise it with the human at `program.md` Step 3;
+  never change `max_len` yourself.
 
 ---
 
@@ -202,19 +213,26 @@ python -m frame --model <hub-id|path> --dataset <hub-id|path> --gpu A10G --max-l
                 [--dtype <weights' dtype>] [--compute-dtype <autocast dtype>] [--device cuda] \
                 [--name <dataset-config>] [--split train] [--sample 1000] \
                 [--sample-out runs/<run>/sample.jsonl] [--sample-seed 0] [--max-scan N] \
-                [--ceiling --effective-batch 16 --seed 0]
+                [--text-field text] [--framework hf] [--effective-batch 16] \
+                [--ceiling --seed 0] \
+                [--ceiling-rows-out runs/<run>/ceiling_rows.jsonl] [--ceiling-row-template '<json>'] \
+                [--ceiling-rows-format text|ids] [--lora-r R --lora-targets T] [--base-quant 4bit|8bit] \
+                [--max-image-size WxH] [--max-images N] [--image-field F]
 ```
 
 Prints a one-line summary, then any `NOTE:` lines, then the full Profile JSON. Example summary:
 
 ```
-Qwen2ForCausalLM (gqa, bfloat16) | 0.5B params | A10G 24.0GB x1 | peak 121 TFLOP/s (measured) | full-FT model-state 7.36GB -> model state fits (headroom 16.6GB) | ceiling @2048: micro_batch<=11 (measured) | 200 samples, p50 16/p99 317 tok
+Qwen2ForCausalLM (gqa, bfloat16) | 0.5B params | eff-batch 16 | A10G 24.0GB x1 | peak 121 TFLOP/s (measured) | full-FT model-state 3.68GB -> model state fits (headroom 20.3GB) | ceiling @2048: micro_batch<=8 (measured) | 200 samples, p50 16/p99 317 tok
 ```
 
 `--max-len` is **required** — without it there is no worst case to measure against. `--ceiling`
 runs the search with `--framework`'s real runner, so the number is one to tune against; it costs
-at most one 3-step trial per divisor of `--effective-batch`. Omit it and the Profile carries
-`ceiling: null`.
+at most one 3-step trial per divisor of `--effective-batch`. It runs only with `--device cuda`;
+omit it (or use another device) and the Profile carries `ceiling: null`. Its trials are printed,
+not written to `ceiling.tsv` — only `python -m frame.ceiling` appends there. `python -m frame`
+writes no Profile file: the agent saves the printed Profile JSON to `runs/<run>/profile.json`
+(`program.md` Step 2).
 
 ### User scripts
 
@@ -264,11 +282,13 @@ So the largest image is declared like `max_len`, never chosen:
 - The row template needs `"{IMAGE}"` wherever the script reads an image, before the text. A list
   item holding it, such as an `images` list or a chat message's image part, is repeated N times.
   The text still fills each row to exactly `max_len`, image tokens included.
-- Frame counts the image tokens one row makes with the model's own processor (`images.image_tokens`
-  in the Profile). Every ceiling trial checks each row carried exactly that many
+- Frame counts the image tokens one row makes with the model's own processor
+  (`images.image_tokens_per_row` in the Profile; `images` also holds `max_image_size`,
+  `max_images`, `max_images_source` (declared or data scan), `image_token_id`, and
+  `ceiling_image`, the written image's path). Every ceiling trial checks each row carried exactly that many
   (`profiler/memtrial.py`). Fewer or more means the script resizes or drops images differently from
   the declared size, or truncation cut them, and the trial fails rather than measure other images.
-- If the image tokens alone exceed `max_len`, Frame refuses, since no text would fit. The image
+- If the image tokens alone reach `max_len`, Frame refuses, since no text would fit. The image
   size and count are part of the ceiling's stamp, so changing either means a fresh measurement.
 
 ### LoRA
@@ -289,7 +309,7 @@ q_proj,k_proj,v_proj,o_proj,gate_proj,up_proj,down_proj` (or `all-linear`). Then
   activation gradients run through every weight, weight gradients only through the adapters.
 - **Model state:** the frozen base is only stored (2 bytes a weight in bf16); the adapters carry
   fp32 weights, grads and AdamW state (16 bytes each, no master copy: peft keeps them in fp32). An
-  8B model drops from ~120GB to ~15GB, so `model_state_fits` turns true on a 24GB card.
+  8B model in bf16 drops from ~60GB to ~15GB, so `model_state_fits` turns true on a 24GB card.
 - **Targets it can't count** (targets that match no module, which peft would refuse too; or, on
   the template fallback, other naming, an ungated MLP, MLP targets on an MoE) leave
   `params_trainable` null and the full fine-tune numbers in place, with a note saying why and that
@@ -334,30 +354,46 @@ One compact JSON object — small on purpose, so it can sit in the agent's conte
   "dataset":  { "n_samples": 200, "total_tokens": 12426, "p50": 16, "p99": 317, ... },
   "hardware": { "gpu": "A10G", "peak_flops": 1.21e14, "peak_dtype": "bfloat16", "mem_gb": 24.0, ... },
   "versions": { "torch": "2.4", "transformers": "5.15.1", "flash_attn": null },
-  "memory":   { "weights_gb": 0.92, "grads_gb": 0.92, "optimizer_gb": 3.68, "model_state_gb": 7.36 },
-  "default_config": { "dtype": "bfloat16", "param_bytes": 2, "optimizer": "adamw" },
+  "memory":   { "weights_gb": 0.92, "grads_gb": 0.92, "optimizer_gb": 1.84, "master_gb": 0.0,
+                "model_state_gb": 3.68 },
+  "default_config": { "dtype": "bfloat16", "param_bytes": 2, "optimizer": "adamw", "finetune": "full" },
+  "effective_batch": 16,
+  "knobs":    { "micro_batch": { "type": "int", "min": 1, "max": 8,
+                                 "max_source": "measured ceiling at max_len" }, ... },
   "flops_per_token": 2963767296.0,
-  "activation_headroom_gb": 16.6,
+  "lora": null,
+  "activation_headroom_gb": 20.3,
   "model_state_fits": true,
   "max_len": 2048,
-  "ceiling":  { "micro_batch_max": 11, "seq_len": 2048, "oom_at": 12, "capped": false,
-                "peak_gb": 21.9, "frag_gb": 0.4, "card_frac": 0.93,
-                "config": { "dtype": "bfloat16", "optimizer": "adamw" }, "trials": [ ... ] },
+  "images": null,
+  "ceiling":  { "seq_len": 2048, "effective_batch": 16, "micro_batch_max": 8, "fits": true,
+                "capped": false, "oom_at": 16, "peak_gb": 21.9, "reserved_gb": 22.3,
+                "frag_gb": 0.4, "card_frac": 0.93,
+                "config": { "dtype": "bfloat16", "gradient_checkpointing": false,
+                            "attn_implementation": "sdpa", "torch_compile": false, "chunked_ce": 0 },
+                "method": "synthetic", "steps_per_trial": 3, "seed": 0, "remeasured_from": null,
+                "trials": [ ... ] },
   "notes":    [ ],
   "summary": "..."
 }
 ```
 
 - **model** — the model's shape + exact parameter count (`params_source` says how it was counted).
-- **dataset** — how long the sequences are, and how many tokens the sample held.
+- **dataset** — how long the sequences are, and how many tokens they hold, over the random pool
+  the probe sample is drawn from (not the sample itself).
 - **hardware** — the **measured** peak FLOP/s (the MFU yardstick) + bandwidth + card memory.
 - **memory** — where the memory goes; pairs with the profiler's *measured* peak to reveal activations.
+- **default_config** — what the memory assumes: the weights' `dtype`, `param_bytes`, the optimizer,
+  `finetune` (`full` / `lora`), plus `base_quant` and `compute_dtype` when set.
+- **effective_batch / knobs** — the human's target, and the framework's searchable surface with
+  `micro_batch.max` stamped from the measured ceiling (`max_source` says so).
 - **flops_per_token / activation_headroom_gb / model_state_fits** — the roofline math and the
   analytical fit check (`model_state_fits` is weights+grads+optimizer only).
 - **lora** — `null` for a full fine-tune. For a LoRA run (`--lora-r` / `--lora-targets`): the rank,
-  the targets, and `params_trainable` / `params_total`. See "LoRA" below.
+  the targets, and `params_trainable` / `params_total`. See "LoRA" above.
+- **images** — `null` unless `--max-image-size` was given; see "Vision-language models" above.
 - **max_len / ceiling** — the human's declared sequence length and the **measured** micro_batch
-  ceiling at it. This is what actually decides whether a config runs; `activation_headroom_gb` only
+  ceiling at it (`fits: false` → even `micro_batch=1` OOMs). This is what actually decides whether a config runs; `activation_headroom_gb` only
   says how much room there was to work with. `null` ceiling means it was not measured — it never
   means "fine".
 - **notes** — things the agent must read before tuning (memory regime, padding-heavy `max_len`, a
@@ -424,6 +460,7 @@ needed, a **shell** that hits the hub or the card.
 | `dataset.py` | the random pool → sequence-length distribution, and the length-stratified probe sample (`draw_sample`, `write_sample`, `read_sample`) |
 | `hardware.py` | assemble hardware facts; `measure()` runs the on-device peak/bandwidth benchmark |
 | `memory.py` | analytical weights/grads/optimizer breakdown |
+| `images.py` | a VLM's image worst case: parse `WxH`, write the ceiling image, scan the data for images per sample, count image tokens |
 | `synthetic.py` | worst-case batch at `max_len` — every sequence full length, seeded |
 | | *consumed by `frameworks/hf.py` (`data="synthetic"`) and `frameworks/torch.py`* |
 | `ceiling.py` | `search_divisors` (pure), `stamp` / `is_stale`, the trial providers (`runner_trial` in-process, `backend_trial` via `backends.run`), `find_ceiling` (Frame), and `python -m frame.ceiling` (re-measure) |
@@ -443,13 +480,15 @@ search is walked on CPU with a simulated OOM), and **live-validated end to end o
 frozen ceilings handed to a real probe, which reused them verbatim:
 
 ```
-Qwen2ForCausalLM (gqa, bfloat16) | 0.5B params | A10G 22.1GB x1 | peak 89 TFLOP/s (measured)
- | full-FT model-state 7.36GB -> model state fits (headroom 14.7GB) | 200 samples, p50 16/p99 317 tok
+Qwen2ForCausalLM (gqa, bfloat16) | 0.5B params | eff-batch 16 | A10G 22.1GB x1 | peak 89 TFLOP/s (measured)
+ | full-FT model-state 3.68GB -> model state fits (headroom 18.4GB)
+ | max_len 2048 (ceiling NOT measured) | 200 samples, p50 16/p99 317 tok
 ```
 
-**Single-GPU** for now; multi-GPU and reading `run.toml` / writing `runs/<id>/profile.json` are
-deferred. The ceiling has run on A10 and A100 cards (`runs/*/ceiling.tsv`). The memory-only,
+**Single-GPU** for now; multi-GPU is deferred. No code reads `run.toml`: the agent passes its
+values as flags, and saves the printed Profile to `runs/<run>/profile.json` (`program.md` Step 2).
+The ceiling has run on A10 and A100 cards. The memory-only,
 divisor-only search and the user-script path (2026-10-02) are unit-tested on CPU; their GPU
 verification is `docs/verification/ceiling.md`. A second ceiling at the dataset's `p99` — whose
-gap from the `max_len` ceiling estimates what `packing` is worth — is one extra
+gap from the `max_len` ceiling shows how much memory padding to `max_len` costs — is one extra
 `find_ceiling(..., seq_len=p99)` call, not yet wired into `frame()`.

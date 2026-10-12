@@ -1,12 +1,14 @@
 # beliefs/ &mdash; the belief store
 
 Cross-run memory, mirroring how Claude's own memory works: one **belief** per markdown file with
-frontmatter, plus an always-loaded index (`index.md`).
+frontmatter (the `Belief` contract's fields: `claim`, `context`, `type`, `evidence`, `confidence`,
+`links`, `superseded`), plus an always-loaded index (`index.md`).
 
 Each belief is an evidence-backed claim keyed by context (`{arch_family, hardware_class, dataset_shape}`)
 so the next run retrieves what's relevant and starts smart. Authored and curated by the agent.
 
-See the `Belief` contract in `loop/contracts.md`. **Live** — populated from the `test_a10G` run.
+See the `Belief` contract in `loop/contracts.md`. **Live** — populated from the A10 runs of
+2026-10-01..09 (`experience/index.md`).
 
 ---
 
@@ -19,8 +21,8 @@ times, and have **opposite** mutation rules.
 |---|---|---|
 | Unit | one dated entry per **run** | one file per **claim** |
 | Answers | *has this configuration been run before?* | *what do we believe about this lever?* |
-| Read | **ONCE, at Frame** (`loop/loop.md` §3), via `experience/index.md` | every hypothesis, via `index.md`, filtered by `context` match |
-| Mutation | **append-only.** Never edit a past entry — it is dated evidence | **curated.** Amend, supersede, delete as evidence lands |
+| Read | **ONCE, at Frame** (`loop/loop.md`, Frame item 3), via `experience/index.md` | every hypothesis, via `index.md`, filtered by `context` match |
+| Mutation | **append-only.** Never edit a past entry — it is dated evidence | **curated** at the end of each run: re-confirm, narrow and split, supersede, delete — never overwrite |
 
 **`experience/` — the run log.** One file per run plus an index of their `Context:` lines,
 the match key Frame searches. See `experience/README.md`.
@@ -29,8 +31,7 @@ the match key Frame searches. See `experience/README.md`.
 transfers. This is what keeps memory from becoming noise as the log grows.
 
 **Promotion copies, it does not move.** A durable claim gets extracted from a run entry into a
-belief file; the run entry stays intact and cross-references it (`experience/test_a10G.md` does
-this). Gutting a past entry would falsify the record of what was believed when.
+belief file; the run entry stays intact and cross-references it. Gutting a past entry would falsify the record of what was believed when.
 
 ## Curating beliefs (`program.md` Step 5, second half)
 

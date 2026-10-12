@@ -3,28 +3,31 @@
 The five data shapes the loop moves. Everything plugs into these — keep them stable.
 
 Flow: Frame builds **Profile** + **SearchSpace** and pulls relevant **Beliefs** →
-Hypothesize emits a **Config** → Test returns an **Observation** → Learn writes **Beliefs**. Repeat.
+Hypothesize emits a **Config** → Test returns an **Observation** → Learn records it. Repeat. The
+run's **Beliefs** are curated at its end (`program.md` Step 5).
 
 Rule: contracts are the only things that cross step boundaries.
 
 ---
 
 ## Profile
-What we know about the situation, before searching. Built once by Frame.
+What we know about the situation, before searching. Built once by Frame (`frame/profile.py`);
+`python -m frame` prints it as JSON, saved to `runs/<run>/profile.json`.
 
 | Field | Meaning |
 |---|---|
 | `model` | internals: layers, hidden, heads, kv_heads, intermediate, vocab, experts/top_k, arch, attention, params, modality, dtype |
-| `hardware` | gpu type, compute capability, memory, count, interconnect, gpus_per_node, nodes, $/hr |
-| `env` | library versions (torch, framework, flash-attn, deepspeed), available kernels |
-| `dataset` | length distribution, total tokens/samples, modality, storage location, schema |
-| `roofline` | peak FLOPs → achievable tokens/s ceiling (the "how good is possible") |
-| `constraint` | effective_batch + max_len targets (human-owned, off-limits) |
-| `ceiling` | MEASURED largest micro_batch that runs at max_len, on worst-case synthetic batches. Carries the `config` it was measured under — compare before trusting it. `null` = not measured, never "fine" |
+| `hardware` | gpu label, device name, SM count, memory (`mem_gb`), count (single GPU), and the **measured** `peak_flops` (at `peak_dtype`) and `peak_mem_bw_gb_s` |
+| `versions` | library versions (torch, transformers, flash_attn): which levers exist |
+| `dataset` | length distribution (p50/p90/p99/max) and volume (samples, tokens) of the sample pool |
+| roofline | `hardware.peak_flops` / `peak_mem_bw_gb_s` + `flops_per_token`: what each probe's MFU and `roofline_floor_s` are computed against. A diagnostic, never a target (`loop/throughput.md`) |
+| `effective_batch`, `max_len` | the human-owned targets (off-limits) |
+| `memory`, `default_config`, `knobs`, `lora`, `images` | model-state estimate and the config it assumes, the framework's searchable knobs (`micro_batch.max` from the ceiling), LoRA / VLM details |
+| `ceiling` | MEASURED largest micro_batch that runs at max_len, on worst-case batches (synthetic for our runner; `ceiling_rows.jsonl` through a user script). Carries the `config` it was measured under — compare before trusting it. `null` = not measured, never "fine" |
 | `notes` | what the agent must read before tuning: memory regime, padding-heavy max_len, a ceiling at the edge of the card |
-| `priors` | Beliefs retrieved by context + researched external priors |
+| priors | Beliefs retrieved by context + researched external priors. Held by the agent, not in the JSON |
 
-Consumed by: Hypothesize, the surrogate, memory (keys on it).
+Consumed by: Hypothesize, memory (keys on it).
 
 ---
 
@@ -39,7 +42,7 @@ What the loop may vary, and the safety bounds. Built by Frame.
 | `fixed` | human-owned constants: model, dataset, hardware, effective_batch, max_len |
 
 Canonical vocabulary is fixed; the projection to a framework is per-run.
-Consumed by: Hypothesize, the surrogate.
+Consumed by: Hypothesize.
 
 ---
 
@@ -49,7 +52,7 @@ One hypothesis — a point in the space.
 | Field | Meaning |
 |---|---|
 | `knobs` | assignments in **canonical** names, e.g. `{micro_batch: 4, shard_degree: 2, compile: default}` |
-| `rationale` | why proposed: parent(s), surrogate prediction, expected outcome |
+| `rationale` | why proposed: parent(s), predicted outcome |
 
 Canonical only. The framework adapter translates to concrete flags/API.
 Consumed by: Test.
@@ -59,19 +62,22 @@ Consumed by: Test.
 ## Observation
 Everything measured from running a Config. Raw and rich.
 
-| Field | Meaning |
+A flat set of fields (`profiler/diagnostic.py`; full table in `profiler/README.md`, "The
+Observation"). Grouped here by what they are for:
+
+| Group | Fields |
 |---|---|
-| `status` | ok / oom / error / invalid (a physically impossible reading — never scored) |
-| `objective` | samples/s (**primary**, from clean-window totals) + tokens/s (discriminator) + MFU (diagnostic only — `loop/throughput.md`) |
-| `memory` | peak, headroom; on OOM: breakdown (what/how much overshot) |
-| `signals` | raw gpu/cpu util, comm, data-wait. **No derived labels** — the model interprets |
-| `provenance` | did the config apply? which kernels engaged vs silently fell back? |
-| `population` | which rows the clean window timed (and over how many whole passes), and which fixed reference batch the trace describes. A **script probe** (the user's own training script, `program.md` "Script mode") says so: `driver: "script"`, `clean_window: "fixed-position"` (not whole passes) and `trace_basis: "traced-step"` (not a reference batch), plus the `script`, `script_args` and `script_files` it ran. Under the axiom below, it is never `same-rows` or `same-reference-batch` evidence |
-| `reliability` | step-time spread (`step_time_cv`), steps measured, passes completed |
-| `error` | on failure: structured cause |
+| status | `status`: ok / oom / error / invalid (a physically impossible reading — never scored) |
+| objective | `samples_per_s` (**primary**, from clean-window totals), `tokens_per_s` (discriminator), `mfu` (diagnostic only — `loop/throughput.md`); `samples_per_step`, `tokens_per_step`, `roofline_floor_s` |
+| memory | `peak_mem_gb`, `reserved_mem_gb`, `mem_total_gb`, `headroom_gb` |
+| signals | `gpu_active_frac`, `gap_s` / `gap_frac`, `data_wait_s` / `data_wait_frac`, `cpu_util_mean` / `cpu_cores_busy`, phase times, `top_kernels`, kernel / gap counts, occupancy. **No derived labels** — the model interprets |
+| provenance | `provenance` (did the config apply? which kernels engaged vs silently fell back?), `device_type` |
+| population | `population`: which rows the clean window timed (and over how many whole passes), and which fixed reference batch the trace describes. A **script probe** (the user's own training script, `program.md` "Script mode") says so: `driver: "script"`, `clean_window: "fixed-position"` (not whole passes) and `trace_basis: "traced-step"` (not a reference batch), plus the `script`, `script_args` and `script_files` it ran. Under the axiom below, it is never `same-rows` or `same-reference-batch` evidence |
+| reliability | `step_time_cv`, `clean_steps_measured`, `clean_passes` |
+| error | `error`: on failure, the cause; on `invalid`, the impossible reading |
 
 Invariant: raw, not pre-digested. The model reads and interprets; code does not label.
-Consumed by: Learn, the surrogate, Hypothesize.
+Consumed by: Learn, Hypothesize.
 
 ### Measurement axiom: one number, one population
 
@@ -101,16 +107,18 @@ times. An *instrument* is either the **clean window** (profiler off) or the **tr
    the reference batch matches (`batch_key`). **Counts and provenance** (kernel count, gap count,
    which kernels ran, dtypes) compare across any batch: they are set by layers x micro-steps, not
    by batch width.
-6. **An impossible value is a population error until proven otherwise.** A fraction above 1 or a
-   negative remainder (e.g. `wall - busy`) means two populations were mixed or the instrument
-   failed. The Observation is marked `invalid` and is not scored.
+6. **An impossible value is a population error until proven otherwise.** A fraction above 1
+   (`gpu_active_frac` or `mfu`, beyond a 2% tolerance) means two populations were mixed or the
+   instrument failed. The Observation is marked `invalid` and is not scored. A negative remainder
+   (`reference_step_s - gpu_busy_s`) only nulls `gap_s`: the reference batch's two executions
+   disagreed, which is worth reading but does not invalidate the Observation.
 7. **A belief is promoted only on evidence that satisfies this axiom.** Each comparison behind it
    must be *same-rows* (clean window, whole passes), *same-reference-batch* (trace durations), or
    *width-invariant* (counts and provenance), and every rate must come from totals. Anything else
    is recorded in the run's `experience/` entry as an observation, never as belief evidence, and
    the belief's `evidence` names which basis it rests on.
 
-Why: every impossible reading in the smollm2 and qwen3.5 A100 runs broke this — one profiled
+Why: every impossible reading observed in earlier runs broke this — one profiled
 batch's busy time over the median clean step (GPU-active 126-560%), mean tokens over median time
 (MFU up to 144%), and partial passes that let loader order decide which rows got timed. Under
 static padding the axiom holds by accident, because every batch is identical; dynamic padding and
@@ -119,15 +127,20 @@ length grouping are what make it necessary.
 ---
 
 ## Belief
-One durable thing learned. A markdown file in `beliefs/`, one claim each.
+One durable thing learned. A markdown file in `beliefs/`, one claim each; these fields are its
+frontmatter (`beliefs/README.md`).
 
 | Field | Meaning |
 |---|---|
 | `claim` | the empirical statement, e.g. "shard_degree=2 fits micro_batch=4 on this profile" |
 | `context` | key for retrieval/transfer: `{arch_family, hardware_class, dataset_shape}` |
-| `evidence` | supporting observations, confidence, probe count, and the **basis** each comparison rests on: `same-rows` / `same-reference-batch` / `width-invariant` (Measurement axiom, corollary 7) |
-| `type` | regime / ceiling / calibration / dead-lever / safety / invariant |
-| `links` | related beliefs |
+| `type` | regime / ceiling / calibration / dead-lever / safety / invariant (the headings of `beliefs/index.md`) |
+| `evidence` | the runs and observations behind it, `probes` (how many), and the **basis** each comparison rests on: `same-rows` / `same-reference-batch` / `width-invariant` (Measurement axiom, corollary 7) |
+| `confidence` | how far to trust it; raised as re-confirmations land |
+| `links` | related beliefs: the other half of a split, the belief that superseded it |
+| `superseded` | set (with a link forward) when a later belief replaces it; the file is kept |
 
-Authored and curated by the model (code is plumbing). Injected at Frame by context match.
-Consumed by: Hypothesize, future Frames, the surrogate (calibration beliefs).
+Authored and curated by the model (code is plumbing). Retrieved by context match at Frame and
+re-read before every hypothesis; curated once, at the end of the run — never overwritten: narrow
+and split on contradiction, mark superseded (`program.md` Step 5, `beliefs/README.md`).
+Consumed by: Hypothesize, future Frames.

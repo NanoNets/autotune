@@ -58,16 +58,18 @@ else is `key=value` or a bare flag. Unknown keys: stop and say which ones, don't
 
 - **Default:** `program.md` Steps 1→5. The Step 3 confirmation gate stays. It is the last point a
   human looks before an unattended night, and this skill never skips it.
-- **`resume`:** `runs/<run_name>/` has to exist with `results.tsv` and `profile.json`. Re-check that
+- **`resume`:** `runs/<run_name>/` has to exist with `results.tsv` and `profile.json` (Frame's
+  Profile JSON, saved at `program.md` Step 2). Re-check that
   the box is reachable and `torch.cuda.is_available()` (the box changes between runs). Read the full
   `results.tsv`, `research.md` and `ceiling.tsv`, then say in one short summary where the run stands:
   best experiment, last experiment, and what was queued next. Before the next probe, check the
   ceiling with `python -m frame.ceiling --config <candidate> --run runs/<run>` (`program.md` Step 4):
   it re-measures only if a memory knob moved. A `profile.json` from before 2026-10-02 stamps only
   `dtype`, so it reads as stale once and gets one re-measure. Continue
-  Step 4, numbering experiments after the last row. If `run.toml` no longer matches the run's
-  `profile.json` on model, dataset, `max_len` or `effective_batch`, stop and say so. That is a new
-  run, not a resume.
+  Step 4, numbering experiments after the last row. If `run.toml` no longer matches the run on
+  `max_len` or `effective_batch` (`profile.json`'s top-level keys), or on model or dataset (the
+  Profile records neither id: check `sample.jsonl`'s `meta.dataset` / `meta.name`, and the
+  Profile's `model.arch` / `model.params`), stop and say so. That is a new run, not a resume.
 - **`review`:** Step 5 only. Never start a probe.
 
 ## Examples
@@ -78,9 +80,9 @@ else is `key=value` or a bare flag. Unknown keys: stop and say which ones, don't
 ```
 
 ```
-/run-loop qwen3.5_2b_a100_wikitext model=Qwen/Qwen3.5-2B dataset=Salesforce/wikitext:wikitext-2-raw-v1 max_len=1024 effective_batch=16 host=ubuntu@gpu-box gpu=A100
-/run-loop qwen3.5_2b_a100_wikitext resume
-/run-loop smollm2_1.7b_a100_wikitext review
+/run-loop my_qwen_run model=Qwen/Qwen3.5-2B dataset=Salesforce/wikitext:wikitext-2-raw-v1 max_len=1024 effective_batch=16 host=ubuntu@gpu-box gpu=A100
+/run-loop my_qwen_run resume
+/run-loop my_qwen_run review
 /run-loop smoke_test model=Qwen/Qwen2.5-0.5B local smoke
 /run-loop                     # everything from run.toml; asks only for the run name
 ```

@@ -5,7 +5,7 @@ What actually happened: one dated entry per **run**, across all runs, one file e
 which holds what we believe; see `beliefs/README.md` for how the two differ.
 
 - **Answers:** *has this configuration been run before?*
-- **Read:** **once, at Frame** (`loop/loop.md` §3). Read `index.md`, match on each `Context:` line,
+- **Read:** **once, at Frame** (`loop/loop.md`, Frame item 3). Read `index.md`, match on each `Context:` line,
   and open only the entries that match or nearly match. Not per hypothesis: the log grows with every
   run, and "have we run this before" is a framing question, asked once. Re-open an entry only when
   a result contradicts the prior Frame matched.
@@ -21,8 +21,8 @@ scratch.
 
 ## Writing an entry (`program.md` Step 5, first half)
 
-When the loop ends (interrupted by the human, or converged), stop and do one more pass before
-handing back: review the *entire* `results.tsv` **and** `research.md` for that run as a whole
+When the human interrupts the loop (or asks for the review: `/run-loop <run> review`), do one
+more pass before handing back: review the *entire* `results.tsv` **and** `research.md` for that run as a whole
 (see `runs/README.md`), not just the last few rows or the most recent search. Pull out what's
 durable, the things worth knowing before the *next* run starts, on this codebase or a different
 model/hardware/dataset:

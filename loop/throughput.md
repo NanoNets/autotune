@@ -16,14 +16,14 @@ samples_per_s — a higher samples/s is strictly shorter training, whatever the 
 ## Why samples/s, and why tokens/s still stays on the page
 
 `tokens/s` counts pad tokens as work, so it **rewards computing padding** — and removing padding has
-been the single largest real lever in every run so far. Measured on `test_a10G`: `micro_batch` 4 → 8
+been the single largest real lever in every run so far. Observed in an earlier run: `micro_batch` 4 → 8
 was **+15% per token and -14% on samples/s**.
 One experiment, opposite verdicts. Rank on samples/s.
 
 The converse is equally real, which is why tokens/s is not deleted. Under `padding="longest"` batch
-width *is* the rows drawn, so `samples/s` is **sample-sensitive**: on
-`smollm2_1.7b_a100_wikitext` the same config moved **1.9x** (264.4 → 138.1) on nothing but the
-probe's row sample, while tokens/s moved **1.3%**.
+width *is* the rows drawn, so `samples/s` is **sample-sensitive**: in an earlier run the same
+config moved **1.9x** (264.4 → 138.1) on nothing but the probe's row sample, while tokens/s moved
+**1.3%**.
 
 **Packing** is not a lever (see *Safe vs off-limits*), but a user's script may already pack, and
 its samples must still be counted right. A packed row holds several examples, so samples are counted from document boundaries
@@ -58,7 +58,7 @@ the change you measured.
 ## MFU is a diagnostic: it is pad-inflated
 
 It is computed from tokens/step, which counts pad, so it is comparable only *within* one padding
-regime. `qwen3.5_2b_a100_wikitext` under static padding reports MFU 49% / GPU-active 100% —
+regime. An earlier run under static padding reported MFU 49% / GPU-active 100% —
 genuinely efficient per token while computing 6.8x too many of them.
 
 ## Safe vs off-limits
@@ -90,7 +90,7 @@ produce — including the long rows a short profiling sample never drew.
 
 **NEVER raise `micro_batch` above the ceiling on the strength of a probe's `headroom_gb`.** Under
 dynamic padding a probe's peak reflects the rows it happened to draw, not the dataset's longest, so
-the headroom it reports is an artifact of the sample. Measured on `test_a10G`: the scan saw max 520
+the headroom it reports is an artifact of the sample. Observed in an earlier run: the scan saw max 520
 tok against `max_len=2048`, so no probe in 23 experiments ever ran the `[8, 2048]` batch the shipped
 config will meet in training — only the ceiling did (17.4GB alloc / 20.7GB reserved of 22.1GB; 9
 OOMs). The ceiling bounds `micro_batch`; an observed peak never does.
@@ -109,4 +109,4 @@ Framework-agnostic. Frame projects these onto what the framework supports.
 | Dataloader | `workers`, `prefetch`, `num_proc` |
 | Precision (safe subset) | `tf32` |
 
-Applicability is model- and framework-dependent (Liger needs supported layers; FA3 needs Hopper; TP needs the framework to expose it). Frame decides which apply; the surrogate predicts effects; probes verify.
+Applicability is model- and framework-dependent (Liger needs supported layers; FA3 needs Hopper; TP needs the framework to expose it). Frame decides which apply; the agent predicts effects (from Beliefs and the Profile — the surrogate isn't built, `search/README.md`); probes verify.
