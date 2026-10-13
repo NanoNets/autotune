@@ -73,8 +73,8 @@ Understand the situation, then set up the search.
 Propose the next Config.
 
 - Reason from the Profile, the run's `results.tsv`, and Beliefs.
-- Rank candidates yourself: predict each one's effect from Beliefs and the Profile, and spend the probe on the best prediction. (A numeric surrogate for this is planned, not built: `search/README.md`.)
-- Keep more than one best in view, not just the fastest: best (throughput), lean (memory), diverse (different strategy), noted in `research.md`. **Cross over** complementary winners. (No frontier code exists yet: `search/README.md`.)
+- Rank candidates yourself: predict each one's effect from Beliefs and the Profile, and spend the probe on the best prediction.
+- Keep more than one best in view, not just the fastest: best (throughput), lean (memory), diverse (different strategy), noted in `research.md`. **Cross over** complementary winners.
 - Every Config carries a rationale and an expected outcome.
 - **Check the ceiling is still valid** before proposing a `micro_batch`. It was measured under one
   set of memory knobs (recompute, attention, optimizer, dtype, sharding, offload, packing, compile,
