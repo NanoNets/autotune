@@ -15,7 +15,7 @@ def _close(a, b, tol=0.01):
 
 def test_bf16_adamw_is_8_bytes_per_param():
     """bf16 weights + torch AdamW: the state follows the weights' dtype, and there's no master
-    copy unless the training code keeps one (final_boss_report T5-C1: Frame said 16, and the
+    copy unless the training code keeps one (Frame said 16, and the
     repo's own bf16 runner trained Qwen2.5-1.5B at micro-batch 2 where Frame said it didn't fit)."""
     m = training_memory(P, param_bytes=2, optimizer="adamw")
     assert _close(m["model_state_gb"], 8 * P / 1024**3)        # 2 + 2 + (2+2)

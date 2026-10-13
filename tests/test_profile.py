@@ -225,7 +225,7 @@ def test_lora_targets_it_cant_count_keep_full_numbers_and_say_so():
 # ---- a quantized base (QLoRA) -----------------------------------------------------------------
 
 def test_a_4bit_base_charges_its_linear_weights_at_half_a_byte():
-    """final_boss_report T5-C2: with no quantization input a 4-bit base was charged 2 B/weight
+    """With no quantization input a 4-bit base was charged 2 B/weight
     (Qwen2.5-7B: 14.79 GiB vs 5.65 measured on an A10)."""
     lora = {"r": 16, "targets": "all-linear"}
     plain, q4 = _profile(lora=lora), _profile(lora=lora, base_quant="4bit")

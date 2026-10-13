@@ -2,6 +2,8 @@
 import os
 import sys
 
+import pytest
+
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from profiler.capture import capture
@@ -33,7 +35,7 @@ def test_supplied_ceilings_are_used_verbatim_and_not_remeasured():
 
 def test_peak_dtype_follows_what_the_runner_trains_in_when_the_config_omits_it(monkeypatch):
     """A config without `dtype` must not measure the peak at torch's fp32 default while the runner
-    trains bf16 (final_boss_report T3-C6: MFU 0.92 read for a true 0.19, status ok). The runner's
+    trains bf16 (MFU 0.92 read for a true 0.19, status ok). The runner's
     module says what it resolves to (frameworks/hf.py: the checkpoint's dtype)."""
     monkeypatch.setattr(sys.modules[__name__], "resolve_dtype",
                         lambda config: config.get("dtype") or "bfloat16", raising=False)
@@ -54,6 +56,10 @@ def test_frozen_ceiling_flows_into_the_observation():
     assert o.peak_flops == 1.0e15 and o.peak_mem_bw_gb_s == 500.0
 
 
+@pytest.mark.skipif(sys.platform != "linux", reason=(
+    "Linux timing: macOS psutil walks the process tree in ~9 ms and its CPU counters read 0.0 below "
+    "~200 ms, so the window crosses _MIN_SAMPLE_S and records a bogus 0.0 (cpu_util_mean is unreliable "
+    "on macOS; probes run on Linux GPU boxes)"))
 def test_cpu_signal_survives_a_window_too_short_to_sample():
     """psutil sampling quantizes to nothing under ~10ms; the counter delta still reports."""
     import time

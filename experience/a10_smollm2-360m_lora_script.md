@@ -2,7 +2,7 @@
 Context: `HuggingFaceTB/SmolLM2-360M` LoRA r16 (7 projections, plain-PyTorch user script `examples/byo_script/torch_lora.py`) · `wikitext-2-raw-v1` · 1x NVIDIA A10 22.06GB (CC 8.6) · bf16 (script sets it; adapters fp32 via peft) · effective_batch 16 · max_len 1024
 Baseline: 27.74 samples/s  →  Best: 116.43 samples/s  (+320%, 4.20x)   # script mode, ssh backend; extended 300-step probe 116.53
 (The baseline, exp 1, is the script's own micro-batch 8, which is ABOVE the measured ceiling of 4 at 1024 eager: a
-denominator, never a recommendation. Exps 1-11 ran on ubuntu@146.235.205.171, exps 12-23 on ubuntu@167.234.223.139, both A10;
+denominator, never a recommendation. Exps 1-11 ran on one A10 box, exps 12-23 on a second;
 the incumbent re-anchored within 1% on the second box, exp 13.)
 Winning config (flags on the verified copy `runs/a10_smollm2-360m_lora_script/train.py` + `_data.py`):
 `--micro-batch 8 --grad-accum 2 --seq-len 1024 --compile --compile-dynamic --padding-free --attn flash_attention_2

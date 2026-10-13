@@ -4,7 +4,7 @@
 `record_function`. A user's script (swift, TRL, a hand-written loop) offers neither. `Attach`
 inverts control: the user's loop runs as-is (started by `profiler/launch.py`), and it produces the
 same `Capture` that `capture()` does, so `diagnose()` is unchanged. What it doesn't measure yet:
-`profiler/README.md`, "Attached capture", and `design_improvements.md` §7–§11.
+`profiler/README.md`, "Attached capture".
 
     att = Attach(device="cuda", peak_flops=..., peak_mem_bw_gb_s=...)
     att.install()              # before the user builds the optimizer
@@ -231,7 +231,7 @@ _QUANT_PARAM_CLASSES = {"Params4bit", "Int8Params"}       # bitsandbytes
 def _is_quantized(p):
     """A packed quantized weight, whatever its storage dtype: bitsandbytes' 4-bit weights can be
     stored as bf16 / fp16 / fp32 (`bnb_4bit_quant_storage`), so a dtype check alone counts their
-    packed numel (final_boss_report T3-C2: 0.466x N on an A10)."""
+    packed numel (0.466x N on an A10)."""
     return type(p).__name__ in _QUANT_PARAM_CLASSES or getattr(p, "quant_state", None) is not None
 
 

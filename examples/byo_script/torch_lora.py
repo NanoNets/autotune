@@ -3,7 +3,7 @@ adapters on every attention / MLP projection. The optimizer gets the adapters on
 
   python torch_lora.py --max-steps 100 --micro-batch 8 --grad-accum 4 [--lora-r 16] [--data-path rows.jsonl]
 
-Defaults match BYO experiment 7 (`design_improvements.md` §10): r=16, alpha 32, dropout 0.05,
+Defaults match BYO experiment 7: r=16, alpha 32, dropout 0.05,
 seq 512, micro_batch 8, grad_accum 4, random tokens. Needs `peft`.
 """
 import argparse

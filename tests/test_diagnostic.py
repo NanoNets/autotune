@@ -287,7 +287,7 @@ def test_unknown_total_means_no_mfu_not_the_trainable_count():
 
 
 def test_fp32_peak_under_bf16_kernels_means_no_mfu_with_the_reason():
-    """final_boss_report T3-C6: the peak measured at fp32 while the matmuls ran bf16."""
+    """The peak measured at fp32 while the matmuls ran bf16."""
     cap = _cap()
     cap.peak_dtype = "float32"                            # TRACE's GEMM is sm80_gemm_bf16
     o = diagnose(cap, params=PARAMS, tokens=TOKENS, gpu=GPU)

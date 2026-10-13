@@ -488,7 +488,7 @@ Qwen2ForCausalLM (gqa, bfloat16) | 0.5B params | eff-batch 16 | A10G 22.1GB x1 |
 **Single-GPU** for now; multi-GPU is deferred. No code reads `run.toml`: the agent passes its
 values as flags, and saves the printed Profile to `runs/<run>/profile.json` (`program.md` Step 2).
 The ceiling has run on A10 and A100 cards. The memory-only,
-divisor-only search and the user-script path (2026-10-02) are unit-tested on CPU; their GPU
-verification is `docs/verification/ceiling.md`. A second ceiling at the dataset's `p99` — whose
+divisor-only search and the user-script path (2026-10-02) are unit-tested on CPU and verified on
+GPU. A second ceiling at the dataset's `p99` — whose
 gap from the `max_len` ceiling shows how much memory padding to `max_len` costs — is one extra
 `find_ceiling(..., seq_len=p99)` call, not yet wired into `frame()`.

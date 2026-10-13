@@ -1,4 +1,4 @@
-"""progress.py's staircase: which rows can be the baseline or the best (final_boss_report T9-C1)."""
+"""progress.py's staircase: which rows can be the baseline or the best."""
 import os
 import sys
 

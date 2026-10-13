@@ -1,6 +1,6 @@
 """Exact counts from a meta-device build (frame.model.with_exact_counts), on tiny configs built
 locally: no hub, no weights. Ground truth is the same model instantiated for real on CPU, and peft
-itself for LoRA when it's installed (final_boss_report T7-C1, T7-C3, VLM theme)."""
+itself for LoRA when it's installed."""
 import os
 import sys
 

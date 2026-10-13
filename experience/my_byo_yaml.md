@@ -37,5 +37,5 @@ Open hypotheses for next run:
   recompute's ~30% extra forward? Per [[recompute-pays-only-instrumentally]], likely not, but 32
   is a legal factorization, so the arithmetic is worth one probe.
 - Compile + fused AdamW (untested combination; expected ~0 at this tokens/step).
-- No OOM ceiling exists for scripts (design_improvements.md §7); the micro-32 OOM was found by
+- No OOM ceiling exists for scripts; the micro-32 OOM was found by
   probing, which is exactly what a ceiling search should have told us up front.
