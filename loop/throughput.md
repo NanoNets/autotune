@@ -109,4 +109,4 @@ Framework-agnostic. Frame projects these onto what the framework supports.
 | Dataloader | `workers`, `prefetch`, `num_proc` |
 | Precision (safe subset) | `tf32` |
 
-Applicability is model- and framework-dependent (Liger needs supported layers; FA3 needs Hopper; TP needs the framework to expose it). Frame decides which apply; the agent predicts effects (from Beliefs and the Profile — the surrogate isn't built, `search/README.md`); probes verify.
+Applicability is model- and framework-dependent (Liger needs supported layers; FA3 needs Hopper; TP needs the framework to expose it). Frame decides which apply; the agent predicts effects (from Beliefs and the Profile); probes verify.
