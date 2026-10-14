@@ -8,7 +8,7 @@ training hardware, so measurements transfer by definition.
 ```
 loop ──▶ backends.run(config) ──▶ [ build runner → capture → diagnose ] ──▶ Observation
                  │
-   config["backend"] routes:  local (in-process)  ·  modal (cloud GPU)  ·  ssh (your own box)
+   config["backend"] routes:  local (in-process)  ·  ssh (your own box)
 ```
 
 **Single GPU only for now** — a box/cluster can host many, but `frame/` and the loop only profile
@@ -24,10 +24,6 @@ Ask the user where the experiments will actually run:
 
 - **Local** (`backend = "local"`, `device = "cuda"`) — the probe runs in-process on this machine's
   device. What you use when you're already on the GPU box, including a rented one.
-- **Modal** (`backend = "modal"`) — serverless cloud GPU. Needs the `modal` package and auth
-  (`modal setup`, or `MODAL_TOKEN_ID`/`MODAL_TOKEN_SECRET` in `.env`). The GPU is taken from
-  `run.toml`'s `gpu` field (e.g. `A10G`, `A100`, `H100`), and the repo is shipped to the worker
-  automatically — nothing to provision.
 - **VM / remote box over SSH** (`backend = "ssh"`) — any rented box / neocloud / your own
   cluster. Built on the system `ssh`/`rsync` binaries, so there's no new Python dependency and your
   existing `~/.ssh/config`, agent and known_hosts keep working. You'll need host/user, and the
@@ -68,7 +64,7 @@ of the loop, so understand what it measures and how before you start interpretin
 from backends import run
 
 obs = run({
-    "backend": "modal", "gpu": "A10G",          # where + which GPU
+    "backend": "local", "gpu": "A10G",          # where + which GPU
     "framework": "hf", "model": "Qwen/Qwen2.5-0.5B",
     "dataset": "Salesforce/wikitext", "name": "wikitext-2-raw-v1",
     "effective_batch": 16, "micro_batch": 4, "seq_len": 1024,   # no dtype: the checkpoint's
@@ -92,7 +88,7 @@ is scored against the same denominator (not a per-probe re-measure).
 - `warmup` / `clean_steps` (default 3 / 10) set the timing window.
 - `timeout` (seconds) kills a hung probe and returns an `error` Observation. Default 1800 for a
   subprocess (script probes and their ceiling trials; the ssh connection waits `timeout` + 300 so the
-  box's answer wins); modal's function timeout defaults to 600. An in-process runner probe on
+  box's answer wins). An in-process runner probe on
   `local` has none. `program.md` sets `timeout: 600` in every probe config.
 - `env` sets environment variables before the probe process starts (e.g.
   `PYTORCH_CUDA_ALLOC_CONF`): on the box for ssh, and for a local script probe's process.
@@ -108,7 +104,7 @@ backends/local.py: run_script → python -m profiler.launch --out cap.json -- <s
                               → cap.json → diagnose() → the same Observation a runner probe returns
 ```
 
-ssh and modal reach this through `backends.local.run` on the box, so all three backends support it.
+ssh reaches this through `backends.local.run` on the box, so both backends support it.
 
 **Ceiling trials** use the same path with `probe_kind: "ceiling_trial"` (built by `frame.ceiling`,
 never by hand): a memory-only run of `trial_steps` optimizer steps at `micro_batch`, returning
@@ -162,7 +158,6 @@ Statuses match runner probes:
 | Backend | What | Status |
 |---|---|---|
 | **local** | in-process on this machine's device — dev, or a box you're already on | built; runs any runner (fixture on CPU, or a real GPU) |
-| **modal** | serverless GPU: ships the repo to Modal, runs on the requested GPU, returns the Observation. `config["gpu"]` is the GPU request | built (Modal 1.5); **live-validated end-to-end on an A10G** |
 | **ssh** | any rented box / neocloud (Lambda, RunPod, …) or your own cluster | built (system ssh/rsync, no new deps); **live-validated end-to-end on an A10** |
 
 ## Adding a runner
@@ -175,9 +170,8 @@ Add a line per adapter. A declared framework must implement the runner interface
 
 - `__init__.py` — the `run(config)` dispatch (routes by `config["backend"]`).
 - `local.py` — in-process `capture → diagnose`; the framework→runner registry.
-- `modal.py` — Modal execution (lazy `import modal`).
 - `ssh.py` — rsync the repo to a box, run `local.run` there over ssh, parse the Observation back
   out of stdout (sentinel-framed, since transformers/datasets share that stream).
 
-Heavy imports (torch, modal) are lazy, so the modules import on bare `python3`; the dispatch +
-registry are unit-tested there. Real execution (local on a GPU box, modal on Modal) is validated live.
+The heavy import (torch) is lazy, so the modules import on bare `python3`; the dispatch +
+registry are unit-tested there. Real execution (local on a GPU box, ssh to one) is validated live.

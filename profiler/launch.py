@@ -3,7 +3,7 @@
   python -m profiler.launch --out cap.json [--device cuda --warmup 3 --clean 10 ...] -- train.py <its args>
 
 The bring-your-own-script entry point. `backends/local.py` runs it in a subprocess when a probe's
-config names a `script`, so every backend (local, ssh, modal) reaches it.
+config names a `script`, so every backend (local, ssh) reaches it.
 
 The script runs as if started directly (`python train.py <its args>`): its `__name__` is
 "__main__", its `sys.argv` is its own, and its directory is on `sys.path`. Nothing in it changes.

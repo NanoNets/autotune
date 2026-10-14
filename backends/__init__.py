@@ -6,13 +6,12 @@ measured once at Frame; the backend runs one probe and hands back the Observatio
 Swappable implementations, picked by `config["backend"]`:
 
 - **local** — in-process on this machine's device (dev, or a box you're already on).
-- **modal** — serverless GPU: elastic, on-demand (the default for cloud probing).
 - **ssh**  — any rented box / neocloud / your own cluster (system ssh/rsync, no new deps).
 
 We assume probe hardware = training hardware, so measurements transfer by definition.
 """
 
-_BACKENDS = {"local", "modal", "ssh"}
+_BACKENDS = {"local", "ssh"}
 
 
 def run(config):

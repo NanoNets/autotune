@@ -1,7 +1,7 @@
 """SSH backend — run the probe on a rented box / neocloud / your own cluster.
 
 Ships this repo to the box with `rsync`, runs the local flow (capture -> diagnose) there over
-`ssh`, and returns the Observation dict. Same contract as `local` and `modal`; the difference is
+`ssh`, and returns the Observation dict. Same contract as `local`; the difference is
 only *where* the work happens.
 
 Built on the **system `ssh`/`rsync` binaries**, not paramiko — no new Python dependency, and the

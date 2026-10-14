@@ -295,7 +295,7 @@ def _render(config, n, steps):
 
 
 def backend_trial(config, steps=TRIAL_STEPS):
-    """`trial(n)` as one `backends.run` each (a fresh process: local, ssh or modal)."""
+    """`trial(n)` as one `backends.run` each (a fresh process: local or ssh)."""
     def trial(n):
         import backends
         return backends.run(_render(config, n, steps))

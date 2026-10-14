@@ -28,7 +28,7 @@ a faster config. The run above took Qwen2.5-0.5B on an A10 from 4.3 to 108.6 sam
 
 ## Quick start
 
-**Requirements:** a single NVIDIA GPU (local, over SSH, or on Modal), Python 3.11+, [uv](https://docs.astral.sh/uv/).
+**Requirements:** a single NVIDIA GPU (local or over SSH), Python 3.11–3.13, [uv](https://docs.astral.sh/uv/).
 
 ```bash
 git clone https://github.com/NanoNets/autotune && cd autotune
@@ -42,6 +42,7 @@ Activate the environment first, then open the repo in [Claude Code](https://clau
 
 ```bash
 source .venv/bin/activate
+set -a; source .env; set +a      # copy .env.example to .env first; nothing else loads it
 claude
 ```
 
@@ -137,7 +138,7 @@ re-checks whenever a memory setting changes.
 program.md     agent instructions
 frame/         sizes up the job, measures the memory ceiling
 profiler/      measures each experiment
-backends/      where experiments run: local, ssh, modal
+backends/      where experiments run: local, ssh
 frameworks/    the built-in Hugging Face runner
 beliefs/       shared beliefs from past runs
 experience/    one record per past run
