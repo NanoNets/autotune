@@ -46,16 +46,6 @@ set -a; source .env; set +a      # copy .env.example to .env first; nothing else
 claude
 ```
 
-**Running on a GPU box over SSH:** each experiment syncs the repo to `~/autotune` on the box and
-runs it with `~/autotune/.venv_at/bin/python`. Create that environment once on the box:
-
-```bash
-python3 -m venv ~/autotune/.venv_at
-~/autotune/.venv_at/bin/pip install torch transformers datasets psutil
-```
-
-To use a different Python, set `python` under `[ssh]` in `run.toml` (see [`backends/README.md`](backends/README.md)).
-
 The bundled skill, [`.claude/skills/run-loop/SKILL.md`](.claude/skills/run-loop/SKILL.md), takes the whole run in one command.
 
 <h3 align="center">Two User Workflows</h3>
