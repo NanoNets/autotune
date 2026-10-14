@@ -28,7 +28,7 @@ a faster config. The run above took Qwen2.5-0.5B on an A10 from 4.3 to 108.6 sam
 
 ## Quick start
 
-**Requirements:** a single NVIDIA GPU (local, over SSH, or on Modal), Python 3.11+, [uv](https://docs.astral.sh/uv/).
+**Requirements:** a single NVIDIA GPU (local or over SSH), Python 3.11–3.13, [uv](https://docs.astral.sh/uv/).
 
 ```bash
 git clone https://github.com/NanoNets/autotune && cd autotune
@@ -42,8 +42,19 @@ Activate the environment first, then open the repo in [Claude Code](https://clau
 
 ```bash
 source .venv/bin/activate
+set -a; source .env; set +a      # copy .env.example to .env first; nothing else loads it
 claude
 ```
+
+**Running on a GPU box over SSH:** each experiment syncs the repo to `~/autotune` on the box and
+runs it with `~/autotune/.venv_at/bin/python`. Create that environment once on the box:
+
+```bash
+python3 -m venv ~/autotune/.venv_at
+~/autotune/.venv_at/bin/pip install torch transformers datasets psutil
+```
+
+To use a different Python, set `python` under `[ssh]` in `run.toml` (see [`backends/README.md`](backends/README.md)).
 
 The bundled skill, [`.claude/skills/run-loop/SKILL.md`](.claude/skills/run-loop/SKILL.md), takes the whole run in one command.
 
@@ -137,7 +148,7 @@ re-checks whenever a memory setting changes.
 program.md     agent instructions
 frame/         sizes up the job, measures the memory ceiling
 profiler/      measures each experiment
-backends/      where experiments run: local, ssh, modal
+backends/      where experiments run: local, ssh
 frameworks/    the built-in Hugging Face runner
 beliefs/       shared beliefs from past runs
 experience/    one record per past run
