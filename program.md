@@ -332,4 +332,5 @@ On top of the usual summary, report:
 
 ## Output Format
 
-*(TBD — to be filled in later.)*
+See [`loop/loop.md`](loop/loop.md#output): the best config and the explanation (regime, ceilings,
+what's dead, samples/s baseline → best, MFU reached as context).

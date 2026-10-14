@@ -6,12 +6,12 @@
 job and a GPU and let it optimize your training throughput. 
 
 <p align="center">
-  <img src="docs/assets/progress_test_a10G.png" alt="An autotune run on an A10: 4.3 to 108.6 samples/s in 23 experiments" width="800">
+  <img src="docs/assets/progress_qwen3.5_2b_a100.png" alt="An autotune run on an A100: 2.15 to 37.5 samples/s in 28 experiments" width="800">
 </p>
 
 It profiles a real training step, works out where the time goes, changes one setting,
 measures again on the GPU, keeps or discards, and repeats. You wake up to a log of experiments and
-a faster config. The run above took Qwen2.5-0.5B on an A10 from 4.3 to 108.6 samples/s.
+a faster config. The run above took Qwen3.5-2B on an A100 from 2.15 to 37.5 samples/s.
 
 
 ## How it works

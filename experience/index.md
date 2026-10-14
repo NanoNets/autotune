@@ -7,6 +7,9 @@ dead levers, open hypotheses) lives in the entry's file. See `experience/README.
 
 Each index line copies its entry's `Context:` line **verbatim**, because that line is the match key.
 
+- [my_byo_yaml](my_byo_yaml.md) — 2026-10-01
+  Context: HuggingFaceTB/SmolLM2-360M · user script `examples/byo_script/trainer_yaml.py` + `train.yaml` (HF Trainer; trains on seeded random 512-token rows, NOT run.toml's wikitext-2) · 1x A10 23GB (CC 8.6) · bf16 · effective_batch 32 · max_len 512
+  Baseline: 12815 tok/s (25.0 samples/s, MFU 32%) → Best: 17465 tok/s (34.1 samples/s, MFU 43%) (+36%)
 - [a10_qwen2.5-0.5b_wikitext](a10_qwen2.5-0.5b_wikitext.md) — 2026-10-08
   Context: `Qwen/Qwen2.5-0.5B` · `wikitext-2-raw-v1` · 1x NVIDIA A10 22.06GB (CC 8.6) · bf16 (checkpoint's, none set) · effective_batch 64 · max_len 2048
   Baseline: 4.158 samples/s → Best: 88.120 samples/s (+2019%, 21.2x)
