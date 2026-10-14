@@ -1,4 +1,4 @@
-"""Profile one config and print the diagnostic — the local tool.
+r"""Profile one config and print the diagnostic — the local tool.
 
   python -m profiler --device cpu --gpu A10G                         # torch fixture runner (smoke)
   python -m profiler --framework hf --device cuda --gpu A10G \       # real HF model, real data

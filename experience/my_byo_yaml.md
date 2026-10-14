@@ -15,8 +15,7 @@ Findings:
 - **micro 32 / accum 1 OOMs even under compile** (peak 20.4 GB on 22.06; it wanted +3 GiB). Without
   recompute, 16 is the largest legal micro-batch on this card at seq 512.
 - **Fused AdamW: -1.3%** uncompiled. Optimizer GPU time was 0.028s of a 1.26s step (2%); at 16k
-  tokens/step there is no fixed optimizer cost to recover. Consistent with
-  [[optimizer-fixed-cost-dominates-small-real-batches]], whose context is small real batches.
+  tokens/step there is no fixed optimizer cost to recover.
 - Dataloader wait 0.1%: workers / pin memory are dead levers for this script.
 
 Surprises / contradictions:
@@ -34,8 +33,8 @@ Open hypotheses for next run:
   installs, or check why inductor picks mem-efficient: GQA expansion / an explicit attention_mask).
   Up to ~0.08s/step (~9%) if the backward drops to flash's cost.
 - micro 32 / accum 1 with `gradient_checkpointing: true` under compile: does the bigger GEMM beat
-  recompute's ~30% extra forward? Per [[recompute-pays-only-instrumentally]], likely not, but 32
-  is a legal factorization, so the arithmetic is worth one probe.
+  recompute's ~30% extra forward? Likely not, but 32 is a legal factorization, so the arithmetic
+  is worth one probe.
 - Compile + fused AdamW (untested combination; expected ~0 at this tokens/step).
 - No OOM ceiling exists for scripts; the micro-32 OOM was found by
   probing, which is exactly what a ceiling search should have told us up front.
