@@ -108,7 +108,7 @@ def test_gpu_phase_times_empty_without_correlation_data():
 
 
 def test_device_props():
-    # real header format captured from an A10 Modal run
+    # real header format captured from an A10 run
     trace = {"deviceProperties": [{"name": "NVIDIA A10", "totalGlobalMem": 23684841472,
                                    "computeMajor": 8, "computeMinor": 6, "numSms": 72}],
              "traceEvents": []}

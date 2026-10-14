@@ -2,7 +2,7 @@
 #
 # The declarative spec for one autotune run: it records the run's inputs for the agent, who passes
 # them to Frame (as flags) and to backends (in each probe config). No code reads this file.
-# Secrets (HF_TOKEN, Modal/SSH auth) live in .env, not here.
+# Secrets (HF_TOKEN, SSH auth) live in .env, not here.
 
 model           = "Qwen/Qwen2.5-0.5B"     # HF hub id or local path
 dataset         = "Salesforce/wikitext"   # HF hub id or local path
@@ -19,7 +19,7 @@ max_len         = 2048                    # REQUIRED. the sequence length your a
 # max_image_size = "672x672"   # the largest image the training code lets through, W x H pixels
 # max_images     = 1           # most images per sample; omit to have Frame scan the data for it
 
-backend = "local"   # "local", "ssh" or "modal" — see backends/README.md
+backend = "local"   # "local" or "ssh" — see backends/README.md
 device  = "cuda"    # what the probe runs ON. "cuda" for any GPU box; single-GPU only, so no
                     # "cuda:0". "cpu" is a smoke test — a well-formed Observation whose MFU is
                     # meaningless — so ask for it deliberately. Delete this line to auto-detect

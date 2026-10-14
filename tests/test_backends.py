@@ -1,8 +1,8 @@
-"""backends tests — the pure dispatch surface (no torch / GPU / Modal).
+"""backends tests — the pure dispatch surface (no torch / GPU).
 
-The local/modal `run()` needs torch, a device, or Modal, so end-to-end runs are validated live.
+The local `run()` needs torch and a device, so end-to-end runs are validated live.
 What's testable here: the dispatch/validation, and that the modules IMPORT clean on bare python3
-(proving the heavy imports — torch, modal — are lazy inside `run`, not at module load).
+(proving the heavy import — torch — is lazy inside `run`, not at module load).
 """
 import os
 import sys
@@ -11,16 +11,15 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import backends
 import backends.local
-import backends.modal
 import backends.ssh
 from backends.local import _make_runner, _resolve_device
 from backends.ssh import _settings, _ssh_cmd, payload_config
 
 
 def test_modules_import_clean_on_bare_python3():
-    # If torch/modal weren't lazy, these imports would have already failed on a bare interpreter.
+    # If torch weren't lazy, these imports would have already failed on a bare interpreter.
     assert callable(backends.run)
-    assert callable(backends.local.run) and callable(backends.modal.run)
+    assert callable(backends.local.run)
     assert callable(backends.ssh.run)
 
 
