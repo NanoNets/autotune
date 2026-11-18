@@ -24,6 +24,7 @@ def main():
     tok, _ = tokenizer_for(a.model)
     with open(a.src) as f:
         texts = [json.loads(line)["text"] for line in f if line.strip()]
+    # nosemgrep: pickles-in-pytorch -- example fixture mimicking a user script; loads only the .pt that prep.py wrote locally
     torch.save([tok(t, add_special_tokens=False)["input_ids"] for t in texts], a.out)
     print(f"wrote {len(texts)} rows to {a.out}")
 

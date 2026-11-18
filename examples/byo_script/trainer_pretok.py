@@ -25,6 +25,7 @@ def main():
     margs, targs = HfArgumentParser((ModelArgs, TrainingArguments)).parse_args_into_dataclasses()
     model = AutoModelForCausalLM.from_pretrained(margs.model_name, attn_implementation="sdpa")
     _, pad = tokenizer_for(margs.model_name)
+    # nosemgrep: pickles-in-pytorch -- example fixture mimicking a user script; loads only the .pt that prep.py wrote locally
     data = TokenRows(torch.load(margs.data_path), margs.seq_len)
     Trainer(model=model, args=targs, train_dataset=data, data_collator=pad_collate(pad)).train()
 
